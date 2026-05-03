@@ -158,6 +158,25 @@ qboolean jedi_waiting_ambush(const gentity_t* self);
 qboolean Rosh_BeingHealed(const gentity_t* self);
 qboolean jedi_forbidden_kicker(const gentity_t* self);
 
+// Difficulty-based special attack helpers
+static int jedi_get_kata_cooldown_duration()
+{
+	// Kata cooldown duration based on difficulty
+	// Padawan (g_spskill 0): 10-16 seconds (more recovery time)
+	// Jedi (g_spskill 1): 7-12 seconds (standard)
+	// Jedi Knight / Jedi Master (g_spskill 2): 5-9 seconds (faster attacks)
+	switch (g_spskill->integer)
+	{
+	case 0: // Padawan
+		return Q_irand(10000, 16000);
+	case 1: // Jedi
+		return Q_irand(7000, 12000);
+	case 2: // Jedi Knight / Jedi Master
+	default:
+		return Q_irand(5000, 9000);
+	}
+}
+
 static qboolean enemy_in_striking_range = qfalse;
 static int jediSpeechDebounceTime[TEAM_NUM_TEAMS]; //used to stop several jedi from speaking all at once
 
@@ -9730,7 +9749,7 @@ static qboolean Jedi_CheckKataAttack()
 							{
 								ucmd.buttons |= BUTTON_ALT_ATTACK;
 							}
-							TIMER_Set(NPC, "noKata", Q_irand(6000, 12000));
+							TIMER_Set(NPC, "noKata", jedi_get_kata_cooldown_duration());
 							return qtrue;
 						}
 					}
@@ -10169,7 +10188,7 @@ static void JediHandleSpacing(gentity_t* self)
 								self->client->ps.saber_move = LS_SPINATTACK;   // Spin
 								break;
 							}
-							TIMER_Set(NPC, "noKata", Q_irand(6000, 12000));
+							TIMER_Set(NPC, "noKata", jedi_get_kata_cooldown_duration());
 						}
 					}
 
@@ -10213,7 +10232,7 @@ static void JediHandleSpacing(gentity_t* self)
 					{
 						self->client->ps.saber_move = BOTH_LUNGE2_B__T_;
 						self->client->ps.weaponTime = level.time + 400;
-						TIMER_Set(NPC, "noKata", Q_irand(6000, 12000));
+						TIMER_Set(NPC, "noKata", jedi_get_kata_cooldown_duration());
 					}
 				}
 
