@@ -1039,6 +1039,12 @@ sfxHandle_t S_RegisterSound(const char* name)
 
 	sfx_t* sfx = s_find_name(name);
 
+	if (!sfx)
+	{
+		Com_Printf(S_COLOR_RED "S_RegisterSound: s_find_name returned NULL for '%s'\n", name ? name : "(null)");
+		return 0;
+	}
+
 	SND_TouchSFX(sfx);
 
 	if (sfx->bDefaultSound)
