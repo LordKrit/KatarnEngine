@@ -149,7 +149,6 @@ extern qboolean char_is_force_user_attacker(const gentity_t* self);
 extern qboolean wp_saber_Off_Dash_Evasion(gentity_t* self, vec3_t hitloc);
 extern cvar_t* d_slowmodeath;
 extern cvar_t* g_saberNewControlScheme;
-extern cvar_t* g_npcSpecialAttackFreq;
 extern int parryDebounce[];
 extern cvar_t* g_AllowMawKick;
 void NPC_CheckEvasion(void);
@@ -9322,19 +9321,10 @@ static qboolean Jedi_CheckKataAttack()
 						//not going to try to jump
 
 						// Special attack frequency modifier
-						float freqMod = Com_Clamp(0.0f, 1.0f, g_npcSpecialAttackFreq->value);
-						bool doSpecial = false;
-
-						if (Q_irand(0, g_spskill->integer + 1) && !Q_irand(0, 9)) {
-							// A lower freqMod value means a lower chance of a special attack.
-							if (freqMod >= Q_flrand(0.0f, 1.0f)) {
-								doSpecial = true;
-							}
-						}
-
-						if (doSpecial) {
-							ucmd.upmove = 0;
-							VectorClear(NPC->client->ps.moveDir);
+						if (Q_irand(0, g_spskill->integer + 1) //50% chance on easy, 66% on medium, 75% on hard
+							&& !Q_irand(0, 9)) //10% chance overall
+						{
+							//base on skill level
 							if (g_saberNewControlScheme->integer)
 							{
 								ucmd.buttons |= BUTTON_FORCE_FOCUS;
