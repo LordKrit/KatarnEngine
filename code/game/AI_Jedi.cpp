@@ -149,6 +149,7 @@ extern qboolean char_is_force_user_attacker(const gentity_t* self);
 extern qboolean wp_saber_Off_Dash_Evasion(gentity_t* self, vec3_t hitloc);
 extern cvar_t* d_slowmodeath;
 extern cvar_t* g_saberNewControlScheme;
+extern cvar_t* g_npcSpecialAttackFreq;
 extern int parryDebounce[];
 extern cvar_t* g_AllowMawKick;
 void NPC_CheckEvasion(void);
@@ -157,25 +158,6 @@ void NPC_CheckEvasion(void);
 qboolean jedi_waiting_ambush(const gentity_t* self);
 qboolean Rosh_BeingHealed(const gentity_t* self);
 qboolean jedi_forbidden_kicker(const gentity_t* self);
-
-// Difficulty-based special attack helpers
-static int jedi_get_kata_cooldown_duration()
-{
-	// Kata cooldown duration based on difficulty
-	// Padawan (g_spskill 0): 10-16 seconds (more recovery time)
-	// Jedi (g_spskill 1): 7-12 seconds (standard)
-	// Jedi Knight / Jedi Master (g_spskill 2): 5-9 seconds (faster attacks)
-	switch (g_spskill->integer)
-	{
-	case 0: // Padawan
-		return Q_irand(10000, 16000);
-	case 1: // Jedi
-		return Q_irand(7000, 12000);
-	case 2: // Jedi Knight / Jedi Master
-	default:
-		return Q_irand(5000, 9000);
-	}
-}
 
 static qboolean enemy_in_striking_range = qfalse;
 static int jediSpeechDebounceTime[TEAM_NUM_TEAMS]; //used to stop several jedi from speaking all at once
@@ -9737,10 +9719,20 @@ static qboolean Jedi_CheckKataAttack()
 						//not going to try to jump
 
 						// Special attack frequency modifier
-						if (Q_irand(0, g_spskill->integer + 1) //50% chance on easy, 66% on medium, 75% on hard
-							&& !Q_irand(0, 9)) //10% chance overall
-						{
-							//base on skill level
+						float freqMod = Com_Clamp(0.0f, 1.0f, g_npcSpecialAttackFreq->value);
+						bool doSpecial = false;
+
+						// 50% chance on easy, 66% on medium, 75% on hard - 10% chance overall
+						if (Q_irand(0, g_spskill->integer + 1) && !Q_irand(0, 9)) {
+							// A lower freqMod value means a lower chance of a special attack.
+							if (freqMod >= Q_flrand(0.0f, 1.0f)) {
+								doSpecial = true;
+							}
+						}
+
+						if (doSpecial) {
+							ucmd.upmove = 0;
+							VectorClear(NPC->client->ps.moveDir);
 							if (g_saberNewControlScheme->integer)
 							{
 								ucmd.buttons |= BUTTON_FORCE_FOCUS;
@@ -9749,7 +9741,7 @@ static qboolean Jedi_CheckKataAttack()
 							{
 								ucmd.buttons |= BUTTON_ALT_ATTACK;
 							}
-							TIMER_Set(NPC, "noKata", jedi_get_kata_cooldown_duration());
+							TIMER_Set(NPC, "noKata", Q_irand(6000, 12000));
 							return qtrue;
 						}
 					}
@@ -10188,7 +10180,7 @@ static void JediHandleSpacing(gentity_t* self)
 								self->client->ps.saber_move = LS_SPINATTACK;   // Spin
 								break;
 							}
-							TIMER_Set(NPC, "noKata", jedi_get_kata_cooldown_duration());
+							TIMER_Set(NPC, "noKata", Q_irand(6000, 12000));
 						}
 					}
 
@@ -10232,7 +10224,7 @@ static void JediHandleSpacing(gentity_t* self)
 					{
 						self->client->ps.saber_move = BOTH_LUNGE2_B__T_;
 						self->client->ps.weaponTime = level.time + 400;
-						TIMER_Set(NPC, "noKata", jedi_get_kata_cooldown_duration());
+						TIMER_Set(NPC, "noKata", Q_irand(6000, 12000));
 					}
 				}
 
