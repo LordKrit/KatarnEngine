@@ -16493,9 +16493,7 @@ qboolean G_CanKickEntity(const gentity_t* self, const gentity_t* target)
 	if (target && target->client
 		&& !PM_InKnockDown(&target->client->ps)
 		&& !PM_SaberInMassiveBounce(self->client->ps.torsoAnim)
-		&& G_EnemyInKickRange(self, target)
-		&& ((target->client->ps.weapon == WP_SABER && target->client->ps.saberFatigueChainCount < MISHAPLEVEL_HEAVY) ||
-			(target->client->ps.weapon != WP_SABER && target->client->ps.BlasterAttackChainCount < BLASTERMISHAPLEVEL_HEAVY)))
+		&& G_EnemyInKickRange(self, target))
 	{
 		return qtrue;
 	}

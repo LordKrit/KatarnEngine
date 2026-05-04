@@ -474,9 +474,17 @@ static qboolean npc_can_do_slap()
 		|| PM_SaberInBrokenParry(NPC->client->ps.saber_move)
 		|| (g_AllowMawKick->integer < 1 && jedi_forbidden_kicker(NPC))
 		|| NPC->client->ps.groundEntityNum == ENTITYNUM_NONE
-		|| NPC->client->NPC_class == CLASS_YODA
-		|| (g_SerenityJediEngineMode->integer == 2 && NPC->client->ps.blockPoints < BLOCKPOINTS_FIVE)
-		|| NPC->client->ps.forcePower < BLOCKPOINTS_FIVE)
+		|| NPC->client->NPC_class == CLASS_YODA)
+	{
+		return qfalse;
+	}
+
+	// Only slap if the enemy is fatigued
+	if (NPC->enemy && NPC->enemy->client &&
+		((NPC->enemy->client->ps.weapon == WP_SABER && NPC->enemy->client->ps.saberFatigueChainCount <= MISHAPLEVEL_LIGHT) ||
+		(NPC->enemy->client->ps.weapon != WP_SABER && NPC->enemy->client->ps.BlasterAttackChainCount <= BLASTERMISHAPLEVEL_LIGHT) ||
+		(g_SerenityJediEngineMode->integer == 2 && NPC->enemy->client->ps.blockPoints > BLOCKPOINTS_KNOCKAWAY) ||
+		(g_SerenityJediEngineMode->integer != 2 && NPC->enemy->client->ps.forcePower > BLOCKPOINTS_KNOCKAWAY)))
 	{
 		return qfalse;
 	}
@@ -2028,10 +2036,6 @@ static qboolean jedi_decide_kick()
 	{
 		return qfalse;
 	}
-	if (NPC->enemy->s.number < MAX_CLIENTS)
-	{
-		return qfalse;
-	}
 	if (g_AllowMawKick->integer < 1 && jedi_forbidden_kicker(NPC))
 	{
 		//never kick
@@ -2050,6 +2054,19 @@ static qboolean jedi_decide_kick()
 	if (!TIMER_Done(NPC, "kickDebounce"))
 	{
 		//just did one
+		return qfalse;
+	}
+	if (Q_irand(0, 3) == 0) {
+		// random chance
+		return qfalse;
+	}
+	if (NPC->enemy && NPC->enemy->client &&
+		((NPC->enemy->client->ps.weapon == WP_SABER && NPC->enemy->client->ps.saberFatigueChainCount <= MISHAPLEVEL_LIGHT) ||
+		(NPC->enemy->client->ps.weapon != WP_SABER && NPC->enemy->client->ps.BlasterAttackChainCount <= BLASTERMISHAPLEVEL_LIGHT) ||
+		(g_SerenityJediEngineMode->integer == 2 && NPC->enemy->client->ps.blockPoints > BLOCKPOINTS_KNOCKAWAY) ||
+		(g_SerenityJediEngineMode->integer != 2 && NPC->enemy->client->ps.forcePower > BLOCKPOINTS_KNOCKAWAY)))
+	{
+		// enemy is not fatigued
 		return qfalse;
 	}
 	if (PM_SaberInMassiveBounce(NPC->client->ps.torsoAnim)
@@ -2233,8 +2250,7 @@ static qboolean NPC_HandleSlapMelee(gentity_t* NPC, gentity_t* enemy, int enemyD
 	// 3. can_slap
 	// ------------------------------------------------------------
 	qboolean can_slap = (qboolean)
-		(g_spskill->integer > 1 &&
-		g_SerenityJediEngineMode->integer &&
+		(g_SerenityJediEngineMode->integer &&
 		!in_camera &&
 		npc_can_do_slap() &&
 		in_melee_range &&
