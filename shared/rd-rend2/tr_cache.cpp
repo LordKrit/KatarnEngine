@@ -259,6 +259,12 @@ qboolean CModelCacheManager::LevelLoadEnd(qboolean deleteUnusedByLevel)
 				bAtLeastOneModelFreed = qtrue;	// FIXME: is this correct? shouldn't it be in the next lower scope?
 			}
 
+			auto assetIt = FindAsset(it->path);
+			if (assetIt != assets.end())
+			{
+				assets.erase(assetIt);
+			}
+
 			it = files.erase(it);
 		}
 		else
