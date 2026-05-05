@@ -192,6 +192,12 @@ void CModelCacheManager::DumpNonPure(void)
 			if (it->pDiskImage)
 				Z_Free(it->pDiskImage);
 
+			auto assetIt = FindAsset(it->path);
+			if (assetIt != assets.end())
+			{
+				assets.erase(assetIt);
+			}
+
 			it = files.erase(it);
 		}
 		else
