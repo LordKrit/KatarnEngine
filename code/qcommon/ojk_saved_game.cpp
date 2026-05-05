@@ -804,8 +804,6 @@ namespace ojk
 
 		error_message_ = "SG: " + error_message_;
 
-		Com_Printf("^1SG: %s^7\n", error_message_.c_str());
-
 		Com_Error(
 			ERR_DROP,
 			"%s",
