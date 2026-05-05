@@ -2845,7 +2845,7 @@ static void S_GetSoundtime()
 	s_soundtime = buffers * fullsamples + samplepos / dma.channels;
 
 // FIX: Enable overflow protection to prevent stuttering
-#if 1
+#if 0
 	// check to make sure that we haven't overshot
 	if (s_paintedtime < s_soundtime)
 	{
