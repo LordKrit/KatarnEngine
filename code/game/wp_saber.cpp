@@ -32820,9 +32820,11 @@ static void ForceLightningDamage(gentity_t* self, gentity_t* traceEnt, vec3_t di
 					{
 						G_KnockOver(traceEnt, self, dir, 25, qtrue);
 					}
-					else if (!PM_RunningAnim(traceEnt->client->ps.legsAnim) && !PM_InKnockDown(&traceEnt->client->ps)
-						&& traceEnt->client->ps.groundEntityNum != ENTITYNUM_NONE && traceEnt->client->ps.stats[
-							STAT_HEALTH] > 1)
+					else if (traceEnt->client && 
+						!PM_RunningAnim(traceEnt->client->ps.legsAnim) &&
+						!PM_InKnockDown(&traceEnt->client->ps) &&
+						traceEnt->client->ps.groundEntityNum != ENTITYNUM_NONE && 
+						traceEnt->client->ps.stats[STAT_HEALTH] > 1)
 					{
 						if (traceEnt->client->ps.stats[STAT_HEALTH] < 75)
 						{
@@ -33652,9 +33654,11 @@ static void ForceLightningDamage_AMD(gentity_t* self, gentity_t* traceEnt, vec3_
 					{
 						G_KnockOver(traceEnt, self, dir, 25, qtrue);
 					}
-					else if (!PM_RunningAnim(traceEnt->client->ps.legsAnim) && !PM_InKnockDown(&traceEnt->client->ps)
-						&& traceEnt->client->ps.groundEntityNum != ENTITYNUM_NONE && traceEnt->client->ps.stats[
-							STAT_HEALTH] > 1)
+					else if (traceEnt->client && 
+						!PM_RunningAnim(traceEnt->client->ps.legsAnim) &&
+						!PM_InKnockDown(&traceEnt->client->ps) &&
+						traceEnt->client->ps.groundEntityNum != ENTITYNUM_NONE &&
+						traceEnt->client->ps.stats[STAT_HEALTH] > 1)
 					{
 						if (traceEnt->client->ps.stats[STAT_HEALTH] < 75)
 						{
@@ -34381,7 +34385,6 @@ static void ForceLightningDamage_MD(gentity_t* self, gentity_t* traceEnt, vec3_t
 						gentity_t* tent = G_TempEntity(traceEnt->currentOrigin, EV_STUNNED);
 						tent->owner = traceEnt;
 					}
-
 					if (traceEnt->client &&
 						traceEnt->health > 1 &&
 						(PM_RunningAnim(traceEnt->client->ps.legsAnim) ||
@@ -34391,10 +34394,11 @@ static void ForceLightningDamage_MD(gentity_t* self, gentity_t* traceEnt, vec3_t
 					{
 						G_KnockOver(traceEnt, self, dir, 25, qtrue);
 					}
-					else if (!PM_RunningAnim(traceEnt->client->ps.legsAnim) &&
+					else if (traceEnt->client &&
+						!PM_RunningAnim(traceEnt->client->ps.legsAnim) &&
 						!PM_InKnockDown(&traceEnt->client->ps) &&
 						traceEnt->client->ps.groundEntityNum != ENTITYNUM_NONE &&
-						traceEnt->health > 1)
+						traceEnt->client->ps.stats[STAT_HEALTH] > 1)
 					{
 						if (traceEnt->health < 75)
 						{
