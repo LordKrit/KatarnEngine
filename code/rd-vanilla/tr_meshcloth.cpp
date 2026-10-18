@@ -2,15 +2,18 @@
 ===========================================================================
 Mesh cloth - see tr_meshcloth.h.
 
-Per surface (shared by every character using that model):
-  particles  vertices welded by position, so UV seams can't tear apart
-  freedom    0 = follows the animation exactly, 1 = fully free
+Per model LOD ("group", shared by every character using that model):
+  surfaces   every cloth surface of the model, simulated together
+  particles  vertices welded by bind position across all those surfaces,
+             so UV seams and stitched pieces can't tear apart
+  freedom    0 = follows the animation exactly, 1 = fully free; vertices
+             touching a non-cloth surface are forced to 0 (closed seams)
   links      triangle edges (structural) and the opposite corners of
-             neighbouring triangles (bend), both lengths taken from the
-             animated pose each step, so the modelled folds are kept
+             neighbouring triangles (bend); lengths come from the animated
+             pose each step, so the modelled folds are kept
 
 Per character instance:
-  positions/previous positions of the particles (Verlet), fixed 16 ms steps.
+  particle positions (Verlet), fixed 16 ms steps, results per vertex.
 ===========================================================================
 */
 
@@ -34,6 +37,7 @@ const int	MC_STALE_MS		= 250;
 const float	MC_TELEPORT		= 120.0f;
 const int	MC_FORGET_MS	= 10000;
 const float	MC_MARGIN		= 0.6f;
+const float	MC_WELD			= 0.01f;	// bind-pose distance that counts as the same point
 
 enum mcRuleType_t { MC_RULE_ABOVE, MC_RULE_NEAR, MC_RULE_SEGMENT };
 
@@ -45,38 +49,39 @@ struct mcDef_t {
 	float			shape;
 };
 
-struct mcMesh_t {
-	const mcDef_t		*def;
-	int					numVerts;
-	int					numParticles;
-	std::vector<int>	vertToParticle;
-	std::vector<int>	particleVert;		// one representative vertex per particle
-	std::vector<float>	freedom;			// per particle
-	std::vector<int>	linkA, linkB;
-	std::vector<char>	linkBend;
-	std::vector<int>	tris;				// particle indices, 3 per triangle
-	std::vector<int>	vtris;				// vertex indices, 3 per triangle (normals)
+struct mcGroup_t {
+	std::vector<const mdxmSurface_t *>	surfs;
+	std::vector<const mcDef_t *>		defs;
+	std::vector<int>					vertBase;		// first global vertex of each surface
+	int									numVerts;
+	int									numParticles;
+	std::vector<int>					vertToParticle;	// global vertex -> particle
+	std::vector<int>					partSurf, partVert;	// representative surface / local vertex
+	std::vector<float>					freedom, tether, shape;	// per particle
+	std::vector<int>					linkA, linkB;
+	std::vector<char>					linkBend;
+	std::vector<int>					tris;			// particle indices
+};
+
+struct mcSurfEntry_t {
+	mcGroup_t	*group;			// nullptr = not cloth
+	int			surfIndex;		// index into group->surfs
+	int			numVerts, numTris, index;	// to notice a reused address after a model reload
 };
 
 struct mcInstance_t {
-	const mdxmSurface_t	*surface;
+	const mcGroup_t		*group;
 	bool				active;
-	int					lastTime;
-	int					lastSeen;
-	int					accum;
-	std::vector<float>	p, prev, target, targetPrev;	// 3 floats per particle, world space
-	std::vector<float>	outLocal;						// 3 per particle, model space
-	std::vector<float>	nrmLocal;						// 3 per particle, model space
-	std::vector<float>	scratchTarget, scratchFrom, scratchTo, scratchN;	// reused every frame
-	int					outTime;
+	int					lastTime, lastSeen, accum, outTime;
+	std::vector<float>	p, prev, target, targetPrev;	// 3 per particle, world
+	std::vector<float>	outLocal, nrmLocal;				// 3 per particle, model space
+	std::vector<float>	skinNrm;						// 3 per global vertex, model space
+	std::vector<float>	scratchTarget, scratchFrom, scratchTo, scratchN;
 };
 
 std::vector<mcDef_t>										g_defs;
-struct mcMeshEntry_t {
-	mcMesh_t	*mesh;					// nullptr = not cloth
-	int			numVerts, numTris, index;	// to notice a reused address after a model reload
-};
-std::unordered_map<const mdxmSurface_t *, mcMeshEntry_t>		g_meshes;
+std::unordered_map<const mdxmSurface_t *, mcSurfEntry_t>	g_surfs;
+std::vector<mcGroup_t *>									g_groups;
 std::unordered_map<unsigned long long, mcInstance_t *>		g_instances;
 int															g_lastPrune;
 
@@ -92,7 +97,6 @@ inline void  mcCopy( const float *a, float *o ) { o[0] = a[0]; o[1] = a[1]; o[2]
 inline float mcLen( const float *a ) { return sqrtf( mcDot( a, a ) ); }
 inline void  mcCross( const float *a, const float *b, float *o ) { o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; }
 inline float mcNorm( float *a ) { float l = mcLen( a ); if ( l > 1e-12f ) { float i = 1.0f / l; a[0] *= i; a[1] *= i; a[2] *= i; } return l; }
-
 inline float Clamp01( float v ) { return v < 0.0f ? 0.0f : ( v > 1.0f ? 1.0f : v ); }
 
 const char *ModelFolder( const char *modelName, char *buf, int bufSize ) {
@@ -113,8 +117,7 @@ float DistToSegment( const float *p, const float *a, const float *b ) {
 	mcSub( b, a, ab );
 	mcSub( p, a, ap );
 	float L = mcDot( ab, ab );
-	float t = ( L > 1e-6f ) ? mcDot( ap, ab ) / L : 0.0f;
-	t = Clamp01( t );
+	float t = ( L > 1e-6f ) ? Clamp01( mcDot( ap, ab ) / L ) : 0.0f;
 	mcMA( a, t, ab, c );
 	mcSub( p, c, c );
 	return mcLen( c );
@@ -141,9 +144,7 @@ float RuleFreedom( const mcDef_t *d, const float *v ) {
 	return 0.0f;
 }
 
-const mcDef_t *FindDef( const char *modelName, const char *surfaceName ) {
-	char folder[MAX_QPATH];
-	ModelFolder( modelName, folder, sizeof( folder ) );
+const mcDef_t *FindDef( const char *folder, const char *surfaceName ) {
 	for ( const mcDef_t &d : g_defs ) {
 		if ( !Q_stricmp( d.model.c_str(), folder ) && !Q_stricmp( d.surface.c_str(), surfaceName ) ) return &d;
 	}
@@ -154,71 +155,151 @@ const mdxmVertex_t *Verts( const mdxmSurface_t *s ) {
 	return reinterpret_cast<const mdxmVertex_t *>( reinterpret_cast<const byte *>( s ) + s->ofsVerts );
 }
 
-mcMesh_t *BuildMesh( const mdxmSurface_t *s, const mcDef_t *def ) {
-	mcMesh_t *m = new mcMesh_t;
-	m->def = def;
-	m->numVerts = s->numVerts;
-	const mdxmVertex_t *v = Verts( s );
+const mdxmHeader_t *HeaderOf( const mdxmSurface_t *s ) {
+	return reinterpret_cast<const mdxmHeader_t *>( reinterpret_cast<const byte *>( s ) + s->ofsHeader );
+}
 
-	// weld by bind-pose position
-	m->vertToParticle.assign( s->numVerts, -1 );
-	std::unordered_map<long long, std::vector<int>> grid;
-	auto key = []( const float *p ) {
-		long long x = (long long)floorf( p[0] * 100.0f ), y = (long long)floorf( p[1] * 100.0f ), z = (long long)floorf( p[2] * 100.0f );
-		return ( x * 73856093LL ) ^ ( y * 19349663LL ) ^ ( z * 83492791LL );
-	};
-	for ( int i = 0; i < s->numVerts; i++ ) {
-		long long k = key( v[i].vertCoords );
-		int found = -1;
-		for ( int j : grid[k] ) {
-			vec3_t d;
-			mcSub( v[i].vertCoords, v[j].vertCoords, d );
-			if ( mcDot( d, d ) < 1e-6f ) { found = m->vertToParticle[j]; break; }
+const char *SurfaceName( const mdxmHeader_t *h, int index ) {
+	const auto ho = reinterpret_cast<const mdxmHierarchyOffsets_t *>( reinterpret_cast<const byte *>( h ) + sizeof( mdxmHeader_t ) );
+	const auto sh = reinterpret_cast<const mdxmSurfHierarchy_t *>( reinterpret_cast<const byte *>( ho ) + ho->offsets[index] );
+	return sh->name;
+}
+
+// all surfaces of the LOD that contains s
+std::vector<const mdxmSurface_t *> LodSurfaces( const mdxmSurface_t *s ) {
+	std::vector<const mdxmSurface_t *> out;
+	const mdxmHeader_t *h = HeaderOf( s );
+	const byte *lod = reinterpret_cast<const byte *>( h ) + h->ofsLODs;
+	for ( int l = 0; l < h->numLODs; l++ ) {
+		const auto lh = reinterpret_cast<const mdxmLOD_t *>( lod );
+		const auto lso = reinterpret_cast<const mdxmLODSurfOffset_t *>( lod + sizeof( mdxmLOD_t ) );
+		const byte *end = lod + lh->ofsEnd;
+		if ( reinterpret_cast<const byte *>( s ) >= lod && reinterpret_cast<const byte *>( s ) < end ) {
+			for ( int i = 0; i < h->numSurfaces; i++ ) {
+				out.push_back( reinterpret_cast<const mdxmSurface_t *>( reinterpret_cast<const byte *>( lso ) + lso->offsets[i] ) );
+			}
+			return out;
 		}
-		if ( found < 0 ) {
-			found = (int)m->particleVert.size();
-			m->particleVert.push_back( i );
+		lod = end;
+	}
+	out.push_back( s );
+	return out;
+}
+
+struct mcWeldGrid_t {
+	std::unordered_map<long long, std::vector<int>> cells;
+	std::vector<const float *> pts;
+	static long long Key( long long x, long long y, long long z ) { return ( x * 73856093LL ) ^ ( y * 19349663LL ) ^ ( z * 83492791LL ); }
+	static long long Cell( float v ) { return (long long)floorf( v * 10.0f ); }	// 0.1 unit cells
+	void Add( const float *p, int id ) {
+		if ( (int)pts.size() <= id ) pts.resize( id + 1 );
+		pts[id] = p;
+		cells[Key( Cell( p[0] ), Cell( p[1] ), Cell( p[2] ) )].push_back( id );
+	}
+	int Find( const float *p ) const {
+		long long cx = Cell( p[0] ), cy = Cell( p[1] ), cz = Cell( p[2] );
+		for ( long long dx = -1; dx <= 1; dx++ ) for ( long long dy = -1; dy <= 1; dy++ ) for ( long long dz = -1; dz <= 1; dz++ ) {
+			auto it = cells.find( Key( cx + dx, cy + dy, cz + dz ) );
+			if ( it == cells.end() ) continue;
+			for ( int id : it->second ) {
+				vec3_t d;
+				mcSub( p, pts[id], d );
+				if ( mcDot( d, d ) < MC_WELD * MC_WELD ) return id;
+			}
 		}
-		m->vertToParticle[i] = found;
-		grid[k].push_back( i );
+		return -1;
 	}
-	m->numParticles = (int)m->particleVert.size();
+};
 
-	m->freedom.resize( m->numParticles );
-	for ( int p = 0; p < m->numParticles; p++ ) {
-		m->freedom[p] = RuleFreedom( def, v[m->particleVert[p]].vertCoords );
+mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
+	const mdxmHeader_t *h = HeaderOf( seed );
+	std::vector<const mdxmSurface_t *> all = LodSurfaces( seed );
+	mcGroup_t *g = new mcGroup_t;
+	std::vector<const mdxmSurface_t *> rigid;
+	for ( const mdxmSurface_t *s : all ) {
+		const char *name = SurfaceName( h, s->thisSurfaceIndex );
+		const mcDef_t *def = FindDef( folder, name );
+		if ( def && s->numVerts > 0 && s->numTriangles > 0 ) {
+			g->surfs.push_back( s );
+			g->defs.push_back( def );
+		} else if ( name[0] != '*' && !strstr( name, "_off" ) && s->numVerts > 0 ) {
+			rigid.push_back( s );	// tags (*name) and dismemberment caps (_off) don't count as seams
+		}
 	}
 
-	// triangles -> structural links, plus bend links across shared edges
-	const int *tri = reinterpret_cast<const int *>( reinterpret_cast<const byte *>( s ) + s->ofsTriangles );
-	std::unordered_map<unsigned long long, int> edgeOther;	// edge -> opposite particle of first triangle
+	// rigid seam points
+	mcWeldGrid_t rigidGrid;
+	int rid = 0;
+	for ( const mdxmSurface_t *s : rigid ) {
+		const mdxmVertex_t *v = Verts( s );
+		for ( int i = 0; i < s->numVerts; i++ ) rigidGrid.Add( v[i].vertCoords, rid++ );
+	}
+
+	// weld cloth vertices across surfaces
+	mcWeldGrid_t grid;
+	g->numVerts = 0;
+	for ( size_t si = 0; si < g->surfs.size(); si++ ) {
+		g->vertBase.push_back( g->numVerts );
+		g->numVerts += g->surfs[si]->numVerts;
+	}
+	g->vertToParticle.assign( g->numVerts, -1 );
+	for ( size_t si = 0; si < g->surfs.size(); si++ ) {
+		const mdxmSurface_t *s = g->surfs[si];
+		const mdxmVertex_t *v = Verts( s );
+		for ( int i = 0; i < s->numVerts; i++ ) {
+			int p = grid.Find( v[i].vertCoords );
+			float f = RuleFreedom( g->defs[si], v[i].vertCoords );
+			if ( rigidGrid.Find( v[i].vertCoords ) >= 0 ) f = 0.0f;	// seam with a non-cloth surface
+			if ( p < 0 ) {
+				p = (int)g->partSurf.size();
+				g->partSurf.push_back( (int)si );
+				g->partVert.push_back( i );
+				g->freedom.push_back( f );
+				g->tether.push_back( g->defs[si]->tether );
+				g->shape.push_back( g->defs[si]->shape );
+				grid.Add( v[i].vertCoords, p );
+			} else {
+				// shared by two pieces: the more attached and the shorter tether win
+				if ( f < g->freedom[p] ) g->freedom[p] = f;
+				if ( g->defs[si]->tether < g->tether[p] ) g->tether[p] = g->defs[si]->tether;
+				if ( g->defs[si]->shape > g->shape[p] ) g->shape[p] = g->defs[si]->shape;
+			}
+			g->vertToParticle[g->vertBase[si] + i] = p;
+		}
+	}
+	g->numParticles = (int)g->partSurf.size();
+
+	// links from every cloth triangle
+	std::unordered_map<unsigned long long, int> edgeOther;
 	std::unordered_map<unsigned long long, char> haveLink;
-	auto ekey = []( int a, int b ) { if ( a > b ) std::swap( a, b ); return ( (unsigned long long)a << 32 ) | (unsigned)b; };
+	auto ekey = []( int a, int b ) { if ( a > b ) { int t = a; a = b; b = t; } return ( (unsigned long long)a << 32 ) | (unsigned)b; };
 	auto addLink = [&]( int a, int b, char bend ) {
 		if ( a == b ) return;
 		unsigned long long k = ekey( a, b );
 		if ( haveLink.count( k ) ) return;
 		haveLink[k] = 1;
-		m->linkA.push_back( a ); m->linkB.push_back( b ); m->linkBend.push_back( bend );
+		g->linkA.push_back( a ); g->linkB.push_back( b ); g->linkBend.push_back( bend );
 	};
-	for ( int t = 0; t < s->numTriangles; t++ ) {
-		int vi[3] = { tri[t * 3], tri[t * 3 + 1], tri[t * 3 + 2] };
-		int pi[3];
-		for ( int k = 0; k < 3; k++ ) {
-			m->vtris.push_back( vi[k] );
-			pi[k] = m->vertToParticle[vi[k]];
-			m->tris.push_back( pi[k] );
-		}
-		for ( int k = 0; k < 3; k++ ) {
-			int a = pi[k], b = pi[( k + 1 ) % 3], o = pi[( k + 2 ) % 3];
-			addLink( a, b, 0 );
-			unsigned long long ek = ekey( a, b );
-			auto it = edgeOther.find( ek );
-			if ( it == edgeOther.end() ) edgeOther[ek] = o;
-			else addLink( it->second, o, 1 );
+	for ( size_t si = 0; si < g->surfs.size(); si++ ) {
+		const mdxmSurface_t *s = g->surfs[si];
+		const int *tri = reinterpret_cast<const int *>( reinterpret_cast<const byte *>( s ) + s->ofsTriangles );
+		for ( int t = 0; t < s->numTriangles; t++ ) {
+			int pi[3];
+			for ( int k = 0; k < 3; k++ ) {
+				pi[k] = g->vertToParticle[g->vertBase[si] + tri[t * 3 + k]];
+				g->tris.push_back( pi[k] );
+			}
+			for ( int k = 0; k < 3; k++ ) {
+				int a = pi[k], b = pi[( k + 1 ) % 3], o = pi[( k + 2 ) % 3];
+				addLink( a, b, 0 );
+				unsigned long long ek = ekey( a, b );
+				auto it = edgeOther.find( ek );
+				if ( it == edgeOther.end() ) edgeOther[ek] = o;
+				else addLink( it->second, o, 1 );
+			}
 		}
 	}
-	return m;
+	return g;
 }
 
 inline void ToWorld( const float *l, const vec3_t origin, const vec3_t axis[3], float *w ) {
@@ -241,6 +322,24 @@ inline void DirToLocal( const float *w, const vec3_t axis[3], float *l ) {
 	}
 }
 
+// Skin one vertex exactly like RB_SurfaceGhoul.
+void SkinVertex( const mdxmSurface_t *s, int i, mcBoneFn_t boneFn, void *ctx, float *outPos, float *outNrm ) {
+	const mdxmVertex_t *v = &Verts( s )[i];
+	const int *refs = reinterpret_cast<const int *>( reinterpret_cast<const byte *>( s ) + s->ofsBoneReferences );
+	const int nw = G2_GetVertWeights( v );
+	float tot = 0.0f;
+	outPos[0] = outPos[1] = outPos[2] = 0.0f;
+	outNrm[0] = outNrm[1] = outNrm[2] = 0.0f;
+	for ( int k = 0; k < nw; k++ ) {
+		const float w = G2_GetVertBoneWeight( v, k, tot, nw );
+		const float (*m)[4] = boneFn( ctx, refs[G2_GetVertBoneIndex( v, k )] );
+		for ( int r = 0; r < 3; r++ ) {
+			outPos[r] += w * ( m[r][0] * v->vertCoords[0] + m[r][1] * v->vertCoords[1] + m[r][2] * v->vertCoords[2] + m[r][3] );
+			outNrm[r] += w * ( m[r][0] * v->normal[0] + m[r][1] * v->normal[1] + m[r][2] * v->normal[2] );
+		}
+	}
+}
+
 // Push p out of the body capsules - but never further out than where the
 // animation itself puts this vertex (target). Robes are often modelled a
 // little inside the capsule shapes; forcing those parts out fights their
@@ -256,7 +355,6 @@ void Collide( float *p, const float *target, const mcCapsule_t *caps, int n ) {
 		mcSub( p, cl, out );
 		float d = mcLen( out ), minD = caps[c].r + MC_MARGIN;
 		if ( d >= minD || d < 1e-4f ) continue;
-		// how deep the animated position already is
 		vec3_t at, ac, ao;
 		mcSub( target, caps[c].a, at );
 		float tt = ( L > 1e-6f ) ? Clamp01( mcDot( at, ab ) / L ) : 0.0f;
@@ -268,70 +366,37 @@ void Collide( float *p, const float *target, const mcCapsule_t *caps, int n ) {
 	}
 }
 
-void ParticleNormals( const mcMesh_t *m, const std::vector<float> &pos, std::vector<float> &n ) {
-	n.assign( (size_t)m->numParticles * 3, 0.0f );
-	for ( size_t t = 0; t + 2 < m->tris.size(); t += 3 ) {
-		const float *a = &pos[m->tris[t] * 3], *b = &pos[m->tris[t + 1] * 3], *c = &pos[m->tris[t + 2] * 3];
+void ParticleNormals( const mcGroup_t *g, const std::vector<float> &pos, std::vector<float> &n ) {
+	n.assign( (size_t)g->numParticles * 3, 0.0f );
+	for ( size_t t = 0; t + 2 < g->tris.size(); t += 3 ) {
+		const float *a = &pos[g->tris[t] * 3], *b = &pos[g->tris[t + 1] * 3], *c = &pos[g->tris[t + 2] * 3];
 		vec3_t e1, e2, fn;
 		mcSub( b, a, e1 );
 		mcSub( c, a, e2 );
 		mcCross( e1, e2, fn );
 		for ( int k = 0; k < 3; k++ ) {
-			float *d = &n[m->tris[t + k] * 3];
+			float *d = &n[g->tris[t + k] * 3];
 			mcAdd( d, fn, d );
 		}
 	}
-	for ( int p = 0; p < m->numParticles; p++ ) mcNorm( &n[p * 3] );
+	for ( int p = 0; p < g->numParticles; p++ ) mcNorm( &n[p * 3] );
 }
 
-void Constrain( const mcMesh_t *m, mcInstance_t *in, const mcCapsule_t *caps, int ncaps, int iters ) {
-	const float tether = m->def->tether;
-	for ( int it = 0; it < iters; it++ ) {
-		for ( size_t l = 0; l < m->linkA.size(); l++ ) {
-			int a = m->linkA[l], b = m->linkB[l];
-			float wa = m->freedom[a] > 0.0f ? 1.0f : 0.0f, wb = m->freedom[b] > 0.0f ? 1.0f : 0.0f;
-			if ( wa + wb == 0.0f ) continue;
-			float *pa = &in->p[a * 3], *pb = &in->p[b * 3];
-			vec3_t dT, d;
-			mcSub( &in->target[b * 3], &in->target[a * 3], dT );
-			float rest = mcLen( dT );
-			mcSub( pb, pa, d );
-			float len = mcLen( d );
-			if ( len < 1e-5f ) continue;
-			if ( m->linkBend[l] && len <= rest ) continue;	// bend links only resist stretching
-			float k = ( len - rest ) / ( len * ( wa + wb ) );
-			if ( m->linkBend[l] ) k *= 0.5f;
-			mcMA( pa, k * wa, d, pa );
-			mcMA( pb, -k * wb, d, pb );
-		}
-		for ( int p = 0; p < m->numParticles; p++ ) {
-			float f = m->freedom[p], *pp = &in->p[p * 3];
-			const float *t = &in->target[p * 3];
-			if ( f <= 0.0f ) { mcCopy( t, pp ); continue; }
-			Collide( pp, t, caps, ncaps );
-			// tether: never further from the animated position than freedom * tether
-			vec3_t d;
-			mcSub( pp, t, d );
-			float len = mcLen( d ), maxLen = f * tether;
-			if ( len > maxLen && len > 1e-5f ) mcMA( t, maxLen / len, d, pp );
-		}
-	}
-}
-
-// Only the capsules that can reach this surface: bounds of the animated
+// Only the capsules that can reach the cloth: bounds of the animated free
 // positions grown by the tether, against each capsule's bounds.
-int CullCapsules( const mcMesh_t *m, const std::vector<float> &target, const mcCapsule_t *caps, int ncaps,
+int CullCapsules( const mcGroup_t *g, const std::vector<float> &target, const mcCapsule_t *caps, int ncaps,
 				  mcCapsule_t *out, int maxOut ) {
 	vec3_t mins = { 1e9f, 1e9f, 1e9f }, maxs = { -1e9f, -1e9f, -1e9f };
-	for ( int p = 0; p < m->numParticles; p++ ) {
-		if ( m->freedom[p] <= 0.0f ) continue;
+	float grow = MC_MARGIN;
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] <= 0.0f ) continue;
+		if ( g->tether[p] + MC_MARGIN > grow ) grow = g->tether[p] + MC_MARGIN;
 		for ( int k = 0; k < 3; k++ ) {
 			float v = target[p * 3 + k];
 			if ( v < mins[k] ) mins[k] = v;
 			if ( v > maxs[k] ) maxs[k] = v;
 		}
 	}
-	float grow = m->def->tether + MC_MARGIN;
 	int n = 0;
 	for ( int c = 0; c < ncaps && n < maxOut; c++ ) {
 		bool overlap = true;
@@ -345,7 +410,40 @@ int CullCapsules( const mcMesh_t *m, const std::vector<float> &target, const mcC
 	return n;
 }
 
-void Reset( const mcMesh_t *m, mcInstance_t *in, int time ) {
+void Constrain( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps, int iters ) {
+	for ( int it = 0; it < iters; it++ ) {
+		for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+			int a = g->linkA[l], b = g->linkB[l];
+			float wa = g->freedom[a] > 0.0f ? 1.0f : 0.0f, wb = g->freedom[b] > 0.0f ? 1.0f : 0.0f;
+			if ( wa + wb == 0.0f ) continue;
+			float *pa = &in->p[a * 3], *pb = &in->p[b * 3];
+			vec3_t dT, d;
+			mcSub( &in->target[b * 3], &in->target[a * 3], dT );
+			float rest = mcLen( dT );
+			mcSub( pb, pa, d );
+			float len = mcLen( d );
+			if ( len < 1e-5f ) continue;
+			if ( g->linkBend[l] && len <= rest ) continue;	// bend links only resist stretching
+			float k = ( len - rest ) / ( len * ( wa + wb ) );
+			if ( g->linkBend[l] ) k *= 0.5f;
+			mcMA( pa, k * wa, d, pa );
+			mcMA( pb, -k * wb, d, pb );
+		}
+		for ( int p = 0; p < g->numParticles; p++ ) {
+			float f = g->freedom[p], *pp = &in->p[p * 3];
+			const float *t = &in->target[p * 3];
+			if ( f <= 0.0f ) { mcCopy( t, pp ); continue; }
+			Collide( pp, t, caps, ncaps );
+			// tether: never further from the animated position than freedom * tether
+			vec3_t d;
+			mcSub( pp, t, d );
+			float len = mcLen( d ), maxLen = f * g->tether[p];
+			if ( len > maxLen && len > 1e-5f ) mcMA( t, maxLen / len, d, pp );
+		}
+	}
+}
+
+void Reset( mcInstance_t *in, int time ) {
 	in->p = in->target;
 	in->prev = in->target;
 	in->targetPrev = in->target;
@@ -354,14 +452,13 @@ void Reset( const mcMesh_t *m, mcInstance_t *in, int time ) {
 	in->active = true;
 }
 
-void Step( const mcMesh_t *m, mcInstance_t *in, const std::vector<float> &tgtFrom, const std::vector<float> &tgtTo,
+void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFrom, const std::vector<float> &tgtTo,
 		   const mcCapsule_t *caps, int ncaps, const mcParams_t *prm ) {
 	std::vector<float> &n = in->scratchN;
-	ParticleNormals( m, in->p, n );
-	const float shape = Clamp01( m->def->shape * prm->shapeScale );
+	ParticleNormals( g, in->p, n );
 	in->target.assign( tgtTo.begin(), tgtTo.end() );
-	for ( int p = 0; p < m->numParticles; p++ ) {
-		float f = m->freedom[p], *pp = &in->p[p * 3], *pv = &in->prev[p * 3];
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		float f = g->freedom[p], *pp = &in->p[p * 3], *pv = &in->prev[p * 3];
 		if ( f <= 0.0f ) {
 			mcCopy( &tgtTo[p * 3], pp );
 			mcCopy( &tgtFrom[p * 3], pv );
@@ -377,12 +474,84 @@ void Step( const mcMesh_t *m, mcInstance_t *in, const std::vector<float> &tgtFro
 		mcMA( pp, MC_DT * MC_DT, acc, pp );
 		// keep the modelled shape: pull a little toward the animated position,
 		// more strongly where the vertex is less free
-		float s = shape + ( 1.0f - f ) * 0.15f;
+		float s = Clamp01( g->shape[p] * prm->shapeScale ) + ( 1.0f - f ) * 0.15f;
 		vec3_t d;
 		mcSub( &tgtTo[p * 3], pp, d );
 		mcMA( pp, s, d, pp );
 	}
-	Constrain( m, in, caps, ncaps, prm->iterations );
+	Constrain( g, in, caps, ncaps, prm->iterations );
+}
+
+void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t origin, const vec3_t axis[3],
+			   const mcCapsule_t *caps, int ncaps, const mcParams_t *prm, mcBoneFn_t boneFn, void *boneCtx ) {
+	// animated (target) positions of every particle, and skinned normals of every vertex
+	std::vector<float> &target = in->scratchTarget;
+	target.resize( (size_t)g->numParticles * 3 );
+	in->skinNrm.resize( (size_t)g->numVerts * 3 );
+	std::vector<char> done( g->numParticles, 0 );
+	for ( size_t si = 0; si < g->surfs.size(); si++ ) {
+		const mdxmSurface_t *s = g->surfs[si];
+		for ( int i = 0; i < s->numVerts; i++ ) {
+			const int gv = g->vertBase[si] + i, p = g->vertToParticle[gv];
+			vec3_t pos;
+			SkinVertex( s, i, boneFn, boneCtx, pos, &in->skinNrm[gv * 3] );
+			if ( !done[p] ) { ToWorld( pos, origin, axis, &target[p * 3] ); done[p] = 1; }
+		}
+	}
+
+	if ( in->active ) {
+		const int dt = timeMs - in->lastTime;
+		vec3_t d;
+		mcSub( &target[0], &in->targetPrev[0], d );
+		if ( dt < 0 || dt > MC_STALE_MS || mcLen( d ) > MC_TELEPORT ) in->active = false;
+	}
+	mcCapsule_t nearCaps[32];
+	const int nnear = CullCapsules( g, target, caps, ncaps, nearCaps, 32 );
+	if ( !in->active ) {
+		in->target.assign( target.begin(), target.end() );
+		Reset( in, timeMs );
+	} else {
+		const int dt = timeMs - in->lastTime;
+		int steps = 0;
+		if ( dt > 0 ) {
+			in->accum += dt;
+			steps = in->accum / MC_STEP_MS;
+			if ( steps > MC_MAX_STEPS ) { steps = MC_MAX_STEPS; in->accum = 0; }
+			else in->accum -= steps * MC_STEP_MS;
+			std::vector<float> &from = in->scratchFrom, &to = in->scratchTo;
+			from.resize( target.size() );
+			to.resize( target.size() );
+			for ( int s = 0; s < steps; s++ ) {
+				const float t0 = (float)s / steps, t1 = (float)( s + 1 ) / steps;
+				for ( size_t i = 0; i < target.size(); i++ ) {
+					const float d0 = target[i] - in->targetPrev[i];
+					from[i] = in->targetPrev[i] + d0 * t0;
+					to[i] = in->targetPrev[i] + d0 * t1;
+				}
+				Step( g, in, from, to, nearCaps, nnear, prm );
+			}
+			in->targetPrev.assign( target.begin(), target.end() );
+			in->lastTime = timeMs;
+		}
+		// frames without a full step still follow the current pose, so a
+		// fast limb never ends up inside stale cloth
+		if ( steps == 0 ) {
+			in->target.assign( target.begin(), target.end() );
+			Constrain( g, in, nearCaps, nnear, 1 );
+		}
+	}
+
+	// results back into model space, with normals from the moving triangles
+	std::vector<float> &nw = in->scratchN;
+	ParticleNormals( g, in->p, nw );
+	in->outLocal.resize( (size_t)g->numParticles * 3 );
+	in->nrmLocal.resize( (size_t)g->numParticles * 3 );
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		ToLocal( &in->p[p * 3], origin, axis, &in->outLocal[p * 3] );
+		DirToLocal( &nw[p * 3], axis, &in->nrmLocal[p * 3] );
+		mcNorm( &in->nrmLocal[p * 3] );
+	}
+	in->outTime = timeMs;
 }
 
 } // namespace
@@ -427,53 +596,72 @@ int MC_LoadConfig( const char *text ) {
 }
 
 void MC_Clear( void ) {
-	for ( auto &kv : g_meshes ) delete kv.second.mesh;
-	g_meshes.clear();
+	for ( mcGroup_t *g : g_groups ) delete g;
+	g_groups.clear();
+	g_surfs.clear();
 	for ( auto &kv : g_instances ) delete kv.second;
 	g_instances.clear();
 }
 
 bool MC_IsClothSurface( const void *surfacePtr, const char *modelName, const char *surfaceName ) {
 	const mdxmSurface_t *surface = static_cast<const mdxmSurface_t *>( surfacePtr );
-	auto it = g_meshes.find( surface );
-	if ( it != g_meshes.end() ) {
-		const mcMeshEntry_t &e = it->second;
+	auto it = g_surfs.find( surface );
+	if ( it != g_surfs.end() ) {
+		const mcSurfEntry_t &e = it->second;
 		if ( e.numVerts == surface->numVerts && e.numTris == surface->numTriangles && e.index == surface->thisSurfaceIndex ) {
-			return e.mesh != nullptr;
+			return e.group != nullptr;
 		}
-		// same address, different surface: the model was reloaded
-		delete e.mesh;
-		for ( auto ii = g_instances.begin(); ii != g_instances.end(); ) {
-			if ( ii->second->surface == surface ) { delete ii->second; ii = g_instances.erase( ii ); }
-			else ++ii;
-		}
+		// same address, different surface: models were reloaded - start over
+		std::vector<mcDef_t> keep = g_defs;
+		MC_Clear();
+		g_defs = keep;
 	}
-	const mcDef_t *def = FindDef( modelName, surfaceName );
-	mcMeshEntry_t e;
-	e.mesh = ( def && surface->numVerts > 0 && surface->numTriangles > 0 ) ? BuildMesh( surface, def ) : nullptr;
+
+	char folder[MAX_QPATH];
+	ModelFolder( modelName, folder, sizeof( folder ) );
+	mcSurfEntry_t e;
+	e.group = nullptr;
+	e.surfIndex = -1;
 	e.numVerts = surface->numVerts;
 	e.numTris = surface->numTriangles;
 	e.index = surface->thisSurfaceIndex;
-	g_meshes[surface] = e;
-	return e.mesh != nullptr;
+	if ( FindDef( folder, surfaceName ) ) {
+		mcGroup_t *g = BuildGroup( surface, folder );
+		g_groups.push_back( g );
+		for ( size_t si = 0; si < g->surfs.size(); si++ ) {
+			mcSurfEntry_t ge;
+			ge.group = g;
+			ge.surfIndex = (int)si;
+			ge.numVerts = g->surfs[si]->numVerts;
+			ge.numTris = g->surfs[si]->numTriangles;
+			ge.index = g->surfs[si]->thisSurfaceIndex;
+			g_surfs[g->surfs[si]] = ge;
+		}
+		auto gi = g_surfs.find( surface );
+		if ( gi != g_surfs.end() ) return gi->second.group != nullptr;
+	}
+	g_surfs[surface] = e;
+	return false;
 }
 
 void MC_Apply( const void *surfacePtr, const void *instanceKey, int timeMs,
 			   const vec3_t origin, const vec3_t axis[3],
 			   const mcCapsule_t *caps, int ncaps, const mcParams_t *prm,
+			   mcBoneFn_t boneFn, void *boneCtx,
 			   float (*xyz)[4], float (*normal)[4] ) {
 	const mdxmSurface_t *surface = static_cast<const mdxmSurface_t *>( surfacePtr );
-	auto mit = g_meshes.find( surface );
-	if ( mit == g_meshes.end() || !mit->second.mesh ) return;
-	const mcMesh_t *m = mit->second.mesh;
-	if ( m->numVerts != surface->numVerts ) return;
+	auto sit = g_surfs.find( surface );
+	if ( sit == g_surfs.end() || !sit->second.group ) return;
+	const mcGroup_t *g = sit->second.group;
+	const int si = sit->second.surfIndex;
+	if ( g->surfs[si]->numVerts != surface->numVerts ) return;
 
-	unsigned long long key = (unsigned long long)(size_t)instanceKey * 31ULL ^ (unsigned long long)(size_t)surface;
+	const unsigned long long key = (unsigned long long)(size_t)instanceKey * 31ULL ^ (unsigned long long)(size_t)g;
 	mcInstance_t *in;
 	auto iit = g_instances.find( key );
 	if ( iit == g_instances.end() ) {
 		in = new mcInstance_t;
-		in->surface = surface;
+		in->group = g;
 		in->active = false;
 		in->outTime = -1;
 		g_instances[key] = in;
@@ -482,80 +670,24 @@ void MC_Apply( const void *surfacePtr, const void *instanceKey, int timeMs,
 	}
 	in->lastSeen = timeMs;
 
-	// the same surface can be drawn several times a frame (shadows, mirrors):
-	// simulate once, then reuse
+	// the first cloth surface drawn this frame simulates the whole model;
+	// the others (and shadow/mirror passes) reuse the result
 	if ( in->outTime != timeMs || !in->active ) {
-		std::vector<float> &target = in->scratchTarget;
-		target.resize( m->numParticles * 3 );
-		for ( int p = 0; p < m->numParticles; p++ ) ToWorld( xyz[m->particleVert[p]], origin, axis, &target[p * 3] );
-
-		if ( in->active ) {
-			int dt = timeMs - in->lastTime;
-			vec3_t d;
-			mcSub( &target[0], &in->targetPrev[0], d );
-			if ( dt < 0 || dt > MC_STALE_MS || mcLen( d ) > MC_TELEPORT ) in->active = false;
-		}
-		mcCapsule_t near[32];
-		int nnear = CullCapsules( m, target, caps, ncaps, near, 32 );
-		if ( !in->active ) {
-			in->target.assign( target.begin(), target.end() );
-			Reset( m, in, timeMs );
-		} else {
-			int dt = timeMs - in->lastTime;
-			int steps = 0;
-			if ( dt > 0 ) {
-				in->accum += dt;
-				steps = in->accum / MC_STEP_MS;
-				if ( steps > MC_MAX_STEPS ) { steps = MC_MAX_STEPS; in->accum = 0; }
-				else in->accum -= steps * MC_STEP_MS;
-				std::vector<float> &from = in->scratchFrom, &to = in->scratchTo;
-				from.resize( target.size() );
-				to.resize( target.size() );
-				for ( int s = 0; s < steps; s++ ) {
-					float t0 = (float)s / steps, t1 = (float)( s + 1 ) / steps;
-					for ( size_t i = 0; i < target.size(); i++ ) {
-						float d0 = target[i] - in->targetPrev[i];
-						from[i] = in->targetPrev[i] + d0 * t0;
-						to[i] = in->targetPrev[i] + d0 * t1;
-					}
-					Step( m, in, from, to, near, nnear, prm );
-				}
-				in->targetPrev.assign( target.begin(), target.end() );
-				in->lastTime = timeMs;
-			}
-			// frames without a full step still follow the current pose, so a
-			// fast limb never ends up inside stale cloth
-			if ( steps == 0 ) {
-				in->target.assign( target.begin(), target.end() );
-				Constrain( m, in, near, nnear, 1 );
-			}
-		}
-
-		// results back into model space, with normals from the moving triangles
-		std::vector<float> &nw = in->scratchN;
-		ParticleNormals( m, in->p, nw );
-		in->outLocal.resize( m->numParticles * 3 );
-		in->nrmLocal.resize( m->numParticles * 3 );
-		for ( int p = 0; p < m->numParticles; p++ ) {
-			ToLocal( &in->p[p * 3], origin, axis, &in->outLocal[p * 3] );
-			DirToLocal( &nw[p * 3], axis, &in->nrmLocal[p * 3] );
-			mcNorm( &in->nrmLocal[p * 3] );
-		}
-		in->outTime = timeMs;
+		Simulate( g, in, timeMs, origin, axis, caps, ncaps, prm, boneFn, boneCtx );
 	}
 
-	for ( int i = 0; i < m->numVerts; i++ ) {
-		int p = m->vertToParticle[i];
-		float f = m->freedom[p];
+	const int base = g->vertBase[si];
+	for ( int i = 0; i < surface->numVerts; i++ ) {
+		const int p = g->vertToParticle[base + i];
+		const float f = g->freedom[p];
 		if ( f <= 0.0f ) continue;
 		mcCopy( &in->outLocal[p * 3], xyz[i] );
-		// keep the model's normal direction convention (two-sided seams etc.)
+		// keep this vertex's side of the surface (two-sided robes, seams)
 		const float *cn = &in->nrmLocal[p * 3];
-		float sgn = mcDot( cn, normal[i] ) < 0.0f ? -1.0f : 1.0f;
-		vec3_t nn;
-		mcScale( cn, sgn, nn );
-		float b = f < 0.25f ? f * 4.0f : 1.0f;		// fade in near the attached edge
-		for ( int k = 0; k < 3; k++ ) normal[i][k] = normal[i][k] * ( 1.0f - b ) + nn[k] * b;
+		const float *sn = &in->skinNrm[( base + i ) * 3];
+		const float sgn = mcDot( cn, sn ) < 0.0f ? -1.0f : 1.0f;
+		const float b = f < 0.25f ? f * 4.0f : 1.0f;		// fade in near the attached edge
+		for ( int k = 0; k < 3; k++ ) normal[i][k] = normal[i][k] * ( 1.0f - b ) + cn[k] * sgn * b;
 		mcNorm( normal[i] );
 	}
 }

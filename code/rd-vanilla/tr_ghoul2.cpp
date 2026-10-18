@@ -3044,6 +3044,11 @@ static const mcBoneLookup_t* MC_Lookup(const mdxaHeader_t* h)
 	return &c;
 }
 
+static const float (*MC_BoneFn(void* ctx, const int boneIndex))[4]
+{
+	return static_cast<CBoneCache*>(ctx)->EvalRender(boneIndex).matrix;
+}
+
 static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* surface)
 {
 	CBoneCache* bones = surf->boneCache;
@@ -3093,7 +3098,7 @@ static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* sur
 	prm.shapeScale = r_meshClothShape->value;
 
 	MC_Apply(surface, bones, backEnd.refdef.time, ent->e.origin, axis, caps, ncaps, &prm,
-		&tess.xyz[tess.numVertexes], &tess.normal[tess.numVertexes]);
+		MC_BoneFn, bones, &tess.xyz[tess.numVertexes], &tess.normal[tess.numVertexes]);
 	MC_Prune(backEnd.refdef.time);
 }
 
