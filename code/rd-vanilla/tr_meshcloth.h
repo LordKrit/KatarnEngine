@@ -27,8 +27,14 @@ from a config text (ext_data/meshcloth.cfg), one line per surface:
                      same, measured from a line (e.g. shoulder to wrist)
   tether   how far (game units) a fully free vertex may move away from
            where the animation puts it. Default 12.
-  shape    0..1, how strongly free cloth is pulled back toward its
-           modelled shape each step. Default 0.03.
+  bend     0..1 bending stiffness: 0 folds like silk, 1 holds its shape
+           like leather. Default 0.3.
+  shape    0..1 optional pull back toward the modelled shape. Default 0
+           (real cloth: only the attached part follows the animation).
+
+The solver is position-based dynamics with substeps (r_meshClothIter
+substeps per 16 ms), rigid stretch constraints, bending, long range
+attachments, body capsules and an inertia scale (r_meshClothInertia).
 ===========================================================================
 */
 #pragma once
@@ -43,6 +49,7 @@ struct mcParams_t {
 	float	drag;			// air resistance along the cloth normal
 	int		iterations;		// constraint passes per step
 	float	shapeScale;		// multiplies each surface's shape value
+	float	inertia;		// 0..1 how much of the character's own travel the cloth feels
 };
 
 // Returns the 3x4 skinning matrix (model space) for a skeleton bone index.

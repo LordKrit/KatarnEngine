@@ -291,6 +291,7 @@ extern cvar_t* r_meshClothGravity;
 extern cvar_t* r_meshClothDrag;
 extern cvar_t* r_meshClothIter;
 extern cvar_t* r_meshClothShape;
+extern cvar_t* r_meshClothInertia;
 void R_MeshClothLoadConfig();
 void R_MeshClothShutdown();
 extern cvar_t* r_Ghoul2AnimSmooth;

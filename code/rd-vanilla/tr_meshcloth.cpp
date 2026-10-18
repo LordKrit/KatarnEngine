@@ -27,6 +27,7 @@ Per character instance:
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
 
 namespace {
 
@@ -47,6 +48,7 @@ struct mcDef_t {
 	float			a[8];
 	float			tether;
 	float			shape;
+	float			bend;		// 0..1 bending stiffness (0 = limp silk, 1 = stiff leather)
 };
 
 struct mcGroup_t {
@@ -57,7 +59,10 @@ struct mcGroup_t {
 	int									numParticles;
 	std::vector<int>					vertToParticle;	// global vertex -> particle
 	std::vector<int>					partSurf, partVert;	// representative surface / local vertex
-	std::vector<float>					freedom, tether, shape;	// per particle
+	std::vector<float>					freedom, tether, shape, bend;	// per particle
+	std::vector<int>					lraAnchor;		// nearest attached particle along the cloth (-1 none)
+	std::vector<float>					lraLen;			// bind-pose distance to it along the cloth
+	float								bindLinkSum;	// total bind length of the structural links
 	std::vector<int>					linkA, linkB;
 	std::vector<char>					linkBend;
 	std::vector<int>					tris;			// particle indices
@@ -73,6 +78,8 @@ struct mcInstance_t {
 	const mcGroup_t		*group;
 	bool				active;
 	int					lastTime, lastSeen, accum, outTime;
+	float				linkScale;		// animated / bind size of the cloth (model scale)
+	vec3_t				lastOrigin;		// character origin at the previous simulation
 	std::vector<float>	p, prev, target, targetPrev;	// 3 per particle, world
 	std::vector<float>	outLocal, nrmLocal;				// 3 per particle, model space
 	std::vector<float>	skinNrm;						// 3 per global vertex, model space
@@ -257,17 +264,21 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->freedom.push_back( f );
 				g->tether.push_back( g->defs[si]->tether );
 				g->shape.push_back( g->defs[si]->shape );
+				g->bend.push_back( g->defs[si]->bend );
 				grid.Add( v[i].vertCoords, p );
 			} else {
 				// shared by two pieces: the more attached and the shorter tether win
 				if ( f < g->freedom[p] ) g->freedom[p] = f;
 				if ( g->defs[si]->tether < g->tether[p] ) g->tether[p] = g->defs[si]->tether;
 				if ( g->defs[si]->shape > g->shape[p] ) g->shape[p] = g->defs[si]->shape;
+				if ( g->defs[si]->bend > g->bend[p] ) g->bend[p] = g->defs[si]->bend;
 			}
 			g->vertToParticle[g->vertBase[si] + i] = p;
 		}
 	}
 	g->numParticles = (int)g->partSurf.size();
+	// almost-attached vertices are attached: the solver has no partial springs
+	for ( int p = 0; p < g->numParticles; p++ ) if ( g->freedom[p] < 0.02f ) g->freedom[p] = 0.0f;
 
 	// links from every cloth triangle
 	std::unordered_map<unsigned long long, int> edgeOther;
@@ -299,6 +310,50 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 			}
 		}
 	}
+
+	// long range attachments (Kim, Chentanez & Mueller 2012): each free
+	// particle's nearest attached particle measured along the cloth, so the
+	// solver can forbid it from ever getting further away than that
+	std::vector<const float *> bindPos( g->numParticles );
+	for ( int p = 0; p < g->numParticles; p++ ) bindPos[p] = Verts( g->surfs[g->partSurf[p]] )[g->partVert[p]].vertCoords;
+	std::vector<std::vector<std::pair<int, float>>> adj( g->numParticles );
+	g->bindLinkSum = 0.0f;
+	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+		if ( g->linkBend[l] ) continue;
+		vec3_t d;
+		mcSub( bindPos[g->linkA[l]], bindPos[g->linkB[l]], d );
+		const float len = mcLen( d );
+		g->bindLinkSum += len;
+		adj[g->linkA[l]].push_back( { g->linkB[l], len } );
+		adj[g->linkB[l]].push_back( { g->linkA[l], len } );
+	}
+	g->lraAnchor.assign( g->numParticles, -1 );
+	g->lraLen.assign( g->numParticles, 1e9f );
+	std::vector<std::pair<float, int>> heap;	// min-heap by distance
+	auto cmp = []( const std::pair<float, int> &x, const std::pair<float, int> &y ) { return x.first > y.first; };
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] > 0.0f ) continue;
+		g->lraAnchor[p] = p;
+		g->lraLen[p] = 0.0f;
+		heap.push_back( { 0.0f, p } );
+	}
+	std::make_heap( heap.begin(), heap.end(), cmp );
+	while ( !heap.empty() ) {
+		std::pop_heap( heap.begin(), heap.end(), cmp );
+		const std::pair<float, int> top = heap.back();
+		heap.pop_back();
+		if ( top.first > g->lraLen[top.second] ) continue;
+		for ( const auto &e : adj[top.second] ) {
+			const float nd = top.first + e.second;
+			if ( nd < g->lraLen[e.first] ) {
+				g->lraLen[e.first] = nd;
+				g->lraAnchor[e.first] = g->lraAnchor[top.second];
+				heap.push_back( { nd, e.first } );
+				std::push_heap( heap.begin(), heap.end(), cmp );
+			}
+		}
+	}
+	for ( int p = 0; p < g->numParticles; p++ ) if ( g->lraAnchor[p] < 0 ) g->lraLen[p] = 0.0f;
 	return g;
 }
 
@@ -410,36 +465,61 @@ int CullCapsules( const mcGroup_t *g, const std::vector<float> &target, const mc
 	return n;
 }
 
-void Constrain( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps, int iters ) {
-	for ( int it = 0; it < iters; it++ ) {
-		for ( size_t l = 0; l < g->linkA.size(); l++ ) {
-			int a = g->linkA[l], b = g->linkB[l];
-			float wa = g->freedom[a] > 0.0f ? 1.0f : 0.0f, wb = g->freedom[b] > 0.0f ? 1.0f : 0.0f;
-			if ( wa + wb == 0.0f ) continue;
-			float *pa = &in->p[a * 3], *pb = &in->p[b * 3];
-			vec3_t dT, d;
-			mcSub( &in->target[b * 3], &in->target[a * 3], dT );
-			float rest = mcLen( dT );
-			mcSub( pb, pa, d );
-			float len = mcLen( d );
-			if ( len < 1e-5f ) continue;
-			if ( g->linkBend[l] && len <= rest ) continue;	// bend links only resist stretching
-			float k = ( len - rest ) / ( len * ( wa + wb ) );
-			if ( g->linkBend[l] ) k *= 0.5f;
-			mcMA( pa, k * wa, d, pa );
-			mcMA( pb, -k * wb, d, pb );
+// One pass over every constraint, Gauss-Seidel. bendK is the per-substep
+// fraction of the bend error removed (stiffness made independent of the
+// substep count by the caller).
+void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps, float bendScale ) {
+	// stretch: the fabric keeps the edge lengths the animated mesh has now
+	// (rigidly - real cloth barely stretches); bend links resist folding
+	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+		const int a = g->linkA[l], b = g->linkB[l];
+		const float wa = g->freedom[a] > 0.0f ? 1.0f : 0.0f, wb = g->freedom[b] > 0.0f ? 1.0f : 0.0f;
+		if ( wa + wb == 0.0f ) continue;
+		float *pa = &in->p[a * 3], *pb = &in->p[b * 3];
+		vec3_t dT, d;
+		mcSub( &in->target[b * 3], &in->target[a * 3], dT );
+		const float rest = mcLen( dT );
+		mcSub( pb, pa, d );
+		const float len = mcLen( d );
+		if ( len < 1e-5f ) continue;
+		float k = ( len - rest ) / ( len * ( wa + wb ) );
+		if ( g->linkBend[l] ) {
+			const float bs = 0.5f * ( g->bend[a] + g->bend[b] );
+			k *= bs * bendScale;
+			if ( k == 0.0f ) continue;
 		}
-		for ( int p = 0; p < g->numParticles; p++ ) {
-			float f = g->freedom[p], *pp = &in->p[p * 3];
-			const float *t = &in->target[p * 3];
-			if ( f <= 0.0f ) { mcCopy( t, pp ); continue; }
-			Collide( pp, t, caps, ncaps );
-			// tether: never further from the animated position than freedom * tether
+		mcMA( pa, k * wa, d, pa );
+		mcMA( pb, -k * wb, d, pb );
+	}
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		const float f = g->freedom[p];
+		float *pp = &in->p[p * 3];
+		const float *t = &in->target[p * 3];
+		if ( f <= 0.0f ) { mcCopy( t, pp ); continue; }
+		// long range attachment: never further from the attached edge than
+		// the cloth itself is long
+		const int an = g->lraAnchor[p];
+		if ( an >= 0 ) {
 			vec3_t d;
-			mcSub( pp, t, d );
-			float len = mcLen( d ), maxLen = f * g->tether[p];
-			if ( len > maxLen && len > 1e-5f ) mcMA( t, maxLen / len, d, pp );
+			mcSub( pp, &in->p[an * 3], d );
+			// skinning can stretch the animated mesh past its bind size
+			// (raised shoulders): never limit tighter than the pose itself
+			vec3_t dt;
+			mcSub( t, &in->target[an * 3], dt );
+			float maxLen = g->lraLen[p] * in->linkScale;
+			const float animLen = mcLen( dt );
+			if ( animLen > maxLen ) maxLen = animLen;
+			maxLen *= 1.03f;
+			const float len = mcLen( d );
+			if ( len > maxLen && len > 1e-5f ) mcMA( &in->p[an * 3], maxLen / len, d, pp );
 		}
+		Collide( pp, t, caps, ncaps );
+		// max distance from the animated position (a safety net, as in game
+		// cloth tools - not a spring)
+		vec3_t d;
+		mcSub( pp, t, d );
+		const float len = mcLen( d ), maxLen = f * g->tether[p];
+		if ( len > maxLen && len > 1e-5f ) mcMA( t, maxLen / len, d, pp );
 	}
 }
 
@@ -450,36 +530,70 @@ void Reset( mcInstance_t *in, int time ) {
 	in->accum = 0;
 	in->lastTime = time;
 	in->active = true;
+	in->linkScale = 1.0f;
+	in->lastOrigin[0] = in->lastOrigin[1] = in->lastOrigin[2] = 0.0f;
 }
 
+// One 16 ms step, split into substeps ("Small Steps in Physics
+// Simulation", Macklin et al. 2019): many short steps with a single
+// constraint pass each keep the fabric from stretching or wobbling far
+// better than one long step with many passes.
 void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFrom, const std::vector<float> &tgtTo,
 		   const mcCapsule_t *caps, int ncaps, const mcParams_t *prm ) {
+	const int sub = prm->iterations < 1 ? 1 : ( prm->iterations > 16 ? 16 : prm->iterations );
+	const float h = MC_DT / sub;
+	const float damp = powf( 0.99f, 1.0f / sub );			// 1% velocity loss per 16 ms
+	// bend stiffness per substep so the total doesn't depend on the count
+	const float bendScale = 1.0f - powf( 0.5f, 1.0f / sub );
 	std::vector<float> &n = in->scratchN;
-	ParticleNormals( g, in->p, n );
-	in->target.assign( tgtTo.begin(), tgtTo.end() );
-	for ( int p = 0; p < g->numParticles; p++ ) {
-		float f = g->freedom[p], *pp = &in->p[p * 3], *pv = &in->prev[p * 3];
-		if ( f <= 0.0f ) {
-			mcCopy( &tgtTo[p * 3], pp );
-			mcCopy( &tgtFrom[p * 3], pv );
-			continue;
-		}
-		vec3_t v, acc;
-		mcSub( pp, pv, v );
-		float vn = mcDot( v, &n[p * 3] ) / MC_DT;
-		mcScale( &n[p * 3], -prm->drag * vn, acc );
-		acc[2] -= prm->gravity;
-		mcCopy( pp, pv );
-		mcMA( pp, 0.985f, v, pp );
-		mcMA( pp, MC_DT * MC_DT, acc, pp );
-		// keep the modelled shape: pull a little toward the animated position,
-		// more strongly where the vertex is less free
-		float s = Clamp01( g->shape[p] * prm->shapeScale ) + ( 1.0f - f ) * 0.15f;
+
+	// the cloth's current size against its bind pose (model scale)
+	float animSum = 0.0f;
+	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+		if ( g->linkBend[l] ) continue;
 		vec3_t d;
-		mcSub( &tgtTo[p * 3], pp, d );
-		mcMA( pp, s, d, pp );
+		mcSub( &tgtTo[g->linkB[l] * 3], &tgtTo[g->linkA[l] * 3], d );
+		animSum += mcLen( d );
 	}
-	Constrain( g, in, caps, ncaps, prm->iterations );
+	in->linkScale = g->bindLinkSum > 1e-3f ? animSum / g->bindLinkSum : 1.0f;
+
+	in->target.resize( tgtTo.size() );
+	for ( int s = 0; s < sub; s++ ) {
+		const float t1 = (float)( s + 1 ) / sub;
+		for ( size_t i = 0; i < tgtTo.size(); i++ ) in->target[i] = tgtFrom[i] + ( tgtTo[i] - tgtFrom[i] ) * t1;
+		ParticleNormals( g, in->p, n );
+		for ( int p = 0; p < g->numParticles; p++ ) {
+			const float f = g->freedom[p];
+			float *pp = &in->p[p * 3], *pv = &in->prev[p * 3];
+			if ( f <= 0.0f ) {
+				mcCopy( pp, pv );
+				mcCopy( &in->target[p * 3], pp );
+				continue;
+			}
+			vec3_t v;
+			mcSub( pp, pv, v );
+			mcScale( v, damp, v );
+			// air resistance: the part of the motion straight through the
+			// cloth is slowed, sliding along it isn't (why capes billow)
+			const float *nn = &n[p * 3];
+			const float vn = mcDot( v, nn );
+			float dr = prm->drag * h;
+			if ( dr > 1.0f ) dr = 1.0f;
+			mcMA( v, -vn * dr, nn, v );
+			mcCopy( pp, pv );
+			mcAdd( pp, v, pp );
+			pp[2] -= prm->gravity * h * h;
+			// optional pull toward the modelled shape (off unless configured)
+			const float sh = g->shape[p] * prm->shapeScale;
+			if ( sh > 0.0f ) {
+				const float k = 1.0f - powf( 1.0f - Clamp01( sh ), 1.0f / sub );
+				vec3_t d;
+				mcSub( &in->target[p * 3], pp, d );
+				mcMA( pp, k, d, pp );
+			}
+		}
+		SolveConstraints( g, in, caps, ncaps, bendScale );
+	}
 }
 
 void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t origin, const vec3_t axis[3],
@@ -510,7 +624,22 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	if ( !in->active ) {
 		in->target.assign( target.begin(), target.end() );
 		Reset( in, timeMs );
+		mcCopy( origin, in->lastOrigin );
 	} else {
+		// inertia scale (as in game cloth tools): only part of the
+		// character's travel through the world reaches the cloth, so a
+		// running character's robe trails instead of being left behind
+		vec3_t dO;
+		mcSub( origin, in->lastOrigin, dO );
+		const float carry = 1.0f - Clamp01( prm->inertia );
+		if ( carry > 0.0f && mcDot( dO, dO ) < MC_TELEPORT * MC_TELEPORT ) {
+			for ( int p = 0; p < g->numParticles; p++ ) {
+				if ( g->freedom[p] <= 0.0f ) continue;
+				mcMA( &in->p[p * 3], carry, dO, &in->p[p * 3] );
+				mcMA( &in->prev[p * 3], carry, dO, &in->prev[p * 3] );
+			}
+		}
+		mcCopy( origin, in->lastOrigin );
 		const int dt = timeMs - in->lastTime;
 		int steps = 0;
 		if ( dt > 0 ) {
@@ -537,7 +666,7 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		// fast limb never ends up inside stale cloth
 		if ( steps == 0 ) {
 			in->target.assign( target.begin(), target.end() );
-			Constrain( g, in, nearCaps, nnear, 1 );
+			SolveConstraints( g, in, nearCaps, nnear, 0.0f );
 		}
 	}
 
@@ -582,12 +711,14 @@ int MC_LoadConfig( const char *text ) {
 		}
 		if ( k < need ) continue;
 		d.tether = 12.0f;
-		d.shape = 0.03f;
+		d.shape = 0.0f;
+		d.bend = 0.3f;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
 			if ( !Q_stricmp( tok, "tether" ) ) d.tether = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "shape" ) ) d.shape = (float)atof( COM_ParseExt( &p, qfalse ) );
+			else if ( !Q_stricmp( tok, "bend" ) ) d.bend = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 		}
 		if ( d.tether < 0.0f ) d.tether = 0.0f;
 		g_defs.push_back( d );

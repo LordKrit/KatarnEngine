@@ -3096,6 +3096,7 @@ static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* sur
 	prm.drag = r_meshClothDrag->value;
 	prm.iterations = r_meshClothIter->integer;
 	prm.shapeScale = r_meshClothShape->value;
+	prm.inertia = r_meshClothInertia->value;
 
 	MC_Apply(surface, bones, backEnd.refdef.time, ent->e.origin, axis, caps, ncaps, &prm,
 		MC_BoneFn, bones, &tess.xyz[tess.numVertexes], &tess.normal[tess.numVertexes]);
