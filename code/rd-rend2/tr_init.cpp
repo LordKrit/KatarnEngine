@@ -236,6 +236,11 @@ cvar_t* r_noPrecacheGLA;
 #endif
 
 cvar_t* r_noServerGhoul2; // In SP renderer CVAR is actually r_noghoul2!
+cvar_t* r_meshCloth;
+cvar_t* r_meshClothGravity;
+cvar_t* r_meshClothDrag;
+cvar_t* r_meshClothIter;
+cvar_t* r_meshClothShape;
 cvar_t* r_Ghoul2AnimSmooth = 0;
 cvar_t* r_Ghoul2UnSqashAfterSmooth = 0;
 //cvar_t	*r_Ghoul2UnSqash;
@@ -1729,6 +1734,11 @@ static void R_Register(void)
 	r_noPrecacheGLA = ri_Cvar_Get_NoComm("r_noPrecacheGLA", "0", CVAR_CHEAT, "");
 #endif
 	r_noServerGhoul2 = ri_Cvar_Get_NoComm("r_noghoul2", "0", CVAR_CHEAT, "");
+	r_meshCloth = ri.Cvar_Get("r_meshCloth", "1", CVAR_ARCHIVE);
+	r_meshClothGravity = ri.Cvar_Get("r_meshClothGravity", "650", CVAR_ARCHIVE);
+	r_meshClothDrag = ri.Cvar_Get("r_meshClothDrag", "1.4", CVAR_ARCHIVE);
+	r_meshClothIter = ri.Cvar_Get("r_meshClothIter", "6", CVAR_ARCHIVE);
+	r_meshClothShape = ri.Cvar_Get("r_meshClothShape", "1", CVAR_ARCHIVE);
 	r_Ghoul2AnimSmooth = ri_Cvar_Get_NoComm("r_ghoul2animsmooth", "0.3", CVAR_TEMP, "");
 	r_Ghoul2UnSqashAfterSmooth = ri_Cvar_Get_NoComm("r_ghoul2unsqashaftersmooth", "1", CVAR_TEMP, "");
 	broadsword = ri_Cvar_Get_NoComm("broadsword", "0", CVAR_ARCHIVE, "");
@@ -2170,6 +2180,7 @@ void R_Init(void)
 	R_ImageLoader_Init();
 	R_NoiseInit();
 	R_Register();
+	R_MeshClothLoadConfig();
 
 	max_polys = Q_max(r_maxpolys->integer, DEFAULT_MAX_POLYS); // default is the minimum; the cvar can only raise it
 	max_polyverts = Q_max(r_maxpolyverts->integer, DEFAULT_MAX_POLYVERTS);
@@ -2285,6 +2296,8 @@ void RE_Shutdown(qboolean destroyWindow, qboolean restarting)
 	R_IssuePendingRenderCommands();
 
 	R_ShutdownBackEndFrameData();
+
+	R_MeshClothShutdown();
 
 	R_ShutdownWeatherSystem();
 
