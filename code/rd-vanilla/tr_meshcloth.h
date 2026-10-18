@@ -67,7 +67,6 @@ struct mcParams_t {
 	float	shapeScale;		// multiplies each surface's shape value
 	float	inertia;		// 0..1 how much of the character's own travel the cloth feels
 	float	maxAccel;		// units/s^2 of character acceleration the cloth feels (0 = no limit)
-	float	localDamping;	// 0..1 per 16 ms: damping of motion relative to the cloth's overall motion
 };
 
 // Returns the 3x4 skinning matrix (model space) for a skeleton bone index.

@@ -109,7 +109,6 @@ struct mcInstance_t {
 	std::vector<float>	push, contactN, targetSub;	// per particle: this substep's body push, contact normal, previous substep target
 	std::vector<char>	contact;
 	std::vector<float>	scratchTarget2, scratchCnt;
-	std::vector<float>	offPrev, offCur;	// cloth minus animation after the last two steps (drawing interpolates between them)
 };
 
 std::vector<mcDef_t>										g_defs;
@@ -131,19 +130,6 @@ inline float mcLen( const float *a ) { return sqrtf( mcDot( a, a ) ); }
 inline void  mcCross( const float *a, const float *b, float *o ) { o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; }
 inline float mcNorm( float *a ) { float l = mcLen( a ); if ( l > 1e-12f ) { float i = 1.0f / l; a[0] *= i; a[1] *= i; a[2] *= i; } return l; }
 inline float Clamp01( float v ) { return v < 0.0f ? 0.0f : ( v > 1.0f ? 1.0f : v ); }
-
-// A limit just moved p back by corr: make it an inelastic stop. Verlet keeps
-// speed as (p - prev), so without this the correction turns into a rebound
-// and the cloth bounces off its own limits. Removes the remaining speed along
-// the correction's direction (towards the limit), keeps the sliding part.
-inline void StopAtLimit( const float *p, float *prev, const float *corr ) {
-	float l2 = corr[0] * corr[0] + corr[1] * corr[1] + corr[2] * corr[2];
-	if ( l2 < 1e-12f ) return;
-	const float il = 1.0f / sqrtf( l2 );
-	const float n[3] = { corr[0] * il, corr[1] * il, corr[2] * il };
-	const float vn = ( p[0] - prev[0] ) * n[0] + ( p[1] - prev[1] ) * n[1] + ( p[2] - prev[2] ) * n[2];
-	if ( vn < 0.0f ) { prev[0] += n[0] * vn; prev[1] += n[1] * vn; prev[2] += n[2] * vn; }	// only speed into the limit
-}
 
 const char *ModelFolder( const char *modelName, char *buf, int bufSize ) {
 	// "models/players/palpatine/model" -> "palpatine"
@@ -585,13 +571,7 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 			if ( animLen > maxLen ) maxLen = animLen;
 			maxLen *= 1.03f;
 			const float len = mcLen( d );
-			if ( len > maxLen && len > 1e-5f ) {
-				vec3_t old, corr;
-				mcCopy( pp, old );
-				mcMA( &in->p[an * 3], maxLen / len, d, pp );
-				mcSub( pp, old, corr );
-				StopAtLimit( pp, &in->prev[p * 3], corr );
-			}
+			if ( len > maxLen && len > 1e-5f ) mcMA( &in->p[an * 3], maxLen / len, d, pp );
 		}
 		// never higher than both the attached edge it hangs from and its
 		// animated spot: stops a fast turn or a spawn from flipping a cape
@@ -599,12 +579,7 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 		if ( an >= 0 ) {
 			const float hp = mcDot( pp, in->up ), ha = mcDot( &in->p[an * 3], in->up ), ht = mcDot( t, in->up );
 			const float lim = ( ha > ht ? ha : ht ) + 2.0f * in->linkScale;
-			if ( hp > lim ) {
-				vec3_t corr;
-				mcScale( in->up, lim - hp, corr );
-				mcAdd( pp, corr, pp );
-				StopAtLimit( pp, &in->prev[p * 3], corr );
-			}
+			if ( hp > lim ) mcMA( pp, lim - hp, in->up, pp );
 		}
 		vec3_t before;
 		mcCopy( pp, before );
@@ -619,13 +594,7 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 		vec3_t d;
 		mcSub( pp, t, d );
 		const float len = mcLen( d ), maxLen = f * g->tether[p];
-		if ( len > maxLen && len > 1e-5f ) {
-			vec3_t old, corr;
-			mcCopy( pp, old );
-			mcMA( t, maxLen / len, d, pp );
-			mcSub( pp, old, corr );
-			StopAtLimit( pp, &in->prev[p * 3], corr );
-		}
+		if ( len > maxLen && len > 1e-5f ) mcMA( t, maxLen / len, d, pp );
 	}
 }
 
@@ -817,7 +786,6 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 	const int sub = prm->iterations < 1 ? 1 : ( prm->iterations > 16 ? 16 : prm->iterations );
 	const float h = MC_DT / sub;
 	const float damp = powf( 0.99f, 1.0f / sub );			// 1% velocity loss per 16 ms
-	const float localKeep = powf( 1.0f - Clamp01( prm->localDamping ), 1.0f / sub );
 	// bend stiffness per substep so the total doesn't depend on the count
 	const float bendScale = 1.0f / sub;	// exponent: k_sub = 1 - (1 - bend)^(1/sub)
 	std::vector<float> &n = in->scratchN;
@@ -844,21 +812,6 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 		std::fill( in->push.begin(), in->push.end(), 0.0f );
 		std::fill( in->contact.begin(), in->contact.end(), 0 );
 		ParticleNormals( g, in->p, n );
-		// local damping (as in Unreal's Chaos cloth): damp each vertex's
-		// motion relative to the cloth's overall motion. Wobble and bounce
-		// die out, while the cape as a whole still swings and trails.
-		vec3_t vMean = { 0, 0, 0 };
-		int nFree = 0;
-		if ( localKeep < 1.0f ) {
-			for ( int p = 0; p < g->numParticles; p++ ) {
-				if ( g->freedom[p] <= 0.0f ) continue;
-				vec3_t v;
-				mcSub( &in->p[p * 3], &in->prev[p * 3], v );
-				mcAdd( vMean, v, vMean );
-				nFree++;
-			}
-			if ( nFree ) mcScale( vMean, 1.0f / nFree, vMean );
-		}
 		for ( int p = 0; p < g->numParticles; p++ ) {
 			const float f = g->freedom[p];
 			float *pp = &in->p[p * 3], *pv = &in->prev[p * 3];
@@ -869,11 +822,6 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 			}
 			vec3_t v;
 			mcSub( pp, pv, v );
-			if ( nFree ) {
-				vec3_t dv;
-				mcSub( v, vMean, dv );
-				mcMA( vMean, localKeep, dv, v );
-			}
 			mcScale( v, damp, v );
 			// air resistance: the part of the motion straight through the
 			// cloth is slowed, sliding along it isn't (why capes billow)
@@ -948,9 +896,6 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		// instead of starting in the modelled (often flared) pose
 		for ( int k = 0; k < MC_SETTLE_STEPS; k++ ) Step( g, in, target, target, nearCaps, nnear, prm );
 		in->prev.assign( in->p.begin(), in->p.end() );
-		in->offCur.resize( in->p.size() );
-		for ( size_t i = 0; i < in->p.size(); i++ ) in->offCur[i] = in->p[i] - target[i];
-		in->offPrev = in->offCur;
 	} else {
 		mcCopy( axis[2], in->up );
 		mcNorm( in->up );
@@ -1023,11 +968,11 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 			in->targetPrev.assign( target.begin(), target.end() );
 			in->lastTime = timeMs;
 		}
-		if ( steps > 0 ) {
-			in->offPrev.swap( in->offCur );
-			in->offCur.resize( in->p.size() );
-			for ( size_t i = 0; i < in->p.size(); i++ ) in->offCur[i] = in->p[i] - in->target[i];
-			if ( in->offPrev.size() != in->offCur.size() ) in->offPrev = in->offCur;
+		// frames without a full step still follow the current pose, so a
+		// fast limb never ends up inside stale cloth
+		if ( steps == 0 ) {
+			in->target.assign( target.begin(), target.end() );
+			SolveConstraints( g, in, nearCaps, nnear, 0.0f );
 		}
 	}
 
@@ -1035,25 +980,15 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	// out of their offset from the animation (visual only, the simulation
 	// keeps its state). A coarse game mesh can't show folds smaller than a
 	// couple of triangles anyway; they only read as crumpling.
-	// The cloth steps every 16 ms but the game draws more often. Draw it
-	// between its last two steps (the fixed-timestep interpolation physics
-	// engines use), riding on this frame's animated pose: no frame-to-frame
-	// flicker, and a fast limb never sees stale cloth.
 	std::vector<float> &draw = in->scratchFrom;
-	std::vector<float> &off = in->scratchTo;
-	off.resize( in->p.size() );
-	if ( in->offCur.size() == in->p.size() && in->offPrev.size() == in->p.size() ) {
-		const float a = Clamp01( (float)in->accum / MC_STEP_MS );
-		for ( size_t i = 0; i < off.size(); i++ ) off[i] = in->offPrev[i] + ( in->offCur[i] - in->offPrev[i] ) * a;
-	} else {
-		for ( size_t i = 0; i < off.size(); i++ ) off[i] = in->p[i] - target[i];
-	}
-	draw.resize( in->p.size() );
-	{
-		std::vector<float> &acc = in->scratchTarget2;
+	draw.assign( in->p.begin(), in->p.end() );
+	if ( g->anySmooth ) {
+		std::vector<float> &off = in->scratchTo, &acc = in->scratchTarget2;
+		off.resize( in->p.size() );
 		acc.resize( in->p.size() );
 		std::vector<float> &cnt = in->scratchCnt;
 		cnt.resize( g->numParticles );
+		for ( size_t i = 0; i < in->p.size(); i++ ) off[i] = in->p[i] - target[i];
 		for ( int pass = 0; pass < 2; pass++ ) {
 			std::fill( acc.begin(), acc.end(), 0.0f );
 			std::fill( cnt.begin(), cnt.end(), 0.0f );
@@ -1069,8 +1004,8 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 				for ( int k = 0; k < 3; k++ ) off[p * 3 + k] += w * ( acc[p * 3 + k] / cnt[p] - off[p * 3 + k] );
 			}
 		}
+		for ( size_t i = 0; i < draw.size(); i++ ) draw[i] = target[i] + off[i];
 	}
-	for ( size_t i = 0; i < draw.size(); i++ ) draw[i] = target[i] + off[i];
 
 	// results back into model space, with normals from the moving triangles
 	std::vector<float> &nw = in->scratchN;
