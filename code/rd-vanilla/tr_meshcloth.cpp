@@ -511,6 +511,12 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 		in->push.assign( (size_t)g->numParticles * 3, 0.0f );
 		in->contactN.assign( (size_t)g->numParticles * 3, 0.0f );
 	}
+	// attached vertices first: everything below measures against them, and
+	// a vertex solved before its attachment point must not see where that
+	// point was (on a jump that's a whole frame of movement lower)
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] <= 0.0f ) mcCopy( &in->target[p * 3], &in->p[p * 3] );
+	}
 	// stretch: the fabric keeps the edge lengths the animated mesh has now
 	// (rigidly - real cloth barely stretches); bend links resist folding
 	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
@@ -795,7 +801,6 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 			mcScale( acc, 1.0f / dt, acc );
 			const float aLen = mcLen( acc );
 			for ( int p = 0; p < g->numParticles; p++ ) {
-				if ( g->freedom[p] <= 0.0f ) continue;
 				vec3_t shift;
 				const float carry = 1.0f - Clamp01( g->inertia[p] >= 0.0f ? g->inertia[p] : prm->inertia );
 				mcScale( dO, carry, shift );
@@ -806,6 +811,12 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 					mcAdd( shift, excess, shift );
 				}
 				if ( mcDot( shift, shift ) == 0.0f ) continue;
+				// the attached edge is fed in substep by substep from last
+				// frame's animated position: move that reference by the same
+				// amount, or a jump take-off puts the cloth ahead of its own
+				// attachment for a moment and yanks it
+				mcAdd( &in->targetPrev[p * 3], shift, &in->targetPrev[p * 3] );
+				if ( g->freedom[p] <= 0.0f ) continue;
 				mcAdd( &in->p[p * 3], shift, &in->p[p * 3] );
 				mcAdd( &in->prev[p * 3], shift, &in->prev[p * 3] );
 			}
