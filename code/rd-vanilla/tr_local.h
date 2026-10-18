@@ -1195,6 +1195,7 @@ extern	cvar_t* r_meshClothDrag;
 extern	cvar_t* r_meshClothIter;
 extern	cvar_t* r_meshClothShape;
 extern	cvar_t* r_meshClothInertia;
+extern	cvar_t* r_meshClothMaxAccel;
 void R_MeshClothLoadConfig();
 void R_MeshClothShutdown();						// controls shadows: 0 = none, 1 = blur, 2 = stencil, 3 = black planar projection
 extern	cvar_t* r_flares;						// light flares

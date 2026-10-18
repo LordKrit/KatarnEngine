@@ -52,6 +52,7 @@ struct mcDef_t {
 	float			inertia;	// 0..1, or -1 to use r_meshClothInertia
 	bool			self;		// self-collision (single-layer capes)
 	float			smooth;		// 0..1 crease smoothing of the drawn shape
+	float			maxAccel;	// units/s^2 of character acceleration the cloth feels, 0 = no limit, -1 = cvar
 };
 
 struct mcGroup_t {
@@ -65,6 +66,7 @@ struct mcGroup_t {
 	std::vector<float>					freedom, tether, shape, bend, inertia;	// per particle
 	std::vector<char>					selfCol;		// per particle: takes part in self-collision
 	std::vector<float>					smooth;			// per particle: crease smoothing of the drawn shape
+	std::vector<float>					maxAccel;		// per particle
 	bool								anySmooth = false;
 	bool								anySelf = false;
 	std::vector<int>					lraAnchor;		// nearest attached particle along the cloth (-1 none)
@@ -88,6 +90,8 @@ struct mcInstance_t {
 	int					lastTime, lastSeen, accum, outTime;
 	float				linkScale;		// animated / bind size of the cloth (model scale)
 	vec3_t				lastOrigin;		// character origin at the previous simulation
+	vec3_t				originVel;		// its velocity (units/s)
+	int					originTime;
 	std::vector<float>	p, prev, target, targetPrev;	// 3 per particle, world
 	std::vector<float>	outLocal, nrmLocal;				// 3 per particle, model space
 	std::vector<float>	skinNrm;						// 3 per global vertex, model space
@@ -279,6 +283,7 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->inertia.push_back( g->defs[si]->inertia );
 				g->selfCol.push_back( g->defs[si]->self ? 1 : 0 );
 				g->smooth.push_back( g->defs[si]->smooth );
+				g->maxAccel.push_back( g->defs[si]->maxAccel );
 				if ( g->defs[si]->smooth > 0.0f ) g->anySmooth = true;
 				if ( g->defs[si]->self ) g->anySelf = true;
 				grid.Add( v[i].vertCoords, p );
@@ -576,6 +581,8 @@ void Reset( mcInstance_t *in, int time ) {
 	in->active = true;
 	in->linkScale = 1.0f;
 	in->lastOrigin[0] = in->lastOrigin[1] = in->lastOrigin[2] = 0.0f;
+	in->originVel[0] = in->originVel[1] = in->originVel[2] = 0.0f;
+	in->originTime = time;
 }
 
 // Velocity pass after a substep's constraints, for vertices touching the
@@ -750,20 +757,45 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		in->target.assign( target.begin(), target.end() );
 		Reset( in, timeMs );
 		mcCopy( origin, in->lastOrigin );
+		in->originTime = timeMs;
 	} else {
 		// inertia scale (as in game cloth tools): only part of the
 		// character's travel through the world reaches the cloth, so a
 		// running character's robe trails instead of being left behind
 		vec3_t dO;
 		mcSub( origin, in->lastOrigin, dO );
-		if ( mcDot( dO, dO ) < MC_TELEPORT * MC_TELEPORT ) {
+		const int odt = timeMs - in->originTime;
+		if ( mcDot( dO, dO ) < MC_TELEPORT * MC_TELEPORT && odt > 0 ) {
+			const float dt = odt * 0.001f;
+			// max acceleration (Battlefront II's cloth "MaxAcceleration"):
+			// the cloth feels the character's speeding up, stopping and
+			// turning only up to a limit; any harder jolt carries it along
+			// instead of whipping it
+			vec3_t vNew, acc, excess = { 0, 0, 0 };
+			mcScale( dO, 1.0f / dt, vNew );
+			mcSub( vNew, in->originVel, acc );
+			mcScale( acc, 1.0f / dt, acc );
+			const float aLen = mcLen( acc );
 			for ( int p = 0; p < g->numParticles; p++ ) {
 				if ( g->freedom[p] <= 0.0f ) continue;
+				vec3_t shift;
 				const float carry = 1.0f - Clamp01( g->inertia[p] >= 0.0f ? g->inertia[p] : prm->inertia );
-				if ( carry <= 0.0f ) continue;
-				mcMA( &in->p[p * 3], carry, dO, &in->p[p * 3] );
-				mcMA( &in->prev[p * 3], carry, dO, &in->prev[p * 3] );
+				mcScale( dO, carry, shift );
+				const float amax = g->maxAccel[p] >= 0.0f ? g->maxAccel[p] : prm->maxAccel;
+				if ( amax > 0.0f && aLen > amax ) {
+					// the part of this frame's move that comes from acceleration over the limit
+					mcScale( acc, ( 1.0f - amax / aLen ) * dt * dt * ( 1.0f - carry ), excess );
+					mcAdd( shift, excess, shift );
+				}
+				if ( mcDot( shift, shift ) == 0.0f ) continue;
+				mcAdd( &in->p[p * 3], shift, &in->p[p * 3] );
+				mcAdd( &in->prev[p * 3], shift, &in->prev[p * 3] );
 			}
+			mcCopy( vNew, in->originVel );
+			in->originTime = timeMs;
+		} else if ( odt != 0 ) {
+			in->originVel[0] = in->originVel[1] = in->originVel[2] = 0.0f;
+			in->originTime = timeMs;
 		}
 		mcCopy( origin, in->lastOrigin );
 		const int dt = timeMs - in->lastTime;
@@ -873,12 +905,14 @@ int MC_LoadConfig( const char *text ) {
 		d.inertia = -1.0f;
 		d.self = false;
 		d.smooth = 0.5f;
+		d.maxAccel = -1.0f;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
 			if ( !Q_stricmp( tok, "tether" ) ) d.tether = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "shape" ) ) d.shape = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "self" ) ) d.self = true;
+			else if ( !Q_stricmp( tok, "maxaccel" ) ) { d.maxAccel = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxAccel < 0.0f ) d.maxAccel = 0.0f; }
 			else if ( !Q_stricmp( tok, "smooth" ) ) d.smooth = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "inertia" ) ) d.inertia = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "bend" ) ) d.bend = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );

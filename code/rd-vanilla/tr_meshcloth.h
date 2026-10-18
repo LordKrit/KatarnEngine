@@ -36,6 +36,9 @@ from a config text (ext_data/meshcloth.cfg), one line per surface:
            through itself. Leave off for layered robes and sleeves.
   smooth   0..1 smooths small creases out of the drawn cloth (visual only).
            Default 0.5.
+  maxaccel units/s^2: the character's acceleration the cloth feels, at
+           most (Battlefront II's MaxAcceleration; 20 m/s^2 is about 790).
+           0 = no limit. Default: the r_meshClothMaxAccel console value.
   shape    0..1 optional pull back toward the modelled shape. Default 0
            (real cloth: only the attached part follows the animation).
 
@@ -57,6 +60,7 @@ struct mcParams_t {
 	int		iterations;		// constraint passes per step
 	float	shapeScale;		// multiplies each surface's shape value
 	float	inertia;		// 0..1 how much of the character's own travel the cloth feels
+	float	maxAccel;		// units/s^2 of character acceleration the cloth feels (0 = no limit)
 };
 
 // Returns the 3x4 skinning matrix (model space) for a skeleton bone index.

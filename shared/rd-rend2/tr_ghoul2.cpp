@@ -4090,6 +4090,7 @@ static mcR2Inst_t* RB_MeshClothUpdate(CRenderableSurface* surf, const mdxmSurfac
 	prm.iterations = r_meshClothIter->integer;
 	prm.shapeScale = r_meshClothShape->value;
 	prm.inertia = r_meshClothInertia->value;
+	prm.maxAccel = r_meshClothMaxAccel->value;
 	MC_Apply(surface, bones, timeMs, ent->e.origin, axis, caps, ncaps, &prm,
 		MC_BoneFn, bones, xyz, nrm);
 	MC_Prune(timeMs);
