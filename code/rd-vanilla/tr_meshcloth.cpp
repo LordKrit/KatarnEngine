@@ -38,7 +38,8 @@ const int	MC_STALE_MS		= 250;
 const float	MC_TELEPORT		= 120.0f;
 const int	MC_FORGET_MS	= 10000;
 const float	MC_MARGIN		= 0.6f;
-const float	MC_WELD			= 0.01f;	// bind-pose distance that counts as the same point
+const float	MC_WELD			= 0.01f;
+const int	MC_SETTLE_STEPS	= 40;		// 0.64 s of settling when a character appears	// bind-pose distance that counts as the same point
 
 enum mcRuleType_t { MC_RULE_ABOVE, MC_RULE_NEAR, MC_RULE_SEGMENT };
 
@@ -91,6 +92,7 @@ struct mcInstance_t {
 	float				linkScale;		// animated / bind size of the cloth (model scale)
 	vec3_t				lastOrigin;		// character origin at the previous simulation
 	vec3_t				originVel;		// its velocity (units/s)
+	vec3_t				up;				// the character's up direction (world)
 	int					originTime;
 	std::vector<float>	p, prev, target, targetPrev;	// 3 per particle, world
 	std::vector<float>	outLocal, nrmLocal;				// 3 per particle, model space
@@ -555,6 +557,14 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 			const float len = mcLen( d );
 			if ( len > maxLen && len > 1e-5f ) mcMA( &in->p[an * 3], maxLen / len, d, pp );
 		}
+		// never higher than both the attached edge it hangs from and its
+		// animated spot: stops a fast turn or a spawn from flipping a cape
+		// up over the shoulders
+		if ( an >= 0 ) {
+			const float hp = mcDot( pp, in->up ), ha = mcDot( &in->p[an * 3], in->up ), ht = mcDot( t, in->up );
+			const float lim = ( ha > ht ? ha : ht ) + 2.0f * in->linkScale;
+			if ( hp > lim ) mcMA( pp, lim - hp, in->up, pp );
+		}
 		vec3_t before;
 		mcCopy( pp, before );
 		if ( Collide( pp, t, caps, ncaps, &in->contactN[p * 3] ) ) {
@@ -758,7 +768,15 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		Reset( in, timeMs );
 		mcCopy( origin, in->lastOrigin );
 		in->originTime = timeMs;
+		mcCopy( axis[2], in->up );
+		mcNorm( in->up );
+		// let the cloth fall into its hanging shape before it is first seen,
+		// instead of starting in the modelled (often flared) pose
+		for ( int k = 0; k < MC_SETTLE_STEPS; k++ ) Step( g, in, target, target, nearCaps, nnear, prm );
+		in->prev.assign( in->p.begin(), in->p.end() );
 	} else {
+		mcCopy( axis[2], in->up );
+		mcNorm( in->up );
 		// inertia scale (as in game cloth tools): only part of the
 		// character's travel through the world reaches the cloth, so a
 		// running character's robe trails instead of being left behind
