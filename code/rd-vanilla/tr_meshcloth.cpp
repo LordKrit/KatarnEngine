@@ -51,6 +51,7 @@ struct mcDef_t {
 	float			bend;		// 0..1 bending stiffness (0 = limp silk, 1 = stiff leather)
 	float			inertia;	// 0..1, or -1 to use r_meshClothInertia
 	bool			self;		// self-collision (single-layer capes)
+	float			smooth;		// 0..1 crease smoothing of the drawn shape
 };
 
 struct mcGroup_t {
@@ -63,6 +64,8 @@ struct mcGroup_t {
 	std::vector<int>					partSurf, partVert;	// representative surface / local vertex
 	std::vector<float>					freedom, tether, shape, bend, inertia;	// per particle
 	std::vector<char>					selfCol;		// per particle: takes part in self-collision
+	std::vector<float>					smooth;			// per particle: crease smoothing of the drawn shape
+	bool								anySmooth = false;
 	bool								anySelf = false;
 	std::vector<int>					lraAnchor;		// nearest attached particle along the cloth (-1 none)
 	std::vector<float>					lraLen;			// bind-pose distance to it along the cloth
@@ -91,6 +94,7 @@ struct mcInstance_t {
 	std::vector<float>	scratchTarget, scratchFrom, scratchTo, scratchN;
 	std::vector<float>	push, contactN, targetSub;	// per particle: this substep's body push, contact normal, previous substep target
 	std::vector<char>	contact;
+	std::vector<float>	scratchTarget2, scratchCnt;
 };
 
 std::vector<mcDef_t>										g_defs;
@@ -274,6 +278,8 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->bend.push_back( g->defs[si]->bend );
 				g->inertia.push_back( g->defs[si]->inertia );
 				g->selfCol.push_back( g->defs[si]->self ? 1 : 0 );
+				g->smooth.push_back( g->defs[si]->smooth );
+				if ( g->defs[si]->smooth > 0.0f ) g->anySmooth = true;
 				if ( g->defs[si]->self ) g->anySelf = true;
 				grid.Add( v[i].vertCoords, p );
 			} else {
@@ -514,8 +520,10 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 		float k = ( len - rest ) / ( len * ( wa + wb ) );
 		if ( g->linkBend[l] ) {
 			const float bs = 0.5f * ( g->bend[a] + g->bend[b] );
-			k *= bs * bendScale;
-			if ( k == 0.0f ) continue;
+			if ( bs <= 0.0f || bendScale <= 0.0f ) continue;
+			// the fraction of the fold removed per substep, so that one
+			// 16 ms step removes 'bend' of it whatever the substep count
+			k *= 1.0f - powf( 1.0f - ( bs < 0.99f ? bs : 0.99f ), bendScale );
 		}
 		mcMA( pa, k * wa, d, pa );
 		mcMA( pb, -k * wb, d, pb );
@@ -652,7 +660,7 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 	const float h = MC_DT / sub;
 	const float damp = powf( 0.99f, 1.0f / sub );			// 1% velocity loss per 16 ms
 	// bend stiffness per substep so the total doesn't depend on the count
-	const float bendScale = 1.0f - powf( 0.5f, 1.0f / sub );
+	const float bendScale = 1.0f / sub;	// exponent: k_sub = 1 - (1 - bend)^(1/sub)
 	std::vector<float> &n = in->scratchN;
 
 	// the cloth's current size against its bind pose (model scale)
@@ -788,13 +796,44 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		}
 	}
 
+	// what gets drawn: the simulated positions with small creases smoothed
+	// out of their offset from the animation (visual only, the simulation
+	// keeps its state). A coarse game mesh can't show folds smaller than a
+	// couple of triangles anyway; they only read as crumpling.
+	std::vector<float> &draw = in->scratchFrom;
+	draw.assign( in->p.begin(), in->p.end() );
+	if ( g->anySmooth ) {
+		std::vector<float> &off = in->scratchTo, &acc = in->scratchTarget2;
+		off.resize( in->p.size() );
+		acc.resize( in->p.size() );
+		std::vector<float> &cnt = in->scratchCnt;
+		cnt.resize( g->numParticles );
+		for ( size_t i = 0; i < in->p.size(); i++ ) off[i] = in->p[i] - target[i];
+		for ( int pass = 0; pass < 2; pass++ ) {
+			std::fill( acc.begin(), acc.end(), 0.0f );
+			std::fill( cnt.begin(), cnt.end(), 0.0f );
+			for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+				if ( g->linkBend[l] ) continue;
+				const int a = g->linkA[l], b = g->linkB[l];
+				mcAdd( &acc[a * 3], &off[b * 3], &acc[a * 3] ); cnt[a] += 1.0f;
+				mcAdd( &acc[b * 3], &off[a * 3], &acc[b * 3] ); cnt[b] += 1.0f;
+			}
+			for ( int p = 0; p < g->numParticles; p++ ) {
+				if ( g->freedom[p] <= 0.0f || cnt[p] == 0.0f ) continue;
+				const float w = g->smooth[p] * ( g->freedom[p] < 1.0f ? g->freedom[p] : 1.0f );
+				for ( int k = 0; k < 3; k++ ) off[p * 3 + k] += w * ( acc[p * 3 + k] / cnt[p] - off[p * 3 + k] );
+			}
+		}
+		for ( size_t i = 0; i < draw.size(); i++ ) draw[i] = target[i] + off[i];
+	}
+
 	// results back into model space, with normals from the moving triangles
 	std::vector<float> &nw = in->scratchN;
-	ParticleNormals( g, in->p, nw );
+	ParticleNormals( g, draw, nw );
 	in->outLocal.resize( (size_t)g->numParticles * 3 );
 	in->nrmLocal.resize( (size_t)g->numParticles * 3 );
 	for ( int p = 0; p < g->numParticles; p++ ) {
-		ToLocal( &in->p[p * 3], origin, axis, &in->outLocal[p * 3] );
+		ToLocal( &draw[p * 3], origin, axis, &in->outLocal[p * 3] );
 		DirToLocal( &nw[p * 3], axis, &in->nrmLocal[p * 3] );
 		mcNorm( &in->nrmLocal[p * 3] );
 	}
@@ -833,12 +872,14 @@ int MC_LoadConfig( const char *text ) {
 		d.bend = 0.3f;
 		d.inertia = -1.0f;
 		d.self = false;
+		d.smooth = 0.5f;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
 			if ( !Q_stricmp( tok, "tether" ) ) d.tether = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "shape" ) ) d.shape = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "self" ) ) d.self = true;
+			else if ( !Q_stricmp( tok, "smooth" ) ) d.smooth = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "inertia" ) ) d.inertia = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "bend" ) ) d.bend = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 		}
