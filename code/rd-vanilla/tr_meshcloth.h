@@ -67,7 +67,10 @@ struct mcParams_t {
 	float	shapeScale;		// multiplies each surface's shape value
 	float	inertia;		// 0..1 how much of the character's own travel the cloth feels
 	float	maxAccel;		// units/s^2 of character acceleration the cloth feels (0 = no limit)
-	float	airDrag;		// 1/s drag on all world motion: capes trail when running and lift when falling
+	float	airDrag;		// 1/s drag on all motion relative to the air: capes trail when running and lift when falling
+	float	wind[3];		// world wind velocity, units/s (still air = 0 0 0)
+	float	gust;			// 0..1 how much the wind strength varies over time
+	float	timeSec;		// current time for gusts (filled in by MC_Apply)
 };
 
 // Returns the 3x4 skinning matrix (model space) for a skeleton bone index.
@@ -100,3 +103,7 @@ void MC_Apply( const void *surface, const void *instanceKey, int timeMs,
 
 // Drop instances not drawn for a while. Call about once a frame.
 void MC_Prune( int timeMs );
+
+// Push all cloth near a point outward, like the blast wave of an explosion.
+// strength: speed (units/s) given to cloth at the centre, fading to 0 at radius.
+void MC_Blast( const float center[3], float strength, float radius );

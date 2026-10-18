@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #ifdef _G2_GORE
 #include "G2_gore_r2.h"
+#include "../rd-vanilla/tr_meshcloth.h"
 #endif
 
 static size_t STATIC_UNIFORM_BUFFER_SIZE = 1 * 1024 * 1024;
@@ -244,6 +245,8 @@ cvar_t* r_meshClothShape;
 cvar_t* r_meshClothInertia;
 cvar_t* r_meshClothMaxAccel;
 cvar_t* r_meshClothAirDrag;
+cvar_t* r_meshClothWind;
+cvar_t* r_meshClothGust;
 cvar_t* r_Ghoul2AnimSmooth = 0;
 cvar_t* r_Ghoul2UnSqashAfterSmooth = 0;
 //cvar_t	*r_Ghoul2UnSqash;
@@ -1486,6 +1489,16 @@ typedef struct consoleCommand_s {
 	xcommand_t	func;
 } consoleCommand_t;
 
+
+// meshcloth_blast [strength] [radius]: test explosion 96 units in front of the camera
+static void R_MeshClothBlast_f( void ) {
+	const float strength = ri.Cmd_Argc() > 1 ? (float)atof( ri.Cmd_Argv( 1 ) ) : 600.0f;
+	const float radius = ri.Cmd_Argc() > 2 ? (float)atof( ri.Cmd_Argv( 2 ) ) : 200.0f;
+	float c[3];
+	for ( int k = 0; k < 3; k++ ) c[k] = tr.refdef.vieworg[k] + tr.refdef.viewaxis[0][k] * 96.0f;
+	MC_Blast( c, strength, radius );
+}
+
 static consoleCommand_t	commands[] = {
 	{ "imagelist",			R_ImageList_f },
 	{ "shaderlist",			R_ShaderList_f },
@@ -1498,6 +1511,7 @@ static consoleCommand_t	commands[] = {
 	{ "gfxmeminfo",			GfxMemInfo_f },
 	{ "r_we",				R_WorldEffect_f },
 	{ "modellist",			R_Modellist_f },
+	{ "meshcloth_blast",	R_MeshClothBlast_f },
 	{ "vbolist",			R_VBOList_f },
 	{ "capframes",			R_CaptureFrameData_f },
 	{ "r_weather",			R_WeatherEffect_f },
@@ -1745,6 +1759,8 @@ static void R_Register(void)
 	r_meshClothInertia = ri.Cvar_Get("r_meshClothInertia", "1", CVAR_ARCHIVE);
 	r_meshClothMaxAccel = ri.Cvar_Get("r_meshClothMaxAccel", "0", CVAR_ARCHIVE);
 	r_meshClothAirDrag = ri.Cvar_Get("r_meshClothAirDrag", "2.5", CVAR_ARCHIVE);
+	r_meshClothWind = ri.Cvar_Get("r_meshClothWind", "0 0 0", CVAR_ARCHIVE);
+	r_meshClothGust = ri.Cvar_Get("r_meshClothGust", "0.5", CVAR_ARCHIVE);
 	r_Ghoul2AnimSmooth = ri_Cvar_Get_NoComm("r_ghoul2animsmooth", "0.3", CVAR_TEMP, "");
 	r_Ghoul2UnSqashAfterSmooth = ri_Cvar_Get_NoComm("r_ghoul2unsqashaftersmooth", "1", CVAR_TEMP, "");
 	broadsword = ri_Cvar_Get_NoComm("broadsword", "0", CVAR_ARCHIVE, "");

@@ -57,6 +57,7 @@ struct mcDef_t {
 	float			maxAccel;	// units/s^2 of character acceleration the cloth feels, 0 = no limit, -1 = cvar
 	float			maxSpin;	// degrees/s of the attached edge's turning the cloth feels, 0 = no limit, -1 = default
 	float			spread;		// 0..1 sideways-only pull toward the animated shape (keeps a cape from roping)
+	float			weight;		// relative mass per area: 1 = normal cloth, 2 = heavy wool/leather (air moves it half as much), 0.5 = silk
 };
 
 struct mcGroup_t {
@@ -73,6 +74,7 @@ struct mcGroup_t {
 	std::vector<float>					maxAccel;		// per particle
 	std::vector<float>					maxSpin;		// per particle
 	std::vector<float>					spread;			// per particle
+	std::vector<float>					weight;			// per particle
 	bool								anySmooth = false;
 	bool								anySelf = false;
 	std::vector<int>					lraAnchor;		// nearest attached particle along the cloth (-1 none)
@@ -103,12 +105,15 @@ struct mcInstance_t {
 	int					pinTime;
 	int					originTime;
 	std::vector<float>	p, prev, target, targetPrev;	// 3 per particle, world
+	std::vector<float>	simTarget;		// animated pose at the simulation's own clock (it trails the frame by 'accum')
 	std::vector<float>	outLocal, nrmLocal;				// 3 per particle, model space
 	std::vector<float>	skinNrm;						// 3 per global vertex, model space
 	std::vector<float>	scratchTarget, scratchFrom, scratchTo, scratchN;
 	std::vector<float>	push, contactN, targetSub;	// per particle: this substep's body push, contact normal, previous substep target
 	std::vector<char>	contact;
 	std::vector<float>	scratchTarget2, scratchCnt;
+	std::vector<float>	impulse;		// pending velocity kicks (units/s), e.g. from explosions
+	std::vector<float>	offPrev, offCur;	// cloth offset from the animation after the last two steps (for drawing between steps)
 };
 
 std::vector<mcDef_t>										g_defs;
@@ -296,6 +301,7 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->maxAccel.push_back( g->defs[si]->maxAccel );
 				g->maxSpin.push_back( g->defs[si]->maxSpin );
 				g->spread.push_back( g->defs[si]->spread );
+				g->weight.push_back( g->defs[si]->weight );
 				if ( g->defs[si]->smooth > 0.0f ) g->anySmooth = true;
 				if ( g->defs[si]->self ) g->anySelf = true;
 				grid.Add( v[i].vertCoords, p );
@@ -602,6 +608,7 @@ void Reset( mcInstance_t *in, int time ) {
 	in->p = in->target;
 	in->prev = in->target;
 	in->targetPrev = in->target;
+	in->simTarget = in->target;
 	in->accum = 0;
 	in->lastTime = time;
 	in->active = true;
@@ -789,6 +796,13 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 	// bend stiffness per substep so the total doesn't depend on the count
 	const float bendScale = 1.0f / sub;	// exponent: k_sub = 1 - (1 - bend)^(1/sub)
 	std::vector<float> &n = in->scratchN;
+	// wind with slow gusts: two incommensurate sines, so it never repeats visibly
+	vec3_t windNow;
+	{
+		const float t = prm->timeSec;
+		const float gs = 1.0f + prm->gust * ( 0.6f * sinf( t * 1.3f ) + 0.4f * sinf( t * 3.7f + 1.1f ) );
+		mcScale( prm->wind, gs, windNow );
+	}
 
 	// the cloth's current size against its bind pose (model scale)
 	float animSum = 0.0f;
@@ -823,20 +837,30 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 			vec3_t v;
 			mcSub( pp, pv, v );
 			mcScale( v, damp, v );
-			// air resistance: the part of the motion straight through the
-			// cloth is slowed, sliding along it isn't (why capes billow)
-			const float *nn = &n[p * 3];
-			const float vn = mcDot( v, nn );
-			float dr = prm->drag * h;
-			if ( dr > 1.0f ) dr = 1.0f;
-			mcMA( v, -vn * dr, nn, v );
-			// still-air drag on all world motion, not only through the cloth:
-			// a falling or running character outpaces his cape, so it lifts up
-			// when he falls and streams back when he runs
-			if ( prm->airDrag > 0.0f ) {
-				float ad = prm->airDrag * h;
-				if ( ad > 0.5f ) ad = 0.5f;
-				mcScale( v, 1.0f - ad, v );
+			if ( s == 0 && in->impulse.size() == in->p.size() ) mcMA( v, h, &in->impulse[p * 3], v );
+			// Air. The force comes from the cloth's motion RELATIVE TO THE AIR
+			// (its own world velocity minus the wind), split in two:
+			//  - through the cloth (along its normal): the strong "sail" drag
+			//    that makes capes billow,
+			//  - along the cloth: weaker skin drag, which is what lifts a cape
+			//    when its wearer falls and streams it back when he runs.
+			// Both are divided by the cloth's weight (mass per area): the same
+			// air moves a heavy wool cloak less than a silk cape. Gravity is
+			// not divided, since every mass falls alike.
+			{
+				const float invW = 1.0f / g->weight[p];
+				vec3_t rel;
+				mcMA( v, -h, windNow, rel );		// v is per substep, wind is per second
+				const float *nn = &n[p * 3];
+				const float vn = mcDot( rel, nn );
+				float kn = prm->drag * h * invW;
+				if ( kn > 1.0f ) kn = 1.0f;
+				float kt = prm->airDrag * h * invW;
+				if ( kt > 0.5f ) kt = 0.5f;
+				vec3_t relT;
+				mcMA( rel, -vn, nn, relT );
+				mcMA( v, -vn * kn, nn, v );
+				mcMA( v, -kt, relT, v );
 			}
 			mcCopy( pp, pv );
 			mcAdd( pp, v, pp );
@@ -863,6 +887,7 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 		SolveConstraints( g, in, caps, ncaps, bendScale );
 		ContactVelocity( g, in );
 	}
+	in->impulse.clear();
 	SelfCollide( g, in );
 }
 
@@ -904,6 +929,9 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		// instead of starting in the modelled (often flared) pose
 		for ( int k = 0; k < MC_SETTLE_STEPS; k++ ) Step( g, in, target, target, nearCaps, nnear, prm );
 		in->prev.assign( in->p.begin(), in->p.end() );
+		in->offCur.resize( target.size() );
+		for ( size_t i = 0; i < target.size(); i++ ) in->offCur[i] = in->p[i] - target[i];
+		in->offPrev = in->offCur;
 	} else {
 		mcCopy( axis[2], in->up );
 		mcNorm( in->up );
@@ -922,6 +950,16 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 			// instead of whipping it
 			vec3_t vNew, acc, excess = { 0, 0, 0 };
 			mcScale( dO, 1.0f / dt, vNew );
+			// game frame times are uneven (whole ms, varying frame rate), so a
+			// per-frame velocity is noisy and its derivative explodes into
+			// thousands of units/s^2 even at a steady run. Smooth the velocity
+			// over ~50 ms first, so only real starts, stops and jumps count.
+			{
+				const float k = 1.0f - expf( -dt / 0.05f );
+				vec3_t dv;
+				mcSub( vNew, in->originVel, dv );
+				mcMA( in->originVel, k, dv, vNew );
+			}
 			mcSub( vNew, in->originVel, acc );
 			mcScale( acc, 1.0f / dt, acc );
 			const float aLen = mcLen( acc );
@@ -941,6 +979,7 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 				// amount, or a jump take-off puts the cloth ahead of its own
 				// attachment for a moment and yanks it
 				mcAdd( &in->targetPrev[p * 3], shift, &in->targetPrev[p * 3] );
+				if ( in->simTarget.size() == in->targetPrev.size() ) mcAdd( &in->simTarget[p * 3], shift, &in->simTarget[p * 3] );
 				if ( g->freedom[p] <= 0.0f ) continue;
 				mcAdd( &in->p[p * 3], shift, &in->p[p * 3] );
 				mcAdd( &in->prev[p * 3], shift, &in->prev[p * 3] );
@@ -957,46 +996,68 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		const int dt = timeMs - in->lastTime;
 		int steps = 0;
 		if ( dt > 0 ) {
+			const int accumOld = in->accum;
 			in->accum += dt;
 			steps = in->accum / MC_STEP_MS;
-			if ( steps > MC_MAX_STEPS ) { steps = MC_MAX_STEPS; in->accum = 0; }
+			bool clamped = false;
+			if ( steps > MC_MAX_STEPS ) { steps = MC_MAX_STEPS; in->accum = 0; clamped = true; }
 			else in->accum -= steps * MC_STEP_MS;
 			std::vector<float> &from = in->scratchFrom, &to = in->scratchTo;
-			from.resize( target.size() );
-			to.resize( target.size() );
+			if ( in->simTarget.size() != target.size() ) in->simTarget.assign( in->targetPrev.begin(), in->targetPrev.end() );
+			to.assign( in->simTarget.begin(), in->simTarget.end() );
 			for ( int s = 0; s < steps; s++ ) {
-				const float t0 = (float)s / steps, t1 = (float)( s + 1 ) / steps;
-				for ( size_t i = 0; i < target.size(); i++ ) {
-					const float d0 = target[i] - in->targetPrev[i];
-					from[i] = in->targetPrev[i] + d0 * t0;
-					to[i] = in->targetPrev[i] + d0 * t1;
-				}
+				// each step ends at a fixed 16 ms tick of the simulation clock;
+				// the animated pose is sampled at that exact time, so the cloth
+				// sees the body's true speed whatever the frame timing
+				float t1 = clamped ? (float)( s + 1 ) / steps : (float)( MC_STEP_MS * ( s + 1 ) - accumOld ) / dt;
+				if ( t1 > 1.0f ) t1 = 1.0f; else if ( t1 < 0.0f ) t1 = 0.0f;
+				from.swap( to );
+				to.resize( target.size() );
+				for ( size_t i = 0; i < target.size(); i++ ) to[i] = in->targetPrev[i] + ( target[i] - in->targetPrev[i] ) * t1;
 				Step( g, in, from, to, nearCaps, nnear, prm );
+				in->offPrev.swap( in->offCur );
+				in->offCur.resize( to.size() );
+				for ( size_t i = 0; i < to.size(); i++ ) in->offCur[i] = in->p[i] - to[i];
 			}
+			// without a step the simulation clock stays put and keeps its pose sample
+			if ( steps > 0 ) in->simTarget.assign( to.begin(), to.end() );
 			in->targetPrev.assign( target.begin(), target.end() );
 			in->lastTime = timeMs;
 		}
 		// frames without a full step still follow the current pose, so a
 		// fast limb never ends up inside stale cloth
-		if ( steps == 0 ) {
-			in->target.assign( target.begin(), target.end() );
-			SolveConstraints( g, in, nearCaps, nnear, 0.0f );
-		}
+		if ( steps == 0 ) in->target.assign( target.begin(), target.end() );
 	}
 
 	// what gets drawn: the simulated positions with small creases smoothed
 	// out of their offset from the animation (visual only, the simulation
 	// keeps its state). A coarse game mesh can't show folds smaller than a
 	// couple of triangles anyway; they only read as crumpling.
+	// The simulation runs in fixed 16 ms steps but frames come every few
+	// ms. Drawing the raw particles would leave the cloth standing still in
+	// the world on frames without a step while the body moves on, then jump
+	// to catch up: a stutter at the frame rate that reads as the cape
+	// shaking when running. Instead the cloth is drawn as the current
+	// animated pose plus its offset from the animation, blended between the
+	// last two steps (standard fixed-timestep interpolation).
 	std::vector<float> &draw = in->scratchFrom;
-	draw.assign( in->p.begin(), in->p.end() );
+	std::vector<float> &off = in->scratchTo;
+	draw.resize( target.size() );
+	off.resize( target.size() );
+	{
+		float a = in->accum / (float)MC_STEP_MS;
+		if ( a < 0.0f ) a = 0.0f; else if ( a > 1.0f ) a = 1.0f;
+		const bool ok = in->offCur.size() == target.size() && in->offPrev.size() == target.size();
+		for ( size_t i = 0; i < target.size(); i++ )
+			off[i] = ok ? in->offPrev[i] + ( in->offCur[i] - in->offPrev[i] ) * a : in->p[i] - target[i];
+		for ( int p = 0; p < g->numParticles; p++ )
+			if ( g->freedom[p] <= 0.0f ) off[p * 3] = off[p * 3 + 1] = off[p * 3 + 2] = 0.0f;
+	}
 	if ( g->anySmooth ) {
-		std::vector<float> &off = in->scratchTo, &acc = in->scratchTarget2;
-		off.resize( in->p.size() );
+		std::vector<float> &acc = in->scratchTarget2;
 		acc.resize( in->p.size() );
 		std::vector<float> &cnt = in->scratchCnt;
 		cnt.resize( g->numParticles );
-		for ( size_t i = 0; i < in->p.size(); i++ ) off[i] = in->p[i] - target[i];
 		for ( int pass = 0; pass < 2; pass++ ) {
 			std::fill( acc.begin(), acc.end(), 0.0f );
 			std::fill( cnt.begin(), cnt.end(), 0.0f );
@@ -1012,8 +1073,8 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 				for ( int k = 0; k < 3; k++ ) off[p * 3 + k] += w * ( acc[p * 3 + k] / cnt[p] - off[p * 3 + k] );
 			}
 		}
-		for ( size_t i = 0; i < draw.size(); i++ ) draw[i] = target[i] + off[i];
 	}
+	for ( size_t i = 0; i < draw.size(); i++ ) draw[i] = target[i] + off[i];
 
 	// results back into model space, with normals from the moving triangles
 	std::vector<float> &nw = in->scratchN;
@@ -1064,12 +1125,14 @@ int MC_LoadConfig( const char *text ) {
 		d.maxAccel = -1.0f;
 		d.maxSpin = -1.0f;
 		d.spread = 0.0f;
+		d.weight = 1.0f;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
 			if ( !Q_stricmp( tok, "tether" ) ) d.tether = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "shape" ) ) d.shape = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "self" ) ) d.self = true;
+			else if ( !Q_stricmp( tok, "weight" ) ) { d.weight = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.weight < 0.1f ) d.weight = 0.1f; if ( d.weight > 10.0f ) d.weight = 10.0f; }
 			else if ( !Q_stricmp( tok, "spread" ) ) d.spread = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "maxspin" ) ) { d.maxSpin = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxSpin < 0.0f ) d.maxSpin = 0.0f; }
 			else if ( !Q_stricmp( tok, "maxaccel" ) ) { d.maxAccel = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxAccel < 0.0f ) d.maxAccel = 0.0f; }
@@ -1161,7 +1224,9 @@ void MC_Apply( const void *surfacePtr, const void *instanceKey, int timeMs,
 	// the first cloth surface drawn this frame simulates the whole model;
 	// the others (and shadow/mirror passes) reuse the result
 	if ( in->outTime != timeMs || !in->active ) {
-		Simulate( g, in, timeMs, origin, axis, caps, ncaps, prm, boneFn, boneCtx );
+		mcParams_t pt = *prm;
+		pt.timeSec = timeMs * 0.001f;
+		Simulate( g, in, timeMs, origin, axis, caps, ncaps, &pt, boneFn, boneCtx );
 	}
 
 	const int base = g->vertBase[si];
@@ -1177,6 +1242,27 @@ void MC_Apply( const void *surfacePtr, const void *instanceKey, int timeMs,
 		const float b = f < 0.25f ? f * 4.0f : 1.0f;		// fade in near the attached edge
 		for ( int k = 0; k < 3; k++ ) normal[i][k] = normal[i][k] * ( 1.0f - b ) + cn[k] * sgn * b;
 		mcNorm( normal[i] );
+	}
+}
+
+void MC_Blast( const float center[3], float strength, float radius ) {
+	if ( radius <= 1.0f ) return;
+	for ( auto &kv : g_instances ) {
+		mcInstance_t *in = kv.second;
+		if ( !in || !in->active || in->p.empty() ) continue;
+		const int np = (int)( in->p.size() / 3 );
+		if ( in->impulse.size() != in->p.size() ) in->impulse.assign( in->p.size(), 0.0f );
+		for ( int p = 0; p < np; p++ ) {
+			vec3_t d;
+			mcSub( &in->p[p * 3], center, d );
+			const float dist = mcLen( d );
+			if ( dist >= radius || dist < 1e-3f ) continue;
+			// falls off with distance; a little upward bias, as blast waves lift cloth
+			const float sp = strength * ( 1.0f - dist / radius );
+			mcScale( d, sp / dist, d );
+			d[2] += 0.3f * sp;
+			mcAdd( &in->impulse[p * 3], d, &in->impulse[p * 3] );
+		}
 	}
 }
 

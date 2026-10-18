@@ -31,6 +31,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "tr_stl.h"
 #include "../rd-common/tr_font.h"
 #include "tr_WorldEffects.h"
+#include "tr_meshcloth.h"
 
 glconfig_t	glConfig;
 glstate_t	glState;
@@ -129,6 +130,8 @@ cvar_t* r_meshClothShape;
 cvar_t* r_meshClothInertia;
 cvar_t* r_meshClothMaxAccel;
 cvar_t* r_meshClothAirDrag;
+cvar_t* r_meshClothWind;
+cvar_t* r_meshClothGust;
 cvar_t* r_shadowRange;
 cvar_t* r_flares;
 cvar_t* r_nobind;
@@ -1590,6 +1593,16 @@ using consoleCommand_t = struct consoleCommand_s {
 
 void R_ReloadFonts_f();
 
+
+// meshcloth_blast [strength] [radius]: test explosion 96 units in front of the camera
+static void R_MeshClothBlast_f( void ) {
+	const float strength = ri.Cmd_Argc() > 1 ? (float)atof( ri.Cmd_Argv( 1 ) ) : 600.0f;
+	const float radius = ri.Cmd_Argc() > 2 ? (float)atof( ri.Cmd_Argv( 2 ) ) : 200.0f;
+	float c[3];
+	for ( int k = 0; k < 3; k++ ) c[k] = tr.refdef.vieworg[k] + tr.refdef.viewaxis[0][k] * 96.0f;
+	MC_Blast( c, strength, radius );
+}
+
 static consoleCommand_t	commands[] = {
 	{ "imagelist",			R_ImageList_f },
 	{ "shaderlist",			R_ShaderList_f },
@@ -1603,6 +1616,7 @@ static consoleCommand_t	commands[] = {
 	{ "r_we",				R_WorldEffect_f },
 	{ "imagecacheinfo",		RE_RegisterImages_Info_f },
 	{ "modellist",			R_Modellist_f },
+	{ "meshcloth_blast",	R_MeshClothBlast_f },
 	{ "modelcacheinfo",		RE_RegisterModels_Info_f },
 	{ "r_fogDistance",		R_FogDistance_f },
 	{ "r_fogColor",			R_FogColor_f },
@@ -1765,6 +1779,8 @@ static void R_Register()
 	r_meshClothInertia = ri.Cvar_Get("r_meshClothInertia", "1", CVAR_ARCHIVE);
 	r_meshClothMaxAccel = ri.Cvar_Get("r_meshClothMaxAccel", "0", CVAR_ARCHIVE);
 	r_meshClothAirDrag = ri.Cvar_Get("r_meshClothAirDrag", "2.5", CVAR_ARCHIVE);
+	r_meshClothWind = ri.Cvar_Get("r_meshClothWind", "0 0 0", CVAR_ARCHIVE);
+	r_meshClothGust = ri.Cvar_Get("r_meshClothGust", "0.5", CVAR_ARCHIVE);
 	r_shadowRange = ri.Cvar_Get("r_shadowRange", "1000", CVAR_ARCHIVE_ND);
 	/*
 	Ghoul2 Insert Start

@@ -3099,6 +3099,13 @@ static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* sur
 	prm.inertia = r_meshClothInertia->value;
 	prm.maxAccel = r_meshClothMaxAccel->value;
 	prm.airDrag = r_meshClothAirDrag->value;
+	{
+		float w[3] = { 0, 0, 0 };
+		sscanf( r_meshClothWind->string, "%f %f %f", &w[0], &w[1], &w[2] );
+		prm.wind[0] = w[0]; prm.wind[1] = w[1]; prm.wind[2] = w[2];
+	}
+	prm.gust = r_meshClothGust->value;
+	prm.timeSec = 0.0f;
 
 	MC_Apply(surface, bones, backEnd.refdef.time, ent->e.origin, axis, caps, ncaps, &prm,
 		MC_BoneFn, bones, &tess.xyz[tess.numVertexes], &tess.normal[tess.numVertexes]);
