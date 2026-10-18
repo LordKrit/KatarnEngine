@@ -32,6 +32,8 @@ from a config text (ext_data/meshcloth.cfg), one line per surface:
   inertia  0..1 how much of the character's running and turning this
            cloth feels (1 = all of it, a cape that flies out behind).
            Default: the r_meshClothInertia console value.
+  self     (no value) self-collision, so a single-layer cape can't fold
+           through itself. Leave off for layered robes and sleeves.
   shape    0..1 optional pull back toward the modelled shape. Default 0
            (real cloth: only the attached part follows the animation).
 

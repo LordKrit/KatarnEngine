@@ -50,6 +50,7 @@ struct mcDef_t {
 	float			shape;
 	float			bend;		// 0..1 bending stiffness (0 = limp silk, 1 = stiff leather)
 	float			inertia;	// 0..1, or -1 to use r_meshClothInertia
+	bool			self;		// self-collision (single-layer capes)
 };
 
 struct mcGroup_t {
@@ -61,9 +62,12 @@ struct mcGroup_t {
 	std::vector<int>					vertToParticle;	// global vertex -> particle
 	std::vector<int>					partSurf, partVert;	// representative surface / local vertex
 	std::vector<float>					freedom, tether, shape, bend, inertia;	// per particle
+	std::vector<char>					selfCol;		// per particle: takes part in self-collision
+	bool								anySelf = false;
 	std::vector<int>					lraAnchor;		// nearest attached particle along the cloth (-1 none)
 	std::vector<float>					lraLen;			// bind-pose distance to it along the cloth
 	float								bindLinkSum;	// total bind length of the structural links
+	std::vector<float>					bindPos;		// 3 per particle, model bind pose
 	std::vector<int>					linkA, linkB;
 	std::vector<char>					linkBend;
 	std::vector<int>					tris;			// particle indices
@@ -85,6 +89,8 @@ struct mcInstance_t {
 	std::vector<float>	outLocal, nrmLocal;				// 3 per particle, model space
 	std::vector<float>	skinNrm;						// 3 per global vertex, model space
 	std::vector<float>	scratchTarget, scratchFrom, scratchTo, scratchN;
+	std::vector<float>	push, contactN, targetSub;	// per particle: this substep's body push, contact normal, previous substep target
+	std::vector<char>	contact;
 };
 
 std::vector<mcDef_t>										g_defs;
@@ -267,6 +273,8 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->shape.push_back( g->defs[si]->shape );
 				g->bend.push_back( g->defs[si]->bend );
 				g->inertia.push_back( g->defs[si]->inertia );
+				g->selfCol.push_back( g->defs[si]->self ? 1 : 0 );
+				if ( g->defs[si]->self ) g->anySelf = true;
 				grid.Add( v[i].vertCoords, p );
 			} else {
 				// shared by two pieces: the more attached and the shorter tether win
@@ -317,7 +325,11 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 	// particle's nearest attached particle measured along the cloth, so the
 	// solver can forbid it from ever getting further away than that
 	std::vector<const float *> bindPos( g->numParticles );
-	for ( int p = 0; p < g->numParticles; p++ ) bindPos[p] = Verts( g->surfs[g->partSurf[p]] )[g->partVert[p]].vertCoords;
+	g->bindPos.resize( (size_t)g->numParticles * 3 );
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		bindPos[p] = Verts( g->surfs[g->partSurf[p]] )[g->partVert[p]].vertCoords;
+		mcCopy( bindPos[p], &g->bindPos[p * 3] );
+	}
 	std::vector<std::vector<std::pair<int, float>>> adj( g->numParticles );
 	g->bindLinkSum = 0.0f;
 	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
@@ -401,7 +413,8 @@ void SkinVertex( const mdxmSurface_t *s, int i, mcBoneFn_t boneFn, void *ctx, fl
 // animation itself puts this vertex (target). Robes are often modelled a
 // little inside the capsule shapes; forcing those parts out fights their
 // attached neighbours and stretches the mesh.
-void Collide( float *p, const float *target, const mcCapsule_t *caps, int n ) {
+bool Collide( float *p, const float *target, const mcCapsule_t *caps, int n, float *nOut ) {
+	bool hit = false;
 	for ( int c = 0; c < n; c++ ) {
 		vec3_t ab, ap, cl, out;
 		mcSub( caps[c].b, caps[c].a, ab );
@@ -419,8 +432,17 @@ void Collide( float *p, const float *target, const mcCapsule_t *caps, int n ) {
 		mcSub( target, ac, ao );
 		float dT = mcLen( ao );
 		if ( dT < minD ) minD = dT;
-		if ( d < minD ) mcMA( cl, minD / d, out, p );
+		if ( d < minD ) {
+			mcMA( cl, minD / d, out, p );
+			mcScale( out, 1.0f / d, nOut );
+			hit = true;
+		} else if ( d < minD + 0.25f ) {
+			// resting on the body: still in contact for friction
+			mcScale( out, 1.0f / d, nOut );
+			hit = true;
+		}
 	}
+	return hit;
 }
 
 void ParticleNormals( const mcGroup_t *g, const std::vector<float> &pos, std::vector<float> &n ) {
@@ -471,6 +493,11 @@ int CullCapsules( const mcGroup_t *g, const std::vector<float> &target, const mc
 // fraction of the bend error removed (stiffness made independent of the
 // substep count by the caller).
 void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps, float bendScale ) {
+	if ( (int)in->contact.size() != g->numParticles ) {
+		in->contact.assign( g->numParticles, 0 );
+		in->push.assign( (size_t)g->numParticles * 3, 0.0f );
+		in->contactN.assign( (size_t)g->numParticles * 3, 0.0f );
+	}
 	// stretch: the fabric keeps the edge lengths the animated mesh has now
 	// (rigidly - real cloth barely stretches); bend links resist folding
 	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
@@ -515,7 +542,14 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 			const float len = mcLen( d );
 			if ( len > maxLen && len > 1e-5f ) mcMA( &in->p[an * 3], maxLen / len, d, pp );
 		}
-		Collide( pp, t, caps, ncaps );
+		vec3_t before;
+		mcCopy( pp, before );
+		if ( Collide( pp, t, caps, ncaps, &in->contactN[p * 3] ) ) {
+			in->contact[p] = 1;
+			vec3_t pu;
+			mcSub( pp, before, pu );
+			mcAdd( &in->push[p * 3], pu, &in->push[p * 3] );
+		}
 		// max distance from the animated position (a safety net, as in game
 		// cloth tools - not a spring)
 		vec3_t d;
@@ -534,6 +568,78 @@ void Reset( mcInstance_t *in, int time ) {
 	in->active = true;
 	in->linkScale = 1.0f;
 	in->lastOrigin[0] = in->lastOrigin[1] = in->lastOrigin[2] = 0.0f;
+}
+
+// Velocity pass after a substep's constraints, for vertices touching the
+// body (Macklin et al. 2014 / Mueller et al. 2020): Verlet turns every
+// position correction into speed, so a leg pushing the cape out would
+// throw it. The push is kept as a move but mostly not as speed, and the
+// sliding speed against the moving body is cut by friction.
+void ContactVelocity( const mcGroup_t *g, mcInstance_t *in ) {
+	const float keepPush = 0.2f;	// part of the push that may become speed
+	const float friction = 0.3f;	// tangential speed removed per substep in contact
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( !in->contact[p] || g->freedom[p] <= 0.0f ) continue;
+		float *pp = &in->p[p * 3], *pv = &in->prev[p * 3];
+		mcMA( pv, 1.0f - keepPush, &in->push[p * 3], pv );
+		// speed relative to the body surface (the animated vertex's motion)
+		vec3_t v, vb, vr, vt;
+		mcSub( pp, pv, v );
+		mcSub( &in->target[p * 3], &in->targetSub[p * 3], vb );
+		mcSub( v, vb, vr );
+		const float *n = &in->contactN[p * 3];
+		const float vn = mcDot( vr, n );
+		mcMA( vr, -vn, n, vt );
+		mcMA( pv, friction, vt, pv );
+		// no new speed into the body
+		if ( vn < 0.0f ) mcMA( pv, vn, n, pv );
+	}
+}
+
+// Self-collision: keeps cloth from folding through itself. Particles
+// closer than the cloth thickness are pushed apart, except pairs that are
+// already close in the modelled shape (neighbours, layered panels).
+void SelfCollide( const mcGroup_t *g, mcInstance_t *in ) {
+	if ( !g->anySelf ) return;
+	const float thick = 1.2f * in->linkScale;
+	const float cell = thick;
+	struct key_hash { size_t operator()( long long k ) const { return (size_t)( k ^ ( k >> 29 ) ); } };
+	static std::unordered_map<long long, std::vector<int>, key_hash> grid;
+	grid.clear();
+	auto cellOf = [&]( const float *v, int k ) { return (long long)floorf( v[k] / cell ); };
+	auto key = []( long long x, long long y, long long z ) { return ( x * 73856093LL ) ^ ( y * 19349663LL ) ^ ( z * 83492791LL ); };
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] <= 0.0f || !g->selfCol[p] ) continue;
+		const float *v = &in->p[p * 3];
+		grid[key( cellOf( v, 0 ), cellOf( v, 1 ), cellOf( v, 2 ) )].push_back( p );
+	}
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] <= 0.0f || !g->selfCol[p] ) continue;
+		float *a = &in->p[p * 3];
+		const long long cx = cellOf( a, 0 ), cy = cellOf( a, 1 ), cz = cellOf( a, 2 );
+		for ( long long dx = -1; dx <= 1; dx++ ) for ( long long dy = -1; dy <= 1; dy++ ) for ( long long dz = -1; dz <= 1; dz++ ) {
+			auto it = grid.find( key( cx + dx, cy + dy, cz + dz ) );
+			if ( it == grid.end() ) continue;
+			for ( const int q : it->second ) {
+				if ( q <= p ) continue;
+				vec3_t bd;
+				mcSub( &g->bindPos[p * 3], &g->bindPos[q * 3], bd );
+				const float bindDist = mcLen( bd ) * in->linkScale;
+				if ( bindDist < 2.5f * thick ) continue;	// neighbours in the cloth
+				float *b = &in->p[q * 3];
+				vec3_t d;
+				mcSub( a, b, d );
+				const float len = mcLen( d );
+				if ( len >= thick || len < 1e-5f ) continue;
+				const float corr = 0.5f * ( thick - len ) / len;
+				mcMA( a, corr, d, a );
+				mcMA( b, -corr, d, b );
+				// a separation, not a throw
+				mcMA( &in->prev[p * 3], corr, d, &in->prev[p * 3] );
+				mcMA( &in->prev[q * 3], -corr, d, &in->prev[q * 3] );
+			}
+		}
+	}
 }
 
 // One 16 ms step, split into substeps ("Small Steps in Physics
@@ -560,9 +666,16 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 	in->linkScale = g->bindLinkSum > 1e-3f ? animSum / g->bindLinkSum : 1.0f;
 
 	in->target.resize( tgtTo.size() );
+	in->push.resize( tgtTo.size() );
+	in->contactN.resize( tgtTo.size() );
+	in->contact.resize( g->numParticles );
+	in->targetSub.assign( tgtFrom.begin(), tgtFrom.end() );
 	for ( int s = 0; s < sub; s++ ) {
 		const float t1 = (float)( s + 1 ) / sub;
+		if ( s > 0 ) in->targetSub.assign( in->target.begin(), in->target.end() );
 		for ( size_t i = 0; i < tgtTo.size(); i++ ) in->target[i] = tgtFrom[i] + ( tgtTo[i] - tgtFrom[i] ) * t1;
+		std::fill( in->push.begin(), in->push.end(), 0.0f );
+		std::fill( in->contact.begin(), in->contact.end(), 0 );
 		ParticleNormals( g, in->p, n );
 		for ( int p = 0; p < g->numParticles; p++ ) {
 			const float f = g->freedom[p];
@@ -595,7 +708,9 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 			}
 		}
 		SolveConstraints( g, in, caps, ncaps, bendScale );
+		ContactVelocity( g, in );
 	}
+	SelfCollide( g, in );
 }
 
 void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t origin, const vec3_t axis[3],
@@ -717,11 +832,13 @@ int MC_LoadConfig( const char *text ) {
 		d.shape = 0.0f;
 		d.bend = 0.3f;
 		d.inertia = -1.0f;
+		d.self = false;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
 			if ( !Q_stricmp( tok, "tether" ) ) d.tether = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "shape" ) ) d.shape = (float)atof( COM_ParseExt( &p, qfalse ) );
+			else if ( !Q_stricmp( tok, "self" ) ) d.self = true;
 			else if ( !Q_stricmp( tok, "inertia" ) ) d.inertia = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "bend" ) ) d.bend = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 		}
