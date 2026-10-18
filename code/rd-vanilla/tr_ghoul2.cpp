@@ -27,6 +27,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #if !defined(TR_LOCAL_H)
 #include "tr_local.h"
+#include "tr_meshcloth.h"
 #endif
 
 #include "tr_common.h"
@@ -2969,6 +2970,135 @@ void G2_ConstructGhoulSkeleton(CGhoul2Info_v& ghoul2, const int frameNum, const 
 
 /*
 ==============
+Mesh cloth glue (see tr_meshcloth.h)
+==============
+*/
+void R_MeshClothLoadConfig()
+{
+	char* buf = nullptr;
+	const long len = ri.FS_ReadFile("ext_data/meshcloth.cfg", reinterpret_cast<void**>(&buf));
+	if (len > 0 && buf)
+	{
+		const int n = MC_LoadConfig(buf);
+		ri.Printf(PRINT_ALL, "Mesh cloth: %d surface(s) from ext_data/meshcloth.cfg\n", n);
+		ri.FS_FreeFile(buf);
+	}
+	else
+	{
+		MC_LoadConfig("");
+	}
+}
+
+void R_MeshClothShutdown()
+{
+	MC_Clear();
+}
+
+// Body capsules the cloth collides with, from _humanoid bone names.
+static const char* const mcColliderBones[][2] = {
+	{ "pelvis", "thoracic" }, { "thoracic", "cervical" }, { "cervical", "cranium" },
+	{ "lfemurYZ", "ltibia" }, { "ltibia", "ltalus" }, { "rfemurYZ", "rtibia" }, { "rtibia", "rtalus" },
+	{ "lhumerus", "lradius" }, { "lradius", "lhand" }, { "rhumerus", "rradius" }, { "rradius", "rhand" }
+};
+static const float mcColliderRadius[] = { 6.0f, 4.5f, 3.8f, 5.0f, 3.8f, 5.0f, 3.8f, 2.5f, 2.2f, 2.5f, 2.2f };
+static const int MC_NUM_COLLIDERS = sizeof(mcColliderRadius) / sizeof(mcColliderRadius[0]);
+
+struct mcBoneLookup_t
+{
+	const mdxaHeader_t* header;
+	int idx[MC_NUM_COLLIDERS][2];
+};
+
+static const mdxaSkel_t* MC_Skel(const mdxaHeader_t* h, const int i)
+{
+	const auto offsets = reinterpret_cast<const mdxaSkelOffsets_t*>(reinterpret_cast<const byte*>(h) + sizeof(mdxaHeader_t));
+	return reinterpret_cast<const mdxaSkel_t*>(reinterpret_cast<const byte*>(h) + sizeof(mdxaHeader_t) + offsets->offsets[i]);
+}
+
+static const mcBoneLookup_t* MC_Lookup(const mdxaHeader_t* h)
+{
+	static mcBoneLookup_t cache[8];
+	static int next = 0;
+	for (auto& c : cache)
+	{
+		if (c.header == h) return &c;
+	}
+	mcBoneLookup_t& c = cache[next];
+	next = (next + 1) % 8;
+	c.header = h;
+	for (int k = 0; k < MC_NUM_COLLIDERS; k++)
+	{
+		for (int e = 0; e < 2; e++)
+		{
+			c.idx[k][e] = -1;
+			for (int i = 0; i < h->numBones; i++)
+			{
+				if (!Q_stricmp(MC_Skel(h, i)->name, mcColliderBones[k][e]))
+				{
+					c.idx[k][e] = i;
+					break;
+				}
+			}
+		}
+	}
+	return &c;
+}
+
+static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* surface)
+{
+	CBoneCache* bones = surf->boneCache;
+	const trRefEntity_t* ent = backEnd.currentEntity;
+	if (!bones || !bones->header || !ent)
+	{
+		return;
+	}
+
+	vec3_t axis[3];
+	VectorCopy(ent->e.axis[0], axis[0]);
+	VectorCopy(ent->e.axis[1], axis[1]);
+	VectorCopy(ent->e.axis[2], axis[2]);
+
+	// capsules: posed bone origin = skin matrix * bind position, then to world
+	mcCapsule_t caps[MC_NUM_COLLIDERS];
+	int ncaps = 0;
+	const mcBoneLookup_t* lk = MC_Lookup(bones->header);
+	for (int k = 0; k < MC_NUM_COLLIDERS; k++)
+	{
+		if (lk->idx[k][0] < 0 || lk->idx[k][1] < 0) continue;
+		for (int e = 0; e < 2; e++)
+		{
+			const int bi = lk->idx[k][e];
+			const mdxaBone_t& m = bones->EvalRender(bi);
+			const mdxaBone_t& bp = MC_Skel(bones->header, bi)->BasePoseMat;
+			const vec3_t b = { bp.matrix[0][3], bp.matrix[1][3], bp.matrix[2][3] };
+			vec3_t local;
+			for (int r = 0; r < 3; r++)
+			{
+				local[r] = m.matrix[r][0] * b[0] + m.matrix[r][1] * b[1] + m.matrix[r][2] * b[2] + m.matrix[r][3];
+			}
+			float* out = e ? caps[ncaps].b : caps[ncaps].a;
+			for (int r = 0; r < 3; r++)
+			{
+				out[r] = ent->e.origin[r] + axis[0][r] * local[0] + axis[1][r] * local[1] + axis[2][r] * local[2];
+			}
+		}
+		caps[ncaps].r = mcColliderRadius[k];
+		ncaps++;
+	}
+
+	mcParams_t prm;
+	prm.gravity = r_meshClothGravity->value;
+	prm.drag = r_meshClothDrag->value;
+	prm.iterations = r_meshClothIter->integer;
+	prm.shapeScale = r_meshClothShape->value;
+
+	MC_Apply(surface, bones, backEnd.refdef.time, ent->e.origin, axis, caps, ncaps, &prm,
+		&tess.xyz[tess.numVertexes], &tess.normal[tess.numVertexes]);
+	MC_Prune(backEnd.refdef.time);
+}
+
+/*
+==============
 RB_SurfaceGhoul
 ==============
 */
@@ -3280,6 +3410,19 @@ void RB_SurfaceGhoul(CRenderableSurface* surf)
 #if 0
 	}
 #endif
+
+	// mesh cloth: replace free robe vertices with simulated positions before
+	// gore copies them and before the surface is drawn
+	if (r_meshCloth && r_meshCloth->integer)
+	{
+		const auto mdxm = reinterpret_cast<const mdxmHeader_t*>(reinterpret_cast<const byte*>(surface) + surface->ofsHeader);
+		const auto ho = reinterpret_cast<const mdxmHierarchyOffsets_t*>(reinterpret_cast<const byte*>(mdxm) + sizeof(mdxmHeader_t));
+		const auto sh = reinterpret_cast<const mdxmSurfHierarchy_t*>(reinterpret_cast<const byte*>(ho) + ho->offsets[surface->thisSurfaceIndex]);
+		if (MC_IsClothSurface(surface, mdxm->name, sh->name))
+		{
+			RB_MeshClothApply(surf, surface);
+		}
+	}
 
 #ifdef _G2_GORE
 	while (surf->goreChain)

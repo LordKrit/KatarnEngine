@@ -121,6 +121,11 @@ cvar_t* r_dynamicGlowBloom;			// SJE: bloom intensity (0 = off, up to 2)
 cvar_t* r_dynamicGlowBloomThreshold;	// SJE: bloom bright-pass threshold (0-0.95)
 cvar_t* r_ext_alpha_to_coverage;		// SJE: anti-aliased cut-out textures when multisampling
 cvar_t* r_gammaShaders;				// SJE: gamma/overbright as a post-process (ported from MP)
+cvar_t* r_meshCloth;
+cvar_t* r_meshClothGravity;
+cvar_t* r_meshClothDrag;
+cvar_t* r_meshClothIter;
+cvar_t* r_meshClothShape;
 cvar_t* r_shadowRange;
 cvar_t* r_flares;
 cvar_t* r_nobind;
@@ -1749,6 +1754,11 @@ static void R_Register()
 	r_lockpvs = ri.Cvar_Get("r_lockpvs", "0", CVAR_CHEAT);
 	r_noportals = ri.Cvar_Get("r_noportals", "0", CVAR_CHEAT);
 	r_shadows = ri.Cvar_Get("cg_shadows", "1", 0);
+	r_meshCloth = ri.Cvar_Get("r_meshCloth", "1", CVAR_ARCHIVE);
+	r_meshClothGravity = ri.Cvar_Get("r_meshClothGravity", "650", CVAR_ARCHIVE);
+	r_meshClothDrag = ri.Cvar_Get("r_meshClothDrag", "1.4", CVAR_ARCHIVE);
+	r_meshClothIter = ri.Cvar_Get("r_meshClothIter", "6", CVAR_ARCHIVE);
+	r_meshClothShape = ri.Cvar_Get("r_meshClothShape", "1", CVAR_ARCHIVE);
 	r_shadowRange = ri.Cvar_Get("r_shadowRange", "1000", CVAR_ARCHIVE_ND);
 	/*
 	Ghoul2 Insert Start
@@ -1879,6 +1889,7 @@ void R_Init(void)
 	R_ImageLoader_Init();
 	R_NoiseInit();
 	R_Register();
+	R_MeshClothLoadConfig();
 
 	backEndData = static_cast<backEndData_t*>(R_Hunk_Alloc(sizeof(backEndData_t), qtrue));
 	R_InitNextFrame();
@@ -1922,6 +1933,7 @@ extern void R_ShutdownWorldEffects();
 
 void RE_Shutdown(qboolean destroyWindow, qboolean restarting)
 {
+	R_MeshClothShutdown();
 	R_ShutdownFlarePbos(); // flare depth-read buffers (the GL context may go away below)
 	R_VideoCaptureShutdown(R_VideoReadbackGL()); // its pixel buffer objects (the GL context may go away below)
 	s_videoGLLoaded = false;
