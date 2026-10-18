@@ -49,6 +49,7 @@ struct mcDef_t {
 	float			tether;
 	float			shape;
 	float			bend;		// 0..1 bending stiffness (0 = limp silk, 1 = stiff leather)
+	float			inertia;	// 0..1, or -1 to use r_meshClothInertia
 };
 
 struct mcGroup_t {
@@ -59,7 +60,7 @@ struct mcGroup_t {
 	int									numParticles;
 	std::vector<int>					vertToParticle;	// global vertex -> particle
 	std::vector<int>					partSurf, partVert;	// representative surface / local vertex
-	std::vector<float>					freedom, tether, shape, bend;	// per particle
+	std::vector<float>					freedom, tether, shape, bend, inertia;	// per particle
 	std::vector<int>					lraAnchor;		// nearest attached particle along the cloth (-1 none)
 	std::vector<float>					lraLen;			// bind-pose distance to it along the cloth
 	float								bindLinkSum;	// total bind length of the structural links
@@ -265,6 +266,7 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->tether.push_back( g->defs[si]->tether );
 				g->shape.push_back( g->defs[si]->shape );
 				g->bend.push_back( g->defs[si]->bend );
+				g->inertia.push_back( g->defs[si]->inertia );
 				grid.Add( v[i].vertCoords, p );
 			} else {
 				// shared by two pieces: the more attached and the shorter tether win
@@ -631,10 +633,11 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		// running character's robe trails instead of being left behind
 		vec3_t dO;
 		mcSub( origin, in->lastOrigin, dO );
-		const float carry = 1.0f - Clamp01( prm->inertia );
-		if ( carry > 0.0f && mcDot( dO, dO ) < MC_TELEPORT * MC_TELEPORT ) {
+		if ( mcDot( dO, dO ) < MC_TELEPORT * MC_TELEPORT ) {
 			for ( int p = 0; p < g->numParticles; p++ ) {
 				if ( g->freedom[p] <= 0.0f ) continue;
+				const float carry = 1.0f - Clamp01( g->inertia[p] >= 0.0f ? g->inertia[p] : prm->inertia );
+				if ( carry <= 0.0f ) continue;
 				mcMA( &in->p[p * 3], carry, dO, &in->p[p * 3] );
 				mcMA( &in->prev[p * 3], carry, dO, &in->prev[p * 3] );
 			}
@@ -713,11 +716,13 @@ int MC_LoadConfig( const char *text ) {
 		d.tether = 12.0f;
 		d.shape = 0.0f;
 		d.bend = 0.3f;
+		d.inertia = -1.0f;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
 			if ( !Q_stricmp( tok, "tether" ) ) d.tether = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "shape" ) ) d.shape = (float)atof( COM_ParseExt( &p, qfalse ) );
+			else if ( !Q_stricmp( tok, "inertia" ) ) d.inertia = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "bend" ) ) d.bend = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 		}
 		if ( d.tether < 0.0f ) d.tether = 0.0f;

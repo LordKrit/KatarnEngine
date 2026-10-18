@@ -29,6 +29,9 @@ from a config text (ext_data/meshcloth.cfg), one line per surface:
            where the animation puts it. Default 12.
   bend     0..1 bending stiffness: 0 folds like silk, 1 holds its shape
            like leather. Default 0.3.
+  inertia  0..1 how much of the character's running and turning this
+           cloth feels (1 = all of it, a cape that flies out behind).
+           Default: the r_meshClothInertia console value.
   shape    0..1 optional pull back toward the modelled shape. Default 0
            (real cloth: only the attached part follows the animation).
 
