@@ -830,6 +830,14 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 			float dr = prm->drag * h;
 			if ( dr > 1.0f ) dr = 1.0f;
 			mcMA( v, -vn * dr, nn, v );
+			// still-air drag on all world motion, not only through the cloth:
+			// a falling or running character outpaces his cape, so it lifts up
+			// when he falls and streams back when he runs
+			if ( prm->airDrag > 0.0f ) {
+				float ad = prm->airDrag * h;
+				if ( ad > 0.5f ) ad = 0.5f;
+				mcScale( v, 1.0f - ad, v );
+			}
 			mcCopy( pp, pv );
 			mcAdd( pp, v, pp );
 			pp[2] -= prm->gravity * h * h;
