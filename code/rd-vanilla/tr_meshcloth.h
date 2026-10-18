@@ -39,6 +39,12 @@ from a config text (ext_data/meshcloth.cfg), one line per surface:
   maxaccel units/s^2: the character's acceleration the cloth feels, at
            most (Battlefront II's MaxAcceleration; 20 m/s^2 is about 790).
            0 = no limit. Default: the r_meshClothMaxAccel console value.
+  maxspin  degrees/s: how fast the attached edge may turn before the cloth
+           is carried round with it instead of winding up (fast saber spins).
+           0 = no limit (default).
+  spread   0..1 sideways-only pull toward the animated shape: keeps a
+           cape from rolling into a rope in saber spins without slowing
+           its swing front to back. Default 0.
   shape    0..1 optional pull back toward the modelled shape. Default 0
            (real cloth: only the attached part follows the animation).
 

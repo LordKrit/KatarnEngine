@@ -39,7 +39,8 @@ const float	MC_TELEPORT		= 120.0f;
 const int	MC_FORGET_MS	= 10000;
 const float	MC_MARGIN		= 0.6f;
 const float	MC_WELD			= 0.01f;
-const int	MC_SETTLE_STEPS	= 40;		// 0.64 s of settling when a character appears	// bind-pose distance that counts as the same point
+const int	MC_SETTLE_STEPS	= 40;
+const float	MC_DEFAULT_SPIN	= 0.0f;		// degrees/s, 0 = no spin limit unless the config sets one		// 0.64 s of settling when a character appears	// bind-pose distance that counts as the same point
 
 enum mcRuleType_t { MC_RULE_ABOVE, MC_RULE_NEAR, MC_RULE_SEGMENT };
 
@@ -54,6 +55,8 @@ struct mcDef_t {
 	bool			self;		// self-collision (single-layer capes)
 	float			smooth;		// 0..1 crease smoothing of the drawn shape
 	float			maxAccel;	// units/s^2 of character acceleration the cloth feels, 0 = no limit, -1 = cvar
+	float			maxSpin;	// degrees/s of the attached edge's turning the cloth feels, 0 = no limit, -1 = default
+	float			spread;		// 0..1 sideways-only pull toward the animated shape (keeps a cape from roping)
 };
 
 struct mcGroup_t {
@@ -68,6 +71,8 @@ struct mcGroup_t {
 	std::vector<char>					selfCol;		// per particle: takes part in self-collision
 	std::vector<float>					smooth;			// per particle: crease smoothing of the drawn shape
 	std::vector<float>					maxAccel;		// per particle
+	std::vector<float>					maxSpin;		// per particle
+	std::vector<float>					spread;			// per particle
 	bool								anySmooth = false;
 	bool								anySelf = false;
 	std::vector<int>					lraAnchor;		// nearest attached particle along the cloth (-1 none)
@@ -93,6 +98,9 @@ struct mcInstance_t {
 	vec3_t				lastOrigin;		// character origin at the previous simulation
 	vec3_t				originVel;		// its velocity (units/s)
 	vec3_t				up;				// the character's up direction (world)
+	vec3_t				side;			// the character's left direction (world)
+	std::vector<float>	pinPrev;		// attached particles' animated positions last frame
+	int					pinTime;
 	int					originTime;
 	std::vector<float>	p, prev, target, targetPrev;	// 3 per particle, world
 	std::vector<float>	outLocal, nrmLocal;				// 3 per particle, model space
@@ -286,6 +294,8 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->selfCol.push_back( g->defs[si]->self ? 1 : 0 );
 				g->smooth.push_back( g->defs[si]->smooth );
 				g->maxAccel.push_back( g->defs[si]->maxAccel );
+				g->maxSpin.push_back( g->defs[si]->maxSpin );
+				g->spread.push_back( g->defs[si]->spread );
 				if ( g->defs[si]->smooth > 0.0f ) g->anySmooth = true;
 				if ( g->defs[si]->self ) g->anySelf = true;
 				grid.Add( v[i].vertCoords, p );
@@ -599,6 +609,9 @@ void Reset( mcInstance_t *in, int time ) {
 	in->lastOrigin[0] = in->lastOrigin[1] = in->lastOrigin[2] = 0.0f;
 	in->originVel[0] = in->originVel[1] = in->originVel[2] = 0.0f;
 	in->originTime = time;
+	in->pinPrev.clear();
+	in->side[0] = 1.0f; in->side[1] = in->side[2] = 0.0f;
+	in->pinTime = time;
 }
 
 // Velocity pass after a substep's constraints, for vertices touching the
@@ -673,6 +686,97 @@ void SelfCollide( const mcGroup_t *g, mcInstance_t *in ) {
 	}
 }
 
+// The cloth's own side-to-side direction: the line of its attached edge
+// (shoulder to shoulder, belt left to right) in the horizontal plane.
+void UpdateSide( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &target ) {
+	const float *up = in->up;
+	vec3_t c = { 0, 0, 0 };
+	int n = 0;
+	for ( int p = 0; p < g->numParticles; p++ ) if ( g->freedom[p] <= 0.0f ) { mcAdd( c, &target[p * 3], c ); n++; }
+	if ( n < 2 ) return;
+	mcScale( c, 1.0f / n, c );
+	// two horizontal axes, then the 2x2 covariance of the edge in that plane
+	vec3_t e1, e2, ref = { 1, 0, 0 };
+	if ( fabsf( mcDot( ref, up ) ) > 0.9f ) { ref[0] = 0; ref[1] = 1; }
+	mcCross( up, ref, e1 ); mcNorm( e1 );
+	mcCross( up, e1, e2 );
+	float sxx = 0, sxy = 0, syy = 0;
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] > 0.0f ) continue;
+		vec3_t d;
+		mcSub( &target[p * 3], c, d );
+		const float x = mcDot( d, e1 ), y = mcDot( d, e2 );
+		sxx += x * x; sxy += x * y; syy += y * y;
+	}
+	const float ang = 0.5f * atan2f( 2.0f * sxy, sxx - syy );
+	for ( int k = 0; k < 3; k++ ) in->side[k] = e1[k] * cosf( ang ) + e2[k] * sinf( ang );
+	mcNorm( in->side );
+}
+
+// Max spin: the rotational partner of max acceleration. Saber moves whip
+// the shoulders round far faster than cloth can follow, which winds a cape
+// into a rope. Measure how fast the attached edge turns about the up axis
+// this frame; any turning beyond the limit carries the free cloth round
+// with it instead of winding it up.
+void SpinLimit( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &target, int timeMs, float defSpin ) {
+	const size_t n3 = (size_t)g->numParticles * 3;
+	const int dtMs = timeMs - in->pinTime;
+	if ( in->pinPrev.size() != n3 || dtMs <= 0 || dtMs > MC_STALE_MS ) {
+		in->pinPrev.assign( target.begin(), target.end() );
+		in->pinTime = timeMs;
+		return;
+	}
+	const float *up = in->up;
+	// centroid of the attached particles, then their mean turn about it
+	vec3_t c0 = { 0, 0, 0 }, c1 = { 0, 0, 0 };
+	int np = 0;
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] > 0.0f ) continue;
+		mcAdd( c0, &in->pinPrev[p * 3], c0 );
+		mcAdd( c1, &target[p * 3], c1 );
+		np++;
+	}
+	float angle = 0.0f;
+	if ( np >= 3 ) {
+		mcScale( c0, 1.0f / np, c0 );
+		mcScale( c1, 1.0f / np, c1 );
+		float sx = 0.0f, sy = 0.0f;	// summed cross and dot of the horizontal arms
+		for ( int p = 0; p < g->numParticles; p++ ) {
+			if ( g->freedom[p] > 0.0f ) continue;
+			vec3_t a, b, x;
+			mcSub( &in->pinPrev[p * 3], c0, a );
+			mcSub( &target[p * 3], c1, b );
+			mcMA( a, -mcDot( a, up ), up, a );
+			mcMA( b, -mcDot( b, up ), up, b );
+			mcCross( a, b, x );
+			sx += mcDot( x, up );
+			sy += mcDot( a, b );
+		}
+		angle = atan2f( sx, sy );	// radians this frame, about up
+	}
+	in->pinPrev.assign( target.begin(), target.end() );
+	in->pinTime = timeMs;
+	if ( angle == 0.0f ) return;
+	const float dt = dtMs * 0.001f;
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] <= 0.0f ) continue;
+		const float lim = ( g->maxSpin[p] >= 0.0f ? g->maxSpin[p] : defSpin ) * ( 3.14159265f / 180.0f ) * dt;
+		if ( lim <= 0.0f || fabsf( angle ) <= lim ) continue;
+		const float ex = angle > 0.0f ? angle - lim : angle + lim;
+		const float cs = cosf( ex ), sn = sinf( ex );
+		float *pts[2] = { &in->p[p * 3], &in->prev[p * 3] };
+		for ( float *q : pts ) {
+			// rotate about the vertical line through the attached edge's centre
+			vec3_t r, par, perp, side;
+			mcSub( q, c1, r );
+			mcScale( up, mcDot( r, up ), par );
+			mcSub( r, par, perp );
+			mcCross( up, perp, side );
+			for ( int k = 0; k < 3; k++ ) q[k] = c1[k] + par[k] + perp[k] * cs + side[k] * sn;
+		}
+	}
+}
+
 // One 16 ms step, split into substeps ("Small Steps in Physics
 // Simulation", Macklin et al. 2019): many short steps with a single
 // constraint pass each keep the fabric from stretching or wobbling far
@@ -729,6 +833,16 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 			mcCopy( pp, pv );
 			mcAdd( pp, v, pp );
 			pp[2] -= prm->gravity * h * h;
+			// sideways-only pull toward the animated shape: stops a cape
+			// rolling up into a rope in saber spins, while it still trails,
+			// swings and lifts freely front to back and up and down
+			const float sp = g->spread[p];
+			if ( sp > 0.0f ) {
+				const float k = 1.0f - powf( 1.0f - Clamp01( sp ), 1.0f / sub );
+				vec3_t d;
+				mcSub( &in->target[p * 3], pp, d );
+				mcMA( pp, k * mcDot( d, in->side ), in->side, pp );
+			}
 			// optional pull toward the modelled shape (off unless configured)
 			const float sh = g->shape[p] * prm->shapeScale;
 			if ( sh > 0.0f ) {
@@ -776,6 +890,8 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		in->originTime = timeMs;
 		mcCopy( axis[2], in->up );
 		mcNorm( in->up );
+
+		UpdateSide( g, in, target );
 		// let the cloth fall into its hanging shape before it is first seen,
 		// instead of starting in the modelled (often flared) pose
 		for ( int k = 0; k < MC_SETTLE_STEPS; k++ ) Step( g, in, target, target, nearCaps, nnear, prm );
@@ -783,6 +899,7 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	} else {
 		mcCopy( axis[2], in->up );
 		mcNorm( in->up );
+
 		// inertia scale (as in game cloth tools): only part of the
 		// character's travel through the world reaches the cloth, so a
 		// running character's robe trails instead of being left behind
@@ -827,6 +944,8 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 			in->originTime = timeMs;
 		}
 		mcCopy( origin, in->lastOrigin );
+		SpinLimit( g, in, target, timeMs, MC_DEFAULT_SPIN );
+		UpdateSide( g, in, target );
 		const int dt = timeMs - in->lastTime;
 		int steps = 0;
 		if ( dt > 0 ) {
@@ -935,12 +1054,16 @@ int MC_LoadConfig( const char *text ) {
 		d.self = false;
 		d.smooth = 0.5f;
 		d.maxAccel = -1.0f;
+		d.maxSpin = -1.0f;
+		d.spread = 0.0f;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
 			if ( !Q_stricmp( tok, "tether" ) ) d.tether = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "shape" ) ) d.shape = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "self" ) ) d.self = true;
+			else if ( !Q_stricmp( tok, "spread" ) ) d.spread = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
+			else if ( !Q_stricmp( tok, "maxspin" ) ) { d.maxSpin = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxSpin < 0.0f ) d.maxSpin = 0.0f; }
 			else if ( !Q_stricmp( tok, "maxaccel" ) ) { d.maxAccel = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxAccel < 0.0f ) d.maxAccel = 0.0f; }
 			else if ( !Q_stricmp( tok, "smooth" ) ) d.smooth = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "inertia" ) ) d.inertia = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
