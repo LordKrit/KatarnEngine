@@ -64,6 +64,7 @@ struct mcDef_t {
 	float			maxAccel;	// units/s^2 of character acceleration the cloth feels, 0 = no limit, -1 = cvar
 	float			maxSpin;	// degrees/s of the attached edge's turning the cloth feels, 0 = no limit, -1 = default
 	float			spread;		// 0..1 sideways-only pull toward the animated shape (keeps a cape from roping)
+	float			thickness;	// cloth thickness in units: keeps it this far off the body (half) and off itself (full)
 	float			weight;		// relative mass per area: 1 = normal cloth, 2 = heavy wool/leather (air moves it half as much), 0.5 = silk
 };
 
@@ -82,6 +83,8 @@ struct mcGroup_t {
 	std::vector<float>					maxSpin;		// per particle
 	std::vector<float>					spread;			// per particle
 	std::vector<float>					weight;			// per particle
+	std::vector<float>					thick;			// per particle: cloth thickness
+	float								selfThick = 1.2f;	// self-collision distance (largest thickness of the self-colliding surfaces)
 	std::vector<char>					hangs;			// per particle: hanging cloth ("above" rule: capes, robes, skirts)
 	std::vector<char>					hardCol;		// per particle: arms/hands always push it out (not for sleeves, which wrap the arms)
 	bool								anySmooth = false;
@@ -313,10 +316,14 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->maxSpin.push_back( g->defs[si]->maxSpin );
 				g->spread.push_back( g->defs[si]->spread );
 				g->weight.push_back( g->defs[si]->weight );
+				g->thick.push_back( g->defs[si]->thickness );
 				g->hardCol.push_back( g->defs[si]->rule == MC_RULE_SEGMENT ? 0 : 1 );
 				g->hangs.push_back( g->defs[si]->rule == MC_RULE_ABOVE ? 1 : 0 );
 				if ( g->defs[si]->smooth > 0.0f ) g->anySmooth = true;
-				if ( g->defs[si]->self ) g->anySelf = true;
+				if ( g->defs[si]->self ) {
+					if ( !g->anySelf || g->defs[si]->thickness > g->selfThick ) g->selfThick = g->defs[si]->thickness;
+					g->anySelf = true;
+				}
 				grid.Add( v[i].vertCoords, p );
 			} else {
 				// shared by two pieces: the more attached and the shorter tether win
@@ -455,7 +462,7 @@ void SkinVertex( const mdxmSurface_t *s, int i, mcBoneFn_t boneFn, void *ctx, fl
 // animation itself puts this vertex (target). Robes are often modelled a
 // little inside the capsule shapes; forcing those parts out fights their
 // attached neighbours and stretches the mesh.
-bool Collide( float *p, const float *target, const mcCapsule_t *caps, int n, float *nOut, bool useHard ) {
+bool Collide( float *p, const float *target, const mcCapsule_t *caps, int n, float *nOut, bool useHard, float margin ) {
 	bool hit = false;
 	for ( int c = 0; c < n; c++ ) {
 		vec3_t ab, ap, cl, out;
@@ -465,7 +472,7 @@ bool Collide( float *p, const float *target, const mcCapsule_t *caps, int n, flo
 		float t = ( L > 1e-6f ) ? Clamp01( mcDot( ap, ab ) / L ) : 0.0f;
 		mcMA( caps[c].a, t, ab, cl );
 		mcSub( p, cl, out );
-		float d = mcLen( out ), minD = caps[c].r + MC_MARGIN;
+		float d = mcLen( out ), minD = caps[c].r + margin;
 		if ( d >= minD || d < 1e-4f ) continue;
 		vec3_t at, ac, ao;
 		mcSub( target, caps[c].a, at );
@@ -604,7 +611,8 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 		}
 		vec3_t before;
 		mcCopy( pp, before );
-		if ( Collide( pp, t, caps, ncaps, &in->contactN[p * 3], g->hardCol[p] != 0 && f > 0.5f ) ) {
+		if ( Collide( pp, t, caps, ncaps, &in->contactN[p * 3], g->hardCol[p] != 0 && f > 0.5f,
+				( MC_MARGIN > 0.5f * g->thick[p] ? MC_MARGIN : 0.5f * g->thick[p] ) ) ) {
 			in->contact[p] = 1;
 			vec3_t pu;
 			mcSub( pp, before, pu );
@@ -682,7 +690,8 @@ void ContactVelocity( const mcGroup_t *g, mcInstance_t *in ) {
 // already close in the modelled shape (neighbours, layered panels).
 void SelfCollide( const mcGroup_t *g, mcInstance_t *in ) {
 	if ( !g->anySelf ) return;
-	const float thick = 1.2f * in->linkScale;
+	const float thick = g->selfThick * in->linkScale;
+	if ( !( thick > 0.05f ) || thick > 64.0f ) return;	// no thickness (or a broken scale): nothing to separate
 	const float cell = thick;
 	struct key_hash { size_t operator()( long long k ) const { return (size_t)( k ^ ( k >> 29 ) ); } };
 	static std::unordered_map<long long, std::vector<int>, key_hash> grid;
@@ -1137,6 +1146,16 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		}
 	}
 	for ( size_t i = 0; i < draw.size(); i++ ) draw[i] = target[i] + off[i];
+	// safety net: a degenerate pose (zero-scale bones, a broken model) must
+	// never put NaNs on screen or keep them in the state - fall back to the
+	// animation and start the cloth over next frame
+	for ( size_t i = 0; i < draw.size(); i++ ) {
+		if ( !std::isfinite( draw[i] ) || !std::isfinite( in->p[i] ) ) {
+			draw.assign( target.begin(), target.end() );
+			in->active = false;
+			break;
+		}
+	}
 
 	// results back into model space, with normals from the moving triangles
 	std::vector<float> &nw = in->scratchN;
@@ -1188,10 +1207,12 @@ int MC_LoadConfig( const char *text ) {
 		d.maxSpin = -1.0f;
 		d.spread = 0.0f;
 		d.weight = 1.0f;
+		d.thickness = 1.2f;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
-			if ( !Q_stricmp( tok, "tether" ) ) d.tether = (float)atof( COM_ParseExt( &p, qfalse ) );
+			if ( !Q_stricmp( tok, "tether" ) ) { d.tether = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.tether < 0.0f ) d.tether = 0.0f; }
+			else if ( !Q_stricmp( tok, "thickness" ) ) { d.thickness = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.thickness < 0.0f ) d.thickness = 0.0f; if ( d.thickness > 8.0f ) d.thickness = 8.0f; }
 			else if ( !Q_stricmp( tok, "shape" ) ) d.shape = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "self" ) ) d.self = true;
 			else if ( !Q_stricmp( tok, "weight" ) ) { d.weight = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.weight < 0.1f ) d.weight = 0.1f; if ( d.weight > 10.0f ) d.weight = 10.0f; }
