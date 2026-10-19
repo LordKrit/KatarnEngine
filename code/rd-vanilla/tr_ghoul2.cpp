@@ -3064,7 +3064,7 @@ static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* sur
 	VectorCopy(ent->e.axis[2], axis[2]);
 
 	// capsules: posed bone origin = skin matrix * bind position, then to world
-	mcCapsule_t caps[MC_NUM_COLLIDERS];
+	mcCapsule_t caps[MC_NUM_COLLIDERS + 2];
 	int ncaps = 0;
 	const mcBoneLookup_t* lk = MC_Lookup(bones->header);
 	for (int k = 0; k < MC_NUM_COLLIDERS; k++)
@@ -3088,7 +3088,24 @@ static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* sur
 			}
 		}
 		caps[ncaps].r = mcColliderRadius[k];
+		caps[ncaps].hard = k >= 7 ? 1 : 0;	// arms
 		ncaps++;
+		// fists: a short capsule past each wrist, along the forearm
+		if (k == 8 || k == 10)
+		{
+			const mcCapsule_t& fa = caps[ncaps - 1];
+			vec3_t dir;
+			VectorSubtract(fa.b, fa.a, dir);
+			const float len = VectorNormalize(dir);
+			if (len > 0.1f)
+			{
+				VectorCopy(fa.b, caps[ncaps].a);
+				VectorMA(fa.b, 4.5f, dir, caps[ncaps].b);
+				caps[ncaps].r = 2.8f;
+				caps[ncaps].hard = 1;
+				ncaps++;
+			}
+		}
 	}
 
 	mcParams_t prm;

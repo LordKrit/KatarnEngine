@@ -29,6 +29,13 @@ Per character instance:
 #include <cstdlib>
 #include <algorithm>
 
+#ifdef MC_DEBUG
+#include <cstdlib>
+int g_mcDbgTether = 0;
+#define MCDBG_OFF( n ) ( getenv( n ) != nullptr )
+#else
+#define MCDBG_OFF( n ) false
+#endif
 namespace {
 
 const int	MC_STEP_MS		= 16;
@@ -75,6 +82,8 @@ struct mcGroup_t {
 	std::vector<float>					maxSpin;		// per particle
 	std::vector<float>					spread;			// per particle
 	std::vector<float>					weight;			// per particle
+	std::vector<char>					hangs;			// per particle: hanging cloth ("above" rule: capes, robes, skirts)
+	std::vector<char>					hardCol;		// per particle: arms/hands always push it out (not for sleeves, which wrap the arms)
 	bool								anySmooth = false;
 	bool								anySelf = false;
 	std::vector<int>					lraAnchor;		// nearest attached particle along the cloth (-1 none)
@@ -114,6 +123,8 @@ struct mcInstance_t {
 	std::vector<float>	scratchTarget2, scratchCnt;
 	std::vector<float>	impulse;		// pending velocity kicks (units/s), e.g. from explosions
 	std::vector<float>	offPrev, offCur;	// cloth offset from the animation after the last two steps (for drawing between steps)
+	std::vector<float>	pPrevStep, pCurStep;	// world positions after the last two steps
+	vec3_t				oPrevStep, oCurStep;	// character origin at those two steps
 };
 
 std::vector<mcDef_t>										g_defs;
@@ -302,6 +313,8 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->maxSpin.push_back( g->defs[si]->maxSpin );
 				g->spread.push_back( g->defs[si]->spread );
 				g->weight.push_back( g->defs[si]->weight );
+				g->hardCol.push_back( g->defs[si]->rule == MC_RULE_SEGMENT ? 0 : 1 );
+				g->hangs.push_back( g->defs[si]->rule == MC_RULE_ABOVE ? 1 : 0 );
 				if ( g->defs[si]->smooth > 0.0f ) g->anySmooth = true;
 				if ( g->defs[si]->self ) g->anySelf = true;
 				grid.Add( v[i].vertCoords, p );
@@ -442,7 +455,7 @@ void SkinVertex( const mdxmSurface_t *s, int i, mcBoneFn_t boneFn, void *ctx, fl
 // animation itself puts this vertex (target). Robes are often modelled a
 // little inside the capsule shapes; forcing those parts out fights their
 // attached neighbours and stretches the mesh.
-bool Collide( float *p, const float *target, const mcCapsule_t *caps, int n, float *nOut ) {
+bool Collide( float *p, const float *target, const mcCapsule_t *caps, int n, float *nOut, bool useHard ) {
 	bool hit = false;
 	for ( int c = 0; c < n; c++ ) {
 		vec3_t ab, ap, cl, out;
@@ -460,7 +473,9 @@ bool Collide( float *p, const float *target, const mcCapsule_t *caps, int n, flo
 		mcMA( caps[c].a, tt, ab, ac );
 		mcSub( target, ac, ao );
 		float dT = mcLen( ao );
-		if ( dT < minD ) minD = dT;
+		// body parts the robe was modelled around may sit a little inside it;
+		// arms and hands move through the cape, so those always push it out
+		if ( !( useHard && caps[c].hard ) && dT < minD ) minD = dT;
 		if ( d < minD ) {
 			mcMA( cl, minD / d, out, p );
 			mcScale( out, 1.0f / d, nOut );
@@ -565,7 +580,7 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 		// long range attachment: never further from the attached edge than
 		// the cloth itself is long
 		const int an = g->lraAnchor[p];
-		if ( an >= 0 ) {
+		if ( an >= 0 && !MCDBG_OFF( "NOLRA" ) ) {
 			vec3_t d;
 			mcSub( pp, &in->p[an * 3], d );
 			// skinning can stretch the animated mesh past its bind size
@@ -582,29 +597,44 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 		// never higher than both the attached edge it hangs from and its
 		// animated spot: stops a fast turn or a spawn from flipping a cape
 		// up over the shoulders
-		if ( an >= 0 ) {
+		if ( an >= 0 && !MCDBG_OFF( "NOHEIGHT" ) ) {
 			const float hp = mcDot( pp, in->up ), ha = mcDot( &in->p[an * 3], in->up ), ht = mcDot( t, in->up );
 			const float lim = ( ha > ht ? ha : ht ) + 2.0f * in->linkScale;
 			if ( hp > lim ) mcMA( pp, lim - hp, in->up, pp );
 		}
 		vec3_t before;
 		mcCopy( pp, before );
-		if ( Collide( pp, t, caps, ncaps, &in->contactN[p * 3] ) ) {
+		if ( Collide( pp, t, caps, ncaps, &in->contactN[p * 3], g->hardCol[p] != 0 && f > 0.5f ) ) {
 			in->contact[p] = 1;
 			vec3_t pu;
 			mcSub( pp, before, pu );
 			mcAdd( &in->push[p * 3], pu, &in->push[p * 3] );
 		}
-		// max distance from the animated position (a safety net, as in game
-		// cloth tools - not a spring)
+		// max distance from the animated position. Soft: past the limit the
+		// cloth is reeled back in over ~100 ms instead of being projected
+		// onto it. A hard limit tied to the animated pose made the cape jump
+		// instantly whenever the animation changed pose (landing from a jump,
+		// starting a saber move) while the cape was out at the limit, e.g.
+		// lifted up during a fall. A hard stop remains at twice the limit.
 		vec3_t d;
 		mcSub( pp, t, d );
 		const float len = mcLen( d ), maxLen = f * g->tether[p];
-		if ( len > maxLen && len > 1e-5f ) mcMA( t, maxLen / len, d, pp );
+		if ( len > maxLen && len > 1e-5f && !MCDBG_OFF( "NOTETHER" ) ) {
+			const float k = 1.0f - powf( 0.85f, bendScale > 0.0f ? bendScale * 6.0f : 6.0f );	// ~15% per 16/6 ms, frame-rate independent
+			float target = len - ( len - maxLen ) * k;
+			if ( target > 2.0f * maxLen ) target = 2.0f * maxLen;
+			mcMA( t, target / len, d, pp );
+#ifdef MC_DEBUG
+			g_mcDbgTether++;
+#endif
+		}
 	}
 }
 
 void Reset( mcInstance_t *in, int time ) {
+#ifdef MC_DEBUG
+	fprintf( stderr, "MC RESET at %d\n", time );
+#endif
 	in->p = in->target;
 	in->prev = in->target;
 	in->targetPrev = in->target;
@@ -932,6 +962,10 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		in->offCur.resize( target.size() );
 		for ( size_t i = 0; i < target.size(); i++ ) in->offCur[i] = in->p[i] - target[i];
 		in->offPrev = in->offCur;
+		in->pPrevStep = in->p;
+		in->pCurStep = in->p;
+		mcCopy( origin, in->oPrevStep );
+		mcCopy( origin, in->oCurStep );
 	} else {
 		mcCopy( axis[2], in->up );
 		mcNorm( in->up );
@@ -982,6 +1016,10 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 				if ( in->simTarget.size() == in->targetPrev.size() ) mcAdd( &in->simTarget[p * 3], shift, &in->simTarget[p * 3] );
 				if ( g->freedom[p] <= 0.0f ) continue;
 				mcAdd( &in->p[p * 3], shift, &in->p[p * 3] );
+				if ( in->pCurStep.size() == in->p.size() ) {
+					mcAdd( &in->pCurStep[p * 3], shift, &in->pCurStep[p * 3] );
+					mcAdd( &in->pPrevStep[p * 3], shift, &in->pPrevStep[p * 3] );
+				}
 				mcAdd( &in->prev[p * 3], shift, &in->prev[p * 3] );
 			}
 			mcCopy( vNew, in->originVel );
@@ -990,6 +1028,8 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 			in->originVel[0] = in->originVel[1] = in->originVel[2] = 0.0f;
 			in->originTime = timeMs;
 		}
+		vec3_t originFrom;
+		mcCopy( in->lastOrigin, originFrom );
 		mcCopy( origin, in->lastOrigin );
 		SpinLimit( g, in, target, timeMs, MC_DEFAULT_SPIN );
 		UpdateSide( g, in, target );
@@ -1018,6 +1058,10 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 				in->offPrev.swap( in->offCur );
 				in->offCur.resize( to.size() );
 				for ( size_t i = 0; i < to.size(); i++ ) in->offCur[i] = in->p[i] - to[i];
+				in->pPrevStep.swap( in->pCurStep );
+				in->pCurStep.assign( in->p.begin(), in->p.end() );
+				mcCopy( in->oCurStep, in->oPrevStep );
+				for ( int k = 0; k < 3; k++ ) in->oCurStep[k] = originFrom[k] + ( origin[k] - originFrom[k] ) * t1;
 			}
 			// without a step the simulation clock stays put and keeps its pose sample
 			if ( steps > 0 ) in->simTarget.assign( to.begin(), to.end() );
@@ -1047,11 +1091,29 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	{
 		float a = in->accum / (float)MC_STEP_MS;
 		if ( a < 0.0f ) a = 0.0f; else if ( a > 1.0f ) a = 1.0f;
-		const bool ok = in->offCur.size() == target.size() && in->offPrev.size() == target.size();
-		for ( size_t i = 0; i < target.size(); i++ )
-			off[i] = ok ? in->offPrev[i] + ( in->offCur[i] - in->offPrev[i] ) * a : in->p[i] - target[i];
-		for ( int p = 0; p < g->numParticles; p++ )
+		const bool ok = in->offCur.size() == target.size() && in->offPrev.size() == target.size()
+			&& in->pCurStep.size() == target.size() && in->pPrevStep.size() == target.size();
+		// Two ways to place a vertex between steps, blended by how free it is:
+		//  - attached cloth: animated pose + offset (stays glued to the body
+		//    exactly, even through sudden pose changes),
+		//  - free cloth: its own world position interpolated between steps,
+		//    moved only by the character's TRAVEL since then. It must not
+		//    follow the pose: an animation switch (landing, a new saber move)
+		//    would otherwise teleport the whole cape to the new pose.
+		vec3_t oNow;
+		for ( int k = 0; k < 3; k++ ) oNow[k] = origin[k] - ( in->oPrevStep[k] + ( in->oCurStep[k] - in->oPrevStep[k] ) * a );
+		for ( int p = 0; p < g->numParticles; p++ ) {
+			float w = g->freedom[p] <= 0.0f ? 0.0f : ( g->freedom[p] >= 1.0f ? 1.0f : g->freedom[p] );
+			if ( !g->hangs[p] || MCDBG_OFF( "OFFDRAW" ) ) w = 0.0f;	// sleeves and hoods follow their limb exactly
+			for ( int k = 0; k < 3; k++ ) {
+				const size_t i = p * 3 + k;
+				if ( !ok ) { off[i] = in->p[i] - target[i]; continue; }
+				const float offA = in->offPrev[i] + ( in->offCur[i] - in->offPrev[i] ) * a;
+				const float world = in->pPrevStep[i] + ( in->pCurStep[i] - in->pPrevStep[i] ) * a + oNow[k];
+				off[i] = ( 1.0f - w ) * offA + w * ( world - target[i] );
+			}
 			if ( g->freedom[p] <= 0.0f ) off[p * 3] = off[p * 3 + 1] = off[p * 3 + 2] = 0.0f;
+		}
 	}
 	if ( g->anySmooth ) {
 		std::vector<float> &acc = in->scratchTarget2;

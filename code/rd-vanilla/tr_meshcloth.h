@@ -58,6 +58,7 @@ attachments, body capsules and an inertia scale (r_meshClothInertia).
 struct mcCapsule_t {
 	vec3_t	a, b;
 	float	r;
+	int		hard;	// 1 = limbs/hands: always push cloth fully out, even where the animated cloth is inside
 };
 
 struct mcParams_t {
