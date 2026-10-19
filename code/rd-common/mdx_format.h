@@ -43,6 +43,12 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #define MAX_TAGNAME_BYTES	32	// matches MDR, can be changed if nec.
 
+// Largest Ghoul2 mesh surface (MovieDuels high-poly models). rend2 draws Ghoul2 surfaces straight from
+// their own vertex/index buffers (32-bit indexes), so it is not bound by SHADER_MAX_VERTEXES; the CPU
+// paths that copy a whole surface (gore, mesh cloth, collision) are sized from these.
+#define MDXM_MAX_SURFACE_VERTS		65535
+#define MDXM_MAX_SURFACE_TRIANGLES	(2 * MDXM_MAX_SURFACE_VERTS)
+
 //
 // normal version numbers...
 //

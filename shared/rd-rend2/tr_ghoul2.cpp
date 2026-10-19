@@ -3999,7 +3999,7 @@ static mcR2Inst_t* RB_MeshClothUpdate(CRenderableSurface* surf, const mdxmSurfac
 {
 	CBoneCache* bones = surf->boneCache;
 	const trRefEntity_t* ent = backEnd.currentEntity;
-	if (!bones || !bones->header || !ent || surface->numVerts > SHADER_MAX_VERTEXES)
+	if (!bones || !bones->header || !ent || surface->numVerts > MDXM_MAX_SURFACE_VERTS)
 	{
 		return nullptr;
 	}
@@ -4749,20 +4749,22 @@ qboolean R_LoadMDXM(model_t* mod, void* buffer, const char* mod_name, qboolean& 
 			LL(surf->numBoneReferences);
 			LL(surf->ofsBoneReferences);
 
-			if (surf->numVerts > SHADER_MAX_VERTEXES) {
+			// Ghoul2 surfaces are drawn from their own buffers, so the limit is the model format's, not the
+			// tesselator's (SHADER_MAX_VERTEXES)
+			if (surf->numVerts > MDXM_MAX_SURFACE_VERTS) {
 				Com_Error(
 					ERR_DROP,
 					"R_LoadMDXM: %s has more than %i verts on a surface (%i)",
 					mod_name,
-					SHADER_MAX_VERTEXES,
+					MDXM_MAX_SURFACE_VERTS,
 					surf->numVerts);
 			}
-			if (surf->numTriangles * 3 > SHADER_MAX_INDEXES) {
+			if (surf->numTriangles > MDXM_MAX_SURFACE_TRIANGLES) {
 				Com_Error(
 					ERR_DROP,
 					"R_LoadMDXM: %s has more than %i triangles on a surface (%i)",
 					mod_name,
-					SHADER_MAX_INDEXES / 3,
+					MDXM_MAX_SURFACE_TRIANGLES,
 					surf->numTriangles);
 			}
 
