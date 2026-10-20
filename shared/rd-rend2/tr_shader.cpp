@@ -2036,6 +2036,23 @@ static qboolean ParseStage(shaderStage_t* stage, const char** text)
 
 			continue;
 		}
+		//
+		// skin <r> <g> <b> <wrap>: cheap subsurface look for skin. Light wraps past the shadow
+		// edge, scaled per colour channel (red most), and diffuse uses a softened normal.
+		else if (Q_stricmp(token, "skin") == 0)
+		{
+			for (int k = 0; k < 4; k++)
+			{
+				token = COM_ParseExt(text, qfalse);
+				if (!token[0])
+				{
+					ri.Printf(PRINT_WARNING, "WARNING: 'skin' needs r g b wrap in shader '%s'\n", shader.name);
+					break;
+				}
+				stage->skinParams[k] = atof(token);
+			}
+			continue;
+		}
 		// surfaceSprites <type> ...
 		//
 		else if (!Q_stricmp(token, "surfacesprites"))

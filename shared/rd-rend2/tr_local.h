@@ -982,6 +982,7 @@ typedef struct {
 	int glslShaderIndex;
 
 	vec4_t normalScale;
+	vec4_t skinParams;	// "skin r g b wrap": light wraps past the shadow edge per colour (wrap 0 = off)
 	vec4_t specularScale;
 	float  parallaxBias;
 
@@ -1518,6 +1519,7 @@ typedef enum
 	UNIFORM_NORMALSCALE,
 	UNIFORM_SPECULARSCALE,
 	UNIFORM_PARALLAXBIAS,
+	UNIFORM_SKINPARAMS,
 
 	UNIFORM_VIEWINFO, // znear, zfar, width/2, height/2
 	UNIFORM_VIEWORIGIN,

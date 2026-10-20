@@ -1837,6 +1837,7 @@ static void RB_IterateStagesGeneric(shaderCommands_t* input, const VertexArraysP
 
 		const float parallaxBias = r_forceParallaxBias->value > 0.0f ? r_forceParallaxBias->value : pStage->parallaxBias;
 		uniformDataWriter.SetUniformFloat(UNIFORM_PARALLAXBIAS, parallaxBias);
+		uniformDataWriter.SetUniformVec4(UNIFORM_SKINPARAMS, pStage->skinParams);
 
 		AlphaTestType alphaTestType =
 			useAlphaTestGE192 ? ALPHA_TEST_GE192 : pStage->alphaTestType;
