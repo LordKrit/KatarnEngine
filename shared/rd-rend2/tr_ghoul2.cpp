@@ -3769,7 +3769,7 @@ static const char* const mcColliderBones[][2] = {
 	{ "lhumerus", "lradius" }, { "lradius", "lhand" }, { "rhumerus", "rradius" }, { "rradius", "rhand" },
 	{ "lclavical", "lhumerus" }, { "rclavical", "rhumerus" }	// shoulders (hard 2: grid-simulated cloth only)
 };
-static const float mcColliderRadius[] = { 6.0f, 4.5f, 3.8f, 5.0f, 3.8f, 5.0f, 3.8f, 2.5f, 2.2f, 2.5f, 2.2f, 3.2f, 3.2f };
+static const float mcColliderRadius[] = { 6.0f, 4.5f, 3.8f, 5.0f, 3.8f, 5.0f, 3.8f, 2.5f, 2.2f, 2.5f, 2.2f, 4.2f, 4.2f };
 static const int MC_NUM_COLLIDERS = sizeof(mcColliderRadius) / sizeof(mcColliderRadius[0]);
 
 struct mcBoneLookup_t
