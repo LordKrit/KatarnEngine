@@ -1201,7 +1201,10 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		if ( dt < 0 || dt > MC_STALE_MS || mcLen( d ) > MC_TELEPORT ) in->active = false;
 	}
 	mcCapsule_t nearCaps[32];
-	const int nnear = CullCapsules( g, target, caps, ncaps, nearCaps, 32 );
+	mcCapsule_t useCaps[40];
+	int nuse = 0;
+	for ( int c = 0; c < ncaps && nuse < 40; c++ ) if ( caps[c].hard != 2 || g->proxied ) useCaps[nuse++] = caps[c];
+	const int nnear = CullCapsules( g, target, useCaps, nuse, nearCaps, 32 );
 	if ( !in->active ) {
 		in->target.assign( target.begin(), target.end() );
 		Reset( in, timeMs );

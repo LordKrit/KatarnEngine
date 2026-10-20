@@ -2998,9 +2998,10 @@ void R_MeshClothShutdown()
 static const char* const mcColliderBones[][2] = {
 	{ "pelvis", "thoracic" }, { "thoracic", "cervical" }, { "cervical", "cranium" },
 	{ "lfemurYZ", "ltibia" }, { "ltibia", "ltalus" }, { "rfemurYZ", "rtibia" }, { "rtibia", "rtalus" },
-	{ "lhumerus", "lradius" }, { "lradius", "lhand" }, { "rhumerus", "rradius" }, { "rradius", "rhand" }
+	{ "lhumerus", "lradius" }, { "lradius", "lhand" }, { "rhumerus", "rradius" }, { "rradius", "rhand" },
+	{ "lclavical", "lhumerus" }, { "rclavical", "rhumerus" }	// shoulders (hard 2: grid-simulated cloth only)
 };
-static const float mcColliderRadius[] = { 6.0f, 4.5f, 3.8f, 5.0f, 3.8f, 5.0f, 3.8f, 2.5f, 2.2f, 2.5f, 2.2f };
+static const float mcColliderRadius[] = { 6.0f, 4.5f, 3.8f, 5.0f, 3.8f, 5.0f, 3.8f, 2.5f, 2.2f, 2.5f, 2.2f, 3.2f, 3.2f };
 static const int MC_NUM_COLLIDERS = sizeof(mcColliderRadius) / sizeof(mcColliderRadius[0]);
 
 struct mcBoneLookup_t
@@ -3088,7 +3089,7 @@ static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* sur
 			}
 		}
 		caps[ncaps].r = mcColliderRadius[k];
-		caps[ncaps].hard = k >= 7 ? 1 : 0;	// arms
+		caps[ncaps].hard = k >= 11 ? 2 : ( k >= 7 ? 1 : 0 );	// arms, shoulders
 		ncaps++;
 		// fists: a short capsule past each wrist, along the forearm
 		if (k == 8 || k == 10)
