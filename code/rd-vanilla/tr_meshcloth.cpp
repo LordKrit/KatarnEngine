@@ -66,6 +66,7 @@ struct mcDef_t {
 	float			spread;		// 0..1 sideways-only pull toward the animated shape (keeps a cape from roping)
 	float			thickness;	// cloth thickness in units: keeps it this far off the body (half) and off itself (full)
 	float			weight;		// relative mass per area: 1 = normal cloth, 2 = heavy wool/leather (air moves it half as much), 0.5 = silk
+	int				proxy;		// simulation grid size: -1 auto (dense cloth gets a coarse grid), 0 off, N about N points
 };
 
 struct mcGroup_t {
@@ -96,6 +97,21 @@ struct mcGroup_t {
 	std::vector<int>					linkA, linkB;
 	std::vector<char>					linkBend;
 	std::vector<int>					tris;			// particle indices
+
+	// What is drawn. Dense cloth is simulated on a coarse grid of its own
+	// vertices (like the separate simulation mesh of game cloth tools); every
+	// drawn vertex follows the grid points around it. Without a grid the
+	// drawn points are the particles themselves.
+	bool								proxied = false;
+	int									numDraw = 0;	// drawn points (welded vertices)
+	std::vector<int>					vertToDraw;		// global vertex -> drawn point
+	std::vector<float>					drawFree;		// per drawn point: freedom
+	std::vector<char>					drawHangs;		// per drawn point: hanging cloth
+	std::vector<int>					drawTris;		// drawn point indices
+	std::vector<int>					drawIdx;		// 4 per drawn point: particles it follows (-1 unused)
+	std::vector<float>					drawW;			// 4 per drawn point: their weights
+	std::vector<int>					seedDraw;		// per particle: the drawn point it sits on
+	std::vector<int>					drawLinkA, drawLinkB;	// edges between drawn points (grid only: smoothing)
 };
 
 struct mcSurfEntry_t {
@@ -124,6 +140,8 @@ struct mcInstance_t {
 	std::vector<float>	push, contactN, targetSub;	// per particle: this substep's body push, contact normal, previous substep target
 	std::vector<char>	contact;
 	std::vector<float>	scratchTarget2, scratchCnt;
+	std::vector<float>	drawTarget, drawOut;	// 3 per drawn point, world
+	std::vector<char>	scratchDone;
 	std::vector<float>	impulse;		// pending velocity kicks (units/s), e.g. from explosions
 	std::vector<float>	offPrev, offCur;	// cloth offset from the animation after the last two steps (for drawing between steps)
 	std::vector<float>	pPrevStep, pCurStep;	// world positions after the last two steps
@@ -262,6 +280,263 @@ struct mcWeldGrid_t {
 	}
 };
 
+// Long range attachments (Kim, Chentanez & Mueller 2012): each free
+// particle's nearest attached particle measured along the cloth, so the
+// solver can forbid it from ever getting further away than that. Needs
+// bindPos, links and freedom.
+void ComputeLRA( mcGroup_t *g ) {
+	std::vector<std::vector<std::pair<int, float>>> adj( g->numParticles );
+	g->bindLinkSum = 0.0f;
+	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+		if ( g->linkBend[l] ) continue;
+		vec3_t d;
+		mcSub( &g->bindPos[g->linkA[l] * 3], &g->bindPos[g->linkB[l] * 3], d );
+		const float len = mcLen( d );
+		g->bindLinkSum += len;
+		adj[g->linkA[l]].push_back( { g->linkB[l], len } );
+		adj[g->linkB[l]].push_back( { g->linkA[l], len } );
+	}
+	g->lraAnchor.assign( g->numParticles, -1 );
+	g->lraLen.assign( g->numParticles, 1e9f );
+	std::vector<std::pair<float, int>> heap;	// min-heap by distance
+	auto cmp = []( const std::pair<float, int> &x, const std::pair<float, int> &y ) { return x.first > y.first; };
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] > 0.0f ) continue;
+		g->lraAnchor[p] = p;
+		g->lraLen[p] = 0.0f;
+		heap.push_back( { 0.0f, p } );
+	}
+	std::make_heap( heap.begin(), heap.end(), cmp );
+	while ( !heap.empty() ) {
+		std::pop_heap( heap.begin(), heap.end(), cmp );
+		const std::pair<float, int> top = heap.back();
+		heap.pop_back();
+		if ( top.first > g->lraLen[top.second] ) continue;
+		for ( const auto &e : adj[top.second] ) {
+			const float nd = top.first + e.second;
+			if ( nd < g->lraLen[e.first] ) {
+				g->lraLen[e.first] = nd;
+				g->lraAnchor[e.first] = g->lraAnchor[top.second];
+				heap.push_back( { nd, e.first } );
+				std::push_heap( heap.begin(), heap.end(), cmp );
+			}
+		}
+	}
+	for ( int p = 0; p < g->numParticles; p++ ) if ( g->lraAnchor[p] < 0 ) g->lraLen[p] = 0.0f;
+}
+
+// Drawn points = particles (no simulation grid).
+void IdentityDraw( mcGroup_t *g ) {
+	g->proxied = false;
+	g->numDraw = g->numParticles;
+	g->vertToDraw = g->vertToParticle;
+	g->drawFree = g->freedom;
+	g->drawHangs = g->hangs;
+	g->drawTris = g->tris;
+	g->drawIdx.assign( (size_t)g->numParticles * 4, -1 );
+	g->drawW.assign( (size_t)g->numParticles * 4, 0.0f );
+	g->seedDraw.resize( g->numParticles );
+	for ( int p = 0; p < g->numParticles; p++ ) { g->drawIdx[p * 4] = p; g->drawW[p * 4] = 1.0f; g->seedDraw[p] = p; }
+}
+
+// Coarse simulation grid for dense cloth: about 'want' of the cloth's own
+// points, spread evenly along the surface (farthest point sampling by
+// distance along the cloth). Each particle of the grid owns the points
+// closest to it along the cloth; grid links join neighbouring regions and
+// grid triangles come from mesh triangles that touch three regions.
+mcGroup_t *MakeProxy( mcGroup_t *r, int want ) {
+	const int n = r->numParticles;
+	std::vector<std::vector<std::pair<int, float>>> adj( n );
+	for ( size_t l = 0; l < r->linkA.size(); l++ ) {
+		if ( r->linkBend[l] ) continue;
+		vec3_t d;
+		mcSub( &r->bindPos[r->linkA[l] * 3], &r->bindPos[r->linkB[l] * 3], d );
+		const float len = mcLen( d );
+		adj[r->linkA[l]].push_back( { r->linkB[l], len } );
+		adj[r->linkB[l]].push_back( { r->linkA[l], len } );
+	}
+	std::vector<float> dist( n, 1e30f );
+	std::vector<int> region( n, -1 );
+	std::vector<int> seeds;
+	std::vector<std::pair<float, int>> heap;
+	auto cmp = []( const std::pair<float, int> &x, const std::pair<float, int> &y ) { return x.first > y.first; };
+	auto grow = [&]( int s ) {
+		const int id = (int)seeds.size();
+		seeds.push_back( s );
+		dist[s] = 0.0f; region[s] = id;
+		heap.assign( 1, { 0.0f, s } );
+		while ( !heap.empty() ) {
+			std::pop_heap( heap.begin(), heap.end(), cmp );
+			const std::pair<float, int> top = heap.back();
+			heap.pop_back();
+			if ( top.first > dist[top.second] ) continue;
+			for ( const auto &e : adj[top.second] ) {
+				const float nd = top.first + e.second;
+				if ( nd < dist[e.first] ) {
+					dist[e.first] = nd; region[e.first] = id;
+					heap.push_back( { nd, e.first } );
+					std::push_heap( heap.begin(), heap.end(), cmp );
+				}
+			}
+		}
+	};
+	// every separate piece gets at least one grid point; then the farthest point each time
+	for ( int v = 0; v < n; v++ ) if ( region[v] < 0 ) grow( v );
+	while ( (int)seeds.size() < want ) {
+		int far = -1; float fd = 0.0f;
+		for ( int v = 0; v < n; v++ ) if ( dist[v] > fd ) { fd = dist[v]; far = v; }
+		if ( far < 0 || fd <= 1e-3f ) break;
+		grow( far );
+	}
+	const int m = (int)seeds.size();
+	// a grid point whose region holds an attached point is attached: the grid
+	// is the only thing that can hold the cloth there
+	std::vector<float> regionFree( m, 1e30f );
+	for ( int v = 0; v < n; v++ ) if ( r->freedom[v] < regionFree[region[v]] ) regionFree[region[v]] = r->freedom[v];
+
+	mcGroup_t *g = new mcGroup_t;
+	g->surfs = r->surfs; g->defs = r->defs; g->vertBase = r->vertBase; g->numVerts = r->numVerts;
+	g->numParticles = m;
+	g->selfThick = r->selfThick; g->anySmooth = r->anySmooth; g->anySelf = r->anySelf;
+	g->bindPos.resize( (size_t)m * 3 );
+	for ( int i = 0; i < m; i++ ) {
+		const int s = seeds[i];
+		g->partSurf.push_back( r->partSurf[s] ); g->partVert.push_back( r->partVert[s] );
+		g->freedom.push_back( MCDBG_OFF( "NOREGIONPIN" ) ? r->freedom[s] : regionFree[i] ); g->tether.push_back( r->tether[s] );
+		g->shape.push_back( r->shape[s] ); g->bend.push_back( r->bend[s] );
+		g->inertia.push_back( r->inertia[s] ); g->selfCol.push_back( r->selfCol[s] );
+		g->smooth.push_back( r->smooth[s] ); g->maxAccel.push_back( r->maxAccel[s] );
+		g->maxSpin.push_back( r->maxSpin[s] ); g->spread.push_back( r->spread[s] );
+		g->weight.push_back( r->weight[s] ); g->thick.push_back( r->thick[s] );
+		g->hangs.push_back( r->hangs[s] ); g->hardCol.push_back( r->hardCol[s] );
+		mcCopy( &r->bindPos[s * 3], &g->bindPos[i * 3] );
+	}
+	// grid links and triangles
+	std::unordered_map<unsigned long long, char> haveLink;
+	std::unordered_map<unsigned long long, int> edgeOther;
+	auto ekey = []( int a, int b ) { if ( a > b ) { int t = a; a = b; b = t; } return ( (unsigned long long)a << 32 ) | (unsigned)b; };
+	auto addLink = [&]( int a, int b, char bend ) {
+		if ( a == b ) return;
+		const unsigned long long k = ekey( a, b );
+		if ( haveLink.count( k ) ) return;
+		haveLink[k] = 1;
+		g->linkA.push_back( a ); g->linkB.push_back( b ); g->linkBend.push_back( bend );
+	};
+	std::vector<std::vector<int>> nbr( m );
+	for ( size_t l = 0; l < r->linkA.size(); l++ ) {
+		if ( r->linkBend[l] ) continue;
+		const int a = region[r->linkA[l]], b = region[r->linkB[l]];
+		if ( a == b || haveLink.count( ekey( a, b ) ) ) continue;
+		addLink( a, b, 0 );
+		nbr[a].push_back( b ); nbr[b].push_back( a );
+	}
+	std::unordered_map<unsigned long long, char> haveTri;
+	for ( size_t t = 0; t + 2 < r->tris.size(); t += 3 ) {
+		int a = region[r->tris[t]], b = region[r->tris[t + 1]], c = region[r->tris[t + 2]];
+		if ( a == b || b == c || a == c ) continue;
+		int lo = a < b ? ( a < c ? a : c ) : ( b < c ? b : c ), hi = a > b ? ( a > c ? a : c ) : ( b > c ? b : c );
+		const unsigned long long tk = ( (unsigned long long)lo << 42 ) ^ ( (unsigned long long)( a + b + c - lo - hi ) << 21 ) ^ (unsigned long long)hi;
+		if ( haveTri.count( tk ) ) continue;
+		haveTri[tk] = 1;
+		const int pi[3] = { a, b, c };	// keeps the mesh triangle's winding
+		for ( int k = 0; k < 3; k++ ) g->tris.push_back( pi[k] );
+		for ( int k = 0; k < 3; k++ ) {
+			const int x = pi[k], y = pi[( k + 1 ) % 3], o = pi[( k + 2 ) % 3];
+			const unsigned long long ek = ekey( x, y );
+			auto it = edgeOther.find( ek );
+			if ( it == edgeOther.end() ) edgeOther[ek] = o;
+			else addLink( it->second, o, 1 );
+		}
+	}
+	ComputeLRA( g );
+
+	// drawn points follow up to 4 nearby grid particles: their own region's
+	// and its neighbours', weighted by inverse squared bind distance
+	g->proxied = true;
+	g->numDraw = n;
+	g->vertToDraw = r->vertToParticle;
+	g->drawFree = r->freedom;
+	g->drawHangs = r->hangs;
+	g->drawTris = r->tris;
+	g->seedDraw = seeds;
+	// a drawn point close to an attached one (the attached edge, or a seam with
+	// a rigid piece in the middle of the cloth) can't follow the grid fully: the
+	// grid is too coarse to bend within that distance. Taper its freedom over
+	// one grid spacing, measured along the cloth.
+	{
+		float spacing = 0.0f; int nl = 0;
+		for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+			if ( g->linkBend[l] ) continue;
+			vec3_t d; mcSub( &g->bindPos[g->linkA[l] * 3], &g->bindPos[g->linkB[l] * 3], d );
+			spacing += mcLen( d ); nl++;
+		}
+		spacing = nl ? spacing / nl : 1.0f;
+		std::vector<float> da( n, 1e30f );
+		heap.clear();
+		for ( int v = 0; v < n; v++ ) if ( r->freedom[v] <= 0.0f ) { da[v] = 0.0f; heap.push_back( { 0.0f, v } ); }
+		std::make_heap( heap.begin(), heap.end(), cmp );
+		while ( !heap.empty() ) {
+			std::pop_heap( heap.begin(), heap.end(), cmp );
+			const std::pair<float, int> top = heap.back();
+			heap.pop_back();
+			if ( top.first > da[top.second] ) continue;
+			for ( const auto &e : adj[top.second] ) {
+				const float nd = top.first + e.second;
+				if ( nd < da[e.first] && nd < spacing ) { da[e.first] = nd; heap.push_back( { nd, e.first } ); std::push_heap( heap.begin(), heap.end(), cmp ); }
+			}
+		}
+		for ( int v = 0; v < n; v++ ) {
+			if ( da[v] >= spacing ) continue;
+			const float t = da[v] / spacing, taper = t * t * ( 3.0f - 2.0f * t );
+			if ( taper < g->drawFree[v] ) g->drawFree[v] = taper;
+		}
+	}
+	for ( size_t l = 0; l < r->linkA.size(); l++ ) if ( !r->linkBend[l] ) { g->drawLinkA.push_back( r->linkA[l] ); g->drawLinkB.push_back( r->linkB[l] ); }
+	g->drawIdx.assign( (size_t)n * 4, -1 );
+	g->drawW.assign( (size_t)n * 4, 0.0f );
+	for ( int v = 0; v < n; v++ ) {
+		const int own = region[v];
+		std::vector<std::pair<float, int>> cand;
+		auto consider = [&]( int q ) {
+			vec3_t d;
+			mcSub( &r->bindPos[v * 3], &g->bindPos[q * 3], d );
+			cand.push_back( { mcDot( d, d ), q } );
+		};
+		consider( own );
+		for ( int q : nbr[own] ) consider( q );
+		std::sort( cand.begin(), cand.end() );
+		if ( cand[0].first < 1e-8f ) { g->drawIdx[v * 4] = cand[0].second; g->drawW[v * 4] = 1.0f; continue; }
+		float tot = 0.0f;
+		const int k = cand.size() < 4 ? (int)cand.size() : 4;
+		for ( int j = 0; j < k; j++ ) {
+			const float w = 1.0f / cand[j].first;
+			g->drawIdx[v * 4 + j] = cand[j].second; g->drawW[v * 4 + j] = w; tot += w;
+		}
+		for ( int j = 0; j < k; j++ ) g->drawW[v * 4 + j] /= tot;
+	}
+	delete r;
+	return g;
+}
+
+mcGroup_t *FinishGroup( mcGroup_t *g ) {
+	int want = -1;
+	bool off = false;
+	for ( const mcDef_t *d : g->defs ) {
+		if ( d->proxy == 0 ) off = true;
+		else if ( d->proxy > want ) want = d->proxy;
+	}
+	if ( !off && want < 0 && g->numParticles > 600 ) {
+		want = g->numParticles / 8;
+		if ( want < 150 ) want = 150;
+		if ( want > 300 ) want = 300;
+	}
+	if ( off || want <= 0 || want * 2 > g->numParticles || MCDBG_OFF( "NOPROXY" ) ) {
+		IdentityDraw( g );
+		return g;
+	}
+	return MakeProxy( g, want );
+}
+
 mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 	const mdxmHeader_t *h = HeaderOf( seed );
 	std::vector<const mdxmSurface_t *> all = LodSurfaces( seed );
@@ -370,54 +645,10 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 		}
 	}
 
-	// long range attachments (Kim, Chentanez & Mueller 2012): each free
-	// particle's nearest attached particle measured along the cloth, so the
-	// solver can forbid it from ever getting further away than that
-	std::vector<const float *> bindPos( g->numParticles );
 	g->bindPos.resize( (size_t)g->numParticles * 3 );
-	for ( int p = 0; p < g->numParticles; p++ ) {
-		bindPos[p] = Verts( g->surfs[g->partSurf[p]] )[g->partVert[p]].vertCoords;
-		mcCopy( bindPos[p], &g->bindPos[p * 3] );
-	}
-	std::vector<std::vector<std::pair<int, float>>> adj( g->numParticles );
-	g->bindLinkSum = 0.0f;
-	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
-		if ( g->linkBend[l] ) continue;
-		vec3_t d;
-		mcSub( bindPos[g->linkA[l]], bindPos[g->linkB[l]], d );
-		const float len = mcLen( d );
-		g->bindLinkSum += len;
-		adj[g->linkA[l]].push_back( { g->linkB[l], len } );
-		adj[g->linkB[l]].push_back( { g->linkA[l], len } );
-	}
-	g->lraAnchor.assign( g->numParticles, -1 );
-	g->lraLen.assign( g->numParticles, 1e9f );
-	std::vector<std::pair<float, int>> heap;	// min-heap by distance
-	auto cmp = []( const std::pair<float, int> &x, const std::pair<float, int> &y ) { return x.first > y.first; };
-	for ( int p = 0; p < g->numParticles; p++ ) {
-		if ( g->freedom[p] > 0.0f ) continue;
-		g->lraAnchor[p] = p;
-		g->lraLen[p] = 0.0f;
-		heap.push_back( { 0.0f, p } );
-	}
-	std::make_heap( heap.begin(), heap.end(), cmp );
-	while ( !heap.empty() ) {
-		std::pop_heap( heap.begin(), heap.end(), cmp );
-		const std::pair<float, int> top = heap.back();
-		heap.pop_back();
-		if ( top.first > g->lraLen[top.second] ) continue;
-		for ( const auto &e : adj[top.second] ) {
-			const float nd = top.first + e.second;
-			if ( nd < g->lraLen[e.first] ) {
-				g->lraLen[e.first] = nd;
-				g->lraAnchor[e.first] = g->lraAnchor[top.second];
-				heap.push_back( { nd, e.first } );
-				std::push_heap( heap.begin(), heap.end(), cmp );
-			}
-		}
-	}
-	for ( int p = 0; p < g->numParticles; p++ ) if ( g->lraAnchor[p] < 0 ) g->lraLen[p] = 0.0f;
-	return g;
+	for ( int p = 0; p < g->numParticles; p++ ) mcCopy( Verts( g->surfs[g->partSurf[p]] )[g->partVert[p]].vertCoords, &g->bindPos[p * 3] );
+	ComputeLRA( g );
+	return FinishGroup( g );
 }
 
 inline void ToWorld( const float *l, const vec3_t origin, const vec3_t axis[3], float *w ) {
@@ -494,6 +725,22 @@ bool Collide( float *p, const float *target, const mcCapsule_t *caps, int n, flo
 		}
 	}
 	return hit;
+}
+
+void DrawNormals( const mcGroup_t *g, const std::vector<float> &pos, std::vector<float> &n ) {
+	n.assign( (size_t)g->numDraw * 3, 0.0f );
+	for ( size_t t = 0; t + 2 < g->drawTris.size(); t += 3 ) {
+		const float *a = &pos[g->drawTris[t] * 3], *b = &pos[g->drawTris[t + 1] * 3], *c = &pos[g->drawTris[t + 2] * 3];
+		vec3_t e1, e2, fn;
+		mcSub( b, a, e1 );
+		mcSub( c, a, e2 );
+		mcCross( e1, e2, fn );
+		for ( int k = 0; k < 3; k++ ) {
+			float *d = &n[g->drawTris[t + k] * 3];
+			mcAdd( d, fn, d );
+		}
+	}
+	for ( int p = 0; p < g->numDraw; p++ ) mcNorm( &n[p * 3] );
 }
 
 void ParticleNormals( const mcGroup_t *g, const std::vector<float> &pos, std::vector<float> &n ) {
@@ -934,18 +1181,22 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 			   const mcCapsule_t *caps, int ncaps, const mcParams_t *prm, mcBoneFn_t boneFn, void *boneCtx ) {
 	// animated (target) positions of every particle, and skinned normals of every vertex
 	std::vector<float> &target = in->scratchTarget;
+	std::vector<float> &drawTarget = in->drawTarget;
 	target.resize( (size_t)g->numParticles * 3 );
+	drawTarget.resize( (size_t)g->numDraw * 3 );
 	in->skinNrm.resize( (size_t)g->numVerts * 3 );
-	std::vector<char> done( g->numParticles, 0 );
+	std::vector<char> &done = in->scratchDone;
+	done.assign( g->numDraw, 0 );
 	for ( size_t si = 0; si < g->surfs.size(); si++ ) {
 		const mdxmSurface_t *s = g->surfs[si];
 		for ( int i = 0; i < s->numVerts; i++ ) {
-			const int gv = g->vertBase[si] + i, p = g->vertToParticle[gv];
+			const int gv = g->vertBase[si] + i, d = g->vertToDraw[gv];
 			vec3_t pos;
 			SkinVertex( s, i, boneFn, boneCtx, pos, &in->skinNrm[gv * 3] );
-			if ( !done[p] ) { ToWorld( pos, origin, axis, &target[p * 3] ); done[p] = 1; }
+			if ( !done[d] ) { ToWorld( pos, origin, axis, &drawTarget[d * 3] ); done[d] = 1; }
 		}
 	}
+	for ( int p = 0; p < g->numParticles; p++ ) mcCopy( &drawTarget[g->seedDraw[p] * 3], &target[p * 3] );
 
 	if ( in->active ) {
 		const int dt = timeMs - in->lastTime;
@@ -1145,25 +1396,85 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 			}
 		}
 	}
-	for ( size_t i = 0; i < draw.size(); i++ ) draw[i] = target[i] + off[i];
+	// grid offsets -> every drawn point (identity without a grid)
+	std::vector<float> &out = in->drawOut;
+	out.resize( (size_t)g->numDraw * 3 );
+	for ( int d = 0; d < g->numDraw; d++ ) {
+		vec3_t o = { 0, 0, 0 };
+		if ( g->drawFree[d] > 0.0f ) {
+			float fq = 0.0f;
+			for ( int j = 0; j < 4; j++ ) {
+				const int q = g->drawIdx[d * 4 + j];
+				if ( q < 0 ) break;
+				mcMA( o, g->drawW[d * 4 + j], &off[q * 3], o );
+				fq += g->drawW[d * 4 + j] * g->freedom[q];
+			}
+			// near the attached edge a point may be less free than the grid points around it
+			if ( g->proxied && fq > g->drawFree[d] && !MCDBG_OFF( "NOFREESCALE" ) ) mcScale( o, g->drawFree[d] / fq, o );
+		}
+		mcCopy( o, &out[d * 3] );
+	}
+	// the weights change from one grid region to the next: a few smoothing
+	// passes over the drawn mesh make the offsets continuous (grid points stay put)
+	if ( g->proxied ) {
+		std::vector<float> &acc = in->scratchTarget2;
+		std::vector<float> &cnt = in->scratchCnt;
+		for ( int pass = 0; pass < 3; pass++ ) {
+			acc.assign( out.size(), 0.0f );
+			cnt.assign( g->numDraw, 0.0f );
+			for ( size_t l = 0; l < g->drawLinkA.size(); l++ ) {
+				const int a = g->drawLinkA[l], b = g->drawLinkB[l];
+				mcAdd( &acc[a * 3], &out[b * 3], &acc[a * 3] ); cnt[a] += 1.0f;
+				mcAdd( &acc[b * 3], &out[a * 3], &acc[b * 3] ); cnt[b] += 1.0f;
+			}
+			for ( int d = 0; d < g->numDraw; d++ ) {
+				if ( g->drawFree[d] <= 0.0f || cnt[d] == 0.0f ) continue;
+				for ( int k = 0; k < 3; k++ ) out[d * 3 + k] += 0.5f * ( acc[d * 3 + k] / cnt[d] - out[d * 3 + k] );
+			}
+		}
+	}
+	for ( int d = 0; d < g->numDraw; d++ ) mcAdd( &drawTarget[d * 3], &out[d * 3], &out[d * 3] );
+#ifdef MC_DEBUG
+	if ( g->proxied && getenv( "MC_DUMPSTRETCH" ) ) {
+		for ( size_t l = 0; l < g->drawLinkA.size(); l++ ) {
+			const int a = g->drawLinkA[l], b = g->drawLinkB[l];
+			vec3_t e1, e2; mcSub( &out[a * 3], &out[b * 3], e1 ); mcSub( &drawTarget[a * 3], &drawTarget[b * 3], e2 );
+			const float la = mcLen( e1 ), lb = mcLen( e2 );
+			if ( lb > 0.5f && la > 10.0f * lb ) {
+				printf( "STRETCH t=%d edge %d-%d %.2f->%.2f free %.2f %.2f\n", timeMs, a, b, lb, la, g->drawFree[a], g->drawFree[b] );
+				for ( int v : { a, b } ) for ( int j = 0; j < 4; j++ ) { int q = g->drawIdx[v * 4 + j]; if ( q < 0 ) break;
+					printf( "   v%d q%d w%.2f qfree %.2f off %.1f %.1f %.1f\n", v, q, g->drawW[v * 4 + j], g->freedom[q], off[q*3], off[q*3+1], off[q*3+2] ); }
+				break;
+			}
+		}
+	}
+#endif
+	// between grid points the drawn cloth cuts corners: keep it off the body
+	if ( g->proxied && !MCDBG_OFF( "NODRAWCOL" ) ) {
+		for ( int d = 0; d < g->numDraw; d++ ) {
+			if ( g->drawFree[d] <= 0.0f ) continue;
+			vec3_t nrm;
+			Collide( &out[d * 3], &drawTarget[d * 3], nearCaps, nnear, nrm, true, MC_MARGIN );
+		}
+	}
 	// safety net: a degenerate pose (zero-scale bones, a broken model) must
 	// never put NaNs on screen or keep them in the state - fall back to the
 	// animation and start the cloth over next frame
-	for ( size_t i = 0; i < draw.size(); i++ ) {
-		if ( !std::isfinite( draw[i] ) || !std::isfinite( in->p[i] ) ) {
-			draw.assign( target.begin(), target.end() );
-			in->active = false;
-			break;
-		}
+	bool bad = false;
+	for ( size_t i = 0; i < in->p.size() && !bad; i++ ) if ( !std::isfinite( in->p[i] ) ) bad = true;
+	for ( size_t i = 0; i < out.size() && !bad; i++ ) if ( !std::isfinite( out[i] ) ) bad = true;
+	if ( bad ) {
+		out.assign( drawTarget.begin(), drawTarget.end() );
+		in->active = false;
 	}
 
 	// results back into model space, with normals from the moving triangles
 	std::vector<float> &nw = in->scratchN;
-	ParticleNormals( g, draw, nw );
-	in->outLocal.resize( (size_t)g->numParticles * 3 );
-	in->nrmLocal.resize( (size_t)g->numParticles * 3 );
-	for ( int p = 0; p < g->numParticles; p++ ) {
-		ToLocal( &draw[p * 3], origin, axis, &in->outLocal[p * 3] );
+	DrawNormals( g, out, nw );
+	in->outLocal.resize( (size_t)g->numDraw * 3 );
+	in->nrmLocal.resize( (size_t)g->numDraw * 3 );
+	for ( int p = 0; p < g->numDraw; p++ ) {
+		ToLocal( &out[p * 3], origin, axis, &in->outLocal[p * 3] );
 		DirToLocal( &nw[p * 3], axis, &in->nrmLocal[p * 3] );
 		mcNorm( &in->nrmLocal[p * 3] );
 	}
@@ -1208,6 +1519,7 @@ int MC_LoadConfig( const char *text ) {
 		d.spread = 0.0f;
 		d.weight = 1.0f;
 		d.thickness = 1.2f;
+		d.proxy = -1;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
@@ -1215,6 +1527,7 @@ int MC_LoadConfig( const char *text ) {
 			else if ( !Q_stricmp( tok, "thickness" ) ) { d.thickness = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.thickness < 0.0f ) d.thickness = 0.0f; if ( d.thickness > 8.0f ) d.thickness = 8.0f; }
 			else if ( !Q_stricmp( tok, "shape" ) ) d.shape = (float)atof( COM_ParseExt( &p, qfalse ) );
 			else if ( !Q_stricmp( tok, "self" ) ) d.self = true;
+			else if ( !Q_stricmp( tok, "proxy" ) ) { d.proxy = atoi( COM_ParseExt( &p, qfalse ) ); if ( d.proxy < 0 ) d.proxy = 0; if ( d.proxy > 4000 ) d.proxy = 4000; }
 			else if ( !Q_stricmp( tok, "weight" ) ) { d.weight = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.weight < 0.1f ) d.weight = 0.1f; if ( d.weight > 10.0f ) d.weight = 10.0f; }
 			else if ( !Q_stricmp( tok, "spread" ) ) d.spread = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "maxspin" ) ) { d.maxSpin = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxSpin < 0.0f ) d.maxSpin = 0.0f; }
@@ -1314,8 +1627,8 @@ void MC_Apply( const void *surfacePtr, const void *instanceKey, int timeMs,
 
 	const int base = g->vertBase[si];
 	for ( int i = 0; i < surface->numVerts; i++ ) {
-		const int p = g->vertToParticle[base + i];
-		const float f = g->freedom[p];
+		const int p = g->vertToDraw[base + i];
+		const float f = g->drawFree[p];
 		if ( f <= 0.0f ) continue;
 		mcCopy( &in->outLocal[p * 3], xyz[i] );
 		// keep this vertex's side of the surface (two-sided robes, seams)
