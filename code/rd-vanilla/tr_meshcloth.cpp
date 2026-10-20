@@ -1446,7 +1446,9 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	}
 #endif
 	// between grid points the drawn cloth cuts corners: keep it off the body
-	if ( g->proxied && !MCDBG_OFF( "NODRAWCOL" ) ) {
+	// (off by default: pushing drawn points independently of the simulation makes them pop from
+	// frame to frame; the grid's own collision and thickness keep the cloth off the body)
+	if ( g->proxied && MCDBG_OFF( "DRAWCOL" ) ) {
 		for ( int d = 0; d < g->numDraw; d++ ) {
 			if ( g->drawFree[d] <= 0.0f ) continue;
 			vec3_t nrm;
