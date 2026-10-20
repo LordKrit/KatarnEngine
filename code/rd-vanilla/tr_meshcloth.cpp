@@ -1203,7 +1203,13 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	mcCapsule_t nearCaps[32];
 	mcCapsule_t useCaps[40];
 	int nuse = 0;
-	for ( int c = 0; c < ncaps && nuse < 40; c++ ) if ( caps[c].hard != 2 || g->proxied ) useCaps[nuse++] = caps[c];
+	for ( int c = 0; c < ncaps && nuse < 40; c++ ) {
+		if ( caps[c].hard == 2 && !g->proxied ) continue;
+		useCaps[nuse] = caps[c];
+		// grid cloth: arms, fists and hilts a little fatter, they pass between the grid points
+		if ( g->proxied && caps[c].hard == 1 ) useCaps[nuse].r += 0.8f;
+		nuse++;
+	}
 	const int nnear = CullCapsules( g, target, useCaps, nuse, nearCaps, 32 );
 	if ( !in->active ) {
 		in->target.assign( target.begin(), target.end() );
@@ -1448,14 +1454,18 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		}
 	}
 #endif
-	// between grid points the drawn cloth cuts corners: keep it off the body
-	// (off by default: pushing drawn points independently of the simulation makes them pop from
-	// frame to frame; the grid's own collision and thickness keep the cloth off the body)
-	if ( g->proxied && MCDBG_OFF( "DRAWCOL" ) ) {
-		for ( int d = 0; d < g->numDraw; d++ ) {
+	// between grid points the drawn cloth cuts corners. Arms, fists and the saber hilt move
+	// through the cape fast and are thin enough to slip between grid points, so every drawn
+	// point is kept off those (hard 1). The torso and legs are left to the grid: pushing
+	// drawn points off them on their own made the cape pop from frame to frame.
+	if ( g->proxied ) {
+		mcCapsule_t limbs[16]; int nl = 0;
+		const bool all = MCDBG_OFF( "DRAWCOL" );
+		for ( int c = 0; c < nnear && nl < 16; c++ ) if ( all || nearCaps[c].hard == 1 ) limbs[nl++] = nearCaps[c];
+		if ( nl ) for ( int d = 0; d < g->numDraw; d++ ) {
 			if ( g->drawFree[d] <= 0.0f ) continue;
 			vec3_t nrm;
-			Collide( &out[d * 3], &drawTarget[d * 3], nearCaps, nnear, nrm, true, MC_MARGIN );
+			Collide( &out[d * 3], &drawTarget[d * 3], limbs, nl, nrm, true, MC_MARGIN );
 		}
 	}
 	// safety net: a degenerate pose (zero-scale bones, a broken model) must

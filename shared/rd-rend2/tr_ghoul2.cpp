@@ -3818,6 +3818,67 @@ static const float (*MC_BoneFn(void* ctx, const int boneIndex))[4]
 	return reinterpret_cast<const float(*)[4]>(static_cast<CBoneCache*>(ctx)->boneMatrices[boneIndex]);
 }
 
+// saber hilt collider: the hand bolt tag (*r_hand, *l_hand) is skinned like the engine skins it
+// for bolts; the hilt lies along the blade direction (the bolt's minus Y = the tag triangle's
+// longest side) and reaches a little behind the fist and well in front of it
+static bool MC_HiltCapsule(const mdxmSurface_t* clothSurf, CBoneCache* bones, const char* tag,
+	const trRefEntity_t* ent, const vec3_t axis[3], mcCapsule_t& cap)
+{
+	const mdxmHeader_t* h = reinterpret_cast<const mdxmHeader_t*>(reinterpret_cast<const byte*>(clothSurf) + clothSurf->ofsHeader);
+	const mdxmHierarchyOffsets_t* ho = reinterpret_cast<const mdxmHierarchyOffsets_t*>(reinterpret_cast<const byte*>(h) + sizeof(mdxmHeader_t));
+	int ti = -1;
+	for (int i = 0; i < h->numSurfaces && ti < 0; i++)
+	{
+		const mdxmSurfHierarchy_t* sh = reinterpret_cast<const mdxmSurfHierarchy_t*>(reinterpret_cast<const byte*>(ho) + ho->offsets[i]);
+		if (!Q_stricmp(sh->name, tag)) ti = i;
+	}
+	if (ti < 0) return false;
+	const mdxmSurface_t* ts = nullptr;
+	const byte* lod = reinterpret_cast<const byte*>(h) + h->ofsLODs;
+	for (int l = 0; l < h->numLODs && !ts; l++)
+	{
+		const mdxmLODSurfOffset_t* lo = reinterpret_cast<const mdxmLODSurfOffset_t*>(lod + sizeof(mdxmLOD_t));
+		if (reinterpret_cast<const byte*>(lo) + lo->offsets[clothSurf->thisSurfaceIndex] == reinterpret_cast<const byte*>(clothSurf))
+			ts = reinterpret_cast<const mdxmSurface_t*>(reinterpret_cast<const byte*>(lo) + lo->offsets[ti]);
+		lod += reinterpret_cast<const mdxmLOD_t*>(lod)->ofsEnd;
+	}
+	if (!ts || ts->numVerts < 3) return false;
+	const int* refs = reinterpret_cast<const int*>(reinterpret_cast<const byte*>(ts) + ts->ofsBoneReferences);
+	const mdxmVertex_t* v = reinterpret_cast<const mdxmVertex_t*>(reinterpret_cast<const byte*>(ts) + ts->ofsVerts);
+	vec3_t p[3];
+	for (int j = 0; j < 3; j++, v++)
+	{
+		VectorClear(p[j]);
+		const int nw = G2_GetVertWeights(v);
+		float tot = 0.0f;
+		for (int k = 0; k < nw; k++)
+		{
+			const int bi = refs[G2_GetVertBoneIndex(v, k)];
+			const float w = G2_GetVertBoneWeight(v, k, tot, nw);
+			const float (*m)[4] = MC_BoneFn(bones, bi);
+			for (int r = 0; r < 3; r++) p[j][r] += w * (DotProduct(m[r], v->vertCoords) + m[r][3]);
+		}
+	}
+	vec3_t sides[3];
+	for (int j = 0; j < 3; j++) VectorSubtract(p[(j + 1) % 3], p[j], sides[j]);
+	vec3_t dir;
+	VectorCopy(sides[iG2_TRISIDE_LONGEST], dir);
+	if (VectorNormalize(dir) < 1e-4f) return false;
+	VectorScale(dir, -1.0f, dir);	// blade direction
+	vec3_t la, lb;
+	VectorMA(p[MDX_TAG_ORIGIN], -4.0f, dir, la);
+	VectorMA(p[MDX_TAG_ORIGIN], 9.0f, dir, lb);
+	for (int r = 0; r < 3; r++)
+	{
+		cap.a[r] = ent->e.origin[r] + axis[0][r] * la[0] + axis[1][r] * la[1] + axis[2][r] * la[2];
+		cap.b[r] = ent->e.origin[r] + axis[0][r] * lb[0] + axis[1][r] * lb[1] + axis[2][r] * lb[2];
+	}
+	cap.r = 1.6f;
+	cap.hard = 1;
+	return true;
+}
+
+
 // Per cloth surface: bind-pose tangents and an index buffer starting at 0.
 struct mcR2Surf_t
 {
@@ -4022,7 +4083,7 @@ static mcR2Inst_t* RB_MeshClothUpdate(CRenderableSurface* surf, const mdxmSurfac
 	VectorCopy(ent->e.axis[2], axis[2]);
 
 	// capsules: posed bone origin = skin matrix * bind position, then to world
-	mcCapsule_t caps[MC_NUM_COLLIDERS + 2];
+	mcCapsule_t caps[MC_NUM_COLLIDERS + 4];
 	int ncaps = 0;
 	const mcBoneLookup_t* lk = MC_Lookup(bones->header);
 	for (int k = 0; k < MC_NUM_COLLIDERS; k++)
@@ -4065,6 +4126,10 @@ static mcR2Inst_t* RB_MeshClothUpdate(CRenderableSurface* surf, const mdxmSurfac
 			}
 		}
 	}
+
+	// saber hilts in both hands
+	if (MC_HiltCapsule(surface, bones, "*r_hand", ent, axis, caps[ncaps])) ncaps++;
+	if (MC_HiltCapsule(surface, bones, "*l_hand", ent, axis, caps[ncaps])) ncaps++;
 
 	// CPU skinning: positions, normals and tangents
 	static std::vector<float> xyzBuf, nrmBuf, tanBuf;
