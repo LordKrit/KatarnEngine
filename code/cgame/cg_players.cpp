@@ -2067,6 +2067,98 @@ static qboolean CG_CheckLookTarget(centity_t* cent, vec3_t look_angles, float* l
 }
 
 /*
+-------------------------
+CG_G2EyeAngles
+
+Eye tracking for models that have eyeball bones ("eyeball_l" / "eyeball_r", children of the
+cranium with its base orientation). The eyes turn towards the look target (or, without one,
+where the character aims) by whatever the head itself has not turned, within natural limits,
+with a quick saccade-like smoothing. Models without these bones are untouched.
+-------------------------
+*/
+static void CG_G2EyeAngles(const centity_t* cent)
+{
+	gentity_t* gent = cent->gent;
+	if (!gent || !gent->client || gent->playerModel < 0 || gent->ghoul2.size() <= gent->playerModel)
+	{
+		return;
+	}
+	CGhoul2Info& g2 = gent->ghoul2[gent->playerModel];
+	const int h_l = gi.G2API_GetBoneIndex(&g2, "eyeball_l", qtrue);
+	if (h_l == -1)
+	{
+		return;
+	}
+	const int h_r = gi.G2API_GetBoneIndex(&g2, "eyeball_r", qtrue);
+	renderInfo_t& ri = gent->client->renderInfo;
+
+	vec3_t dir;
+	qboolean have = qfalse;
+	if (ri.lookTarget >= 0 && ri.lookTarget < ENTITYNUM_WORLD && ri.lookTarget != gent->s.number)
+	{
+		const gentity_t* t = &g_entities[ri.lookTarget];
+		if (t->inuse)
+		{
+			vec3_t tp;
+			if (t->client)
+			{
+				VectorCopy(t->client->renderInfo.eyePoint, tp);
+			}
+			else
+			{
+				VectorCopy(t->currentOrigin, tp);
+			}
+			VectorSubtract(tp, ri.eyePoint, dir);
+			have = (qboolean)(VectorLengthSquared(dir) > 1.0f);
+		}
+	}
+	if (!have && gent->enemy && gent->enemy->client && gent->enemy->health > 0)
+	{
+		VectorSubtract(gent->enemy->client->renderInfo.eyePoint, ri.eyePoint, dir);
+		have = (qboolean)(VectorLengthSquared(dir) > 1.0f);
+	}
+	if (!have && gent->s.number < MAX_CLIENTS)
+	{
+		// the player: the eyes follow the aim
+		AngleVectors(cent->lerpAngles, dir, nullptr, nullptr);
+		have = qtrue;
+	}
+
+	vec3_t want = { 0, 0, 0 };
+	if (have)
+	{
+		vec3_t ang;
+		vectoangles(dir, ang);
+		want[PITCH] = AngleNormalize180(ang[PITCH] - ri.headAngles[PITCH]);
+		want[YAW] = AngleNormalize180(ang[YAW] - ri.headAngles[YAW]);
+		// past what eyes can reach, look ahead instead of rolling them into the skull
+		if (fabsf(want[YAW]) > 60.0f || fabsf(want[PITCH]) > 45.0f)
+		{
+			want[PITCH] = want[YAW] = 0;
+		}
+		want[PITCH] = Com_Clamp(-18.0f, 18.0f, want[PITCH]);
+		want[YAW] = Com_Clamp(-30.0f, 30.0f, want[YAW]);
+	}
+
+	static float eye_state[MAX_GENTITIES][2];
+	static int eye_time[MAX_GENTITIES];
+	float* st = eye_state[gent->s.number];
+	const int dt = cg.time - eye_time[gent->s.number];
+	eye_time[gent->s.number] = cg.time;
+	const float k = (dt <= 0 || dt > 500) ? 1.0f : 1.0f - expf(-dt / 45.0f);
+	st[0] += (want[PITCH] - st[0]) * k;
+	st[1] += (want[YAW] - st[1]) * k;
+
+	const vec3_t eye_angles = { st[0], st[1], 0 };
+	BG_G2SetBoneAngles(cent, h_l, eye_angles, BONE_ANGLES_POSTMULT, POSITIVE_X, NEGATIVE_Y, NEGATIVE_Z, cgs.model_draw);
+	if (h_r != -1)
+	{
+		BG_G2SetBoneAngles(cent, h_r, eye_angles, BONE_ANGLES_POSTMULT, POSITIVE_X, NEGATIVE_Y, NEGATIVE_Z,
+			cgs.model_draw);
+	}
+}
+
+/*
 =================
 CG_AddHeadBob
 =================
@@ -2782,6 +2874,7 @@ static void CG_G2ClientNeckAngles(const centity_t* cent, const vec3_t look_angle
 			NEGATIVE_Y,
 			NEGATIVE_Z, cgs.model_draw);
 	}
+	CG_G2EyeAngles(cent);
 }
 
 static void CG_UpdateLookAngles(const centity_t* cent, vec3_t look_angles, const float look_speed,
