@@ -2129,8 +2129,10 @@ static void CG_G2EyeAngles(const centity_t* cent)
 	{
 		vec3_t ang;
 		vectoangles(dir, ang);
-		want[PITCH] = AngleNormalize180(ang[PITCH] - ri.headAngles[PITCH]);
-		want[YAW] = AngleNormalize180(ang[YAW] - ri.headAngles[YAW]);
+		// eyeAngles: where the head tag faces, read from the posed model every frame (headAngles is
+		// only kept for non-Ghoul2 models)
+		want[PITCH] = AngleNormalize180(ang[PITCH] - ri.eyeAngles[PITCH]);
+		want[YAW] = AngleNormalize180(ang[YAW] - ri.eyeAngles[YAW]);
 		// past what eyes can reach, look ahead instead of rolling them into the skull
 		if (fabsf(want[YAW]) > 60.0f || fabsf(want[PITCH]) > 45.0f)
 		{
