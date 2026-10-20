@@ -66,7 +66,7 @@ struct mcDef_t {
 	float			spread;		// 0..1 sideways-only pull toward the animated shape (keeps a cape from roping)
 	float			thickness;	// cloth thickness in units: keeps it this far off the body (half) and off itself (full)
 	float			weight;		// relative mass per area: 1 = normal cloth, 2 = heavy wool/leather (air moves it half as much), 0.5 = silk
-	int				proxy;		// simulation grid size: -1 auto (dense cloth gets a coarse grid), 0 off, N about N points
+	int				proxy;		// simulation grid: 0 or -1 = none (every point simulated), N = a coarse grid of about N points
 };
 
 struct mcGroup_t {
@@ -339,7 +339,8 @@ void IdentityDraw( mcGroup_t *g ) {
 	for ( int p = 0; p < g->numParticles; p++ ) { g->drawIdx[p * 4] = p; g->drawW[p * 4] = 1.0f; g->seedDraw[p] = p; }
 }
 
-// Coarse simulation grid for dense cloth: about 'want' of the cloth's own
+// Coarse simulation grid for dense cloth, only where the config asks for it
+// ("proxy N"), so existing capes keep exactly their tuned behaviour: about 'want' of the cloth's own
 // points, spread evenly along the surface (farthest point sampling by
 // distance along the cloth). Each particle of the grid owns the points
 // closest to it along the cloth; grid links join neighbouring regions and
@@ -524,11 +525,6 @@ mcGroup_t *FinishGroup( mcGroup_t *g ) {
 	for ( const mcDef_t *d : g->defs ) {
 		if ( d->proxy == 0 ) off = true;
 		else if ( d->proxy > want ) want = d->proxy;
-	}
-	if ( !off && want < 0 && g->numParticles > 600 ) {
-		want = g->numParticles / 8;
-		if ( want < 150 ) want = 150;
-		if ( want > 300 ) want = 300;
 	}
 	if ( off || want <= 0 || want * 2 > g->numParticles || MCDBG_OFF( "NOPROXY" ) ) {
 		IdentityDraw( g );
