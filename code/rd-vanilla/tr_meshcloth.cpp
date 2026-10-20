@@ -1206,8 +1206,6 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	for ( int c = 0; c < ncaps && nuse < 40; c++ ) {
 		if ( caps[c].hard == 2 && !g->proxied ) continue;
 		useCaps[nuse] = caps[c];
-		// grid cloth: arms, fists and hilts a little fatter, they pass between the grid points
-		if ( g->proxied && caps[c].hard == 1 ) useCaps[nuse].r += 0.8f;
 		nuse++;
 	}
 	const int nnear = CullCapsules( g, target, useCaps, nuse, nearCaps, 32 );
@@ -1419,6 +1417,32 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		}
 		mcCopy( o, &out[d * 3] );
 	}
+	// between grid points the drawn cloth cuts corners. Arms, fists and the saber hilt move
+	// through the cape fast and are thin enough to slip between grid points, so drawn points are
+	// kept off those (hard 1). The push is made before the smoothing passes, which spread it over
+	// the neighbours (a point pushed on its own makes a spike), and once more after them.
+	// The torso and legs are left to the grid: pushing drawn points off them popped.
+	mcCapsule_t limbs[16]; int nl = 0;
+	if ( g->proxied ) {
+		const bool all = MCDBG_OFF( "DRAWCOL" );
+		for ( int c = 0; c < nnear && nl < 16; c++ ) if ( all || nearCaps[c].hard == 1 ) limbs[nl++] = nearCaps[c];
+	}
+	auto pushLimbs = [&]() {
+		for ( int d = 0; d < g->numDraw && nl; d++ ) {
+			if ( g->drawFree[d] <= 0.0f ) continue;
+			vec3_t pp, nrm;
+			mcAdd( &drawTarget[d * 3], &out[d * 3], pp );
+			vec3_t was; mcCopy( pp, was );
+			if ( !Collide( pp, &drawTarget[d * 3], limbs, nl, nrm, false, MC_MARGIN ) ) continue;
+			// a short nudge per pass: a point that would have to jump across the arm stays put
+			// rather than tearing away from its neighbours
+			vec3_t mv; mcSub( pp, was, mv );
+			const float ml = mcLen( mv );
+			if ( ml > 1.5f ) mcMA( was, 1.5f / ml, mv, pp );
+			mcSub( pp, &drawTarget[d * 3], &out[d * 3] );
+		}
+	};
+	pushLimbs();
 	// the weights change from one grid region to the next: a few smoothing
 	// passes over the drawn mesh make the offsets continuous (grid points stay put)
 	if ( g->proxied ) {
@@ -1438,6 +1462,7 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 			}
 		}
 	}
+	pushLimbs();
 	for ( int d = 0; d < g->numDraw; d++ ) mcAdd( &drawTarget[d * 3], &out[d * 3], &out[d * 3] );
 #ifdef MC_DEBUG
 	if ( g->proxied && getenv( "MC_DUMPSTRETCH" ) ) {
@@ -1454,20 +1479,6 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		}
 	}
 #endif
-	// between grid points the drawn cloth cuts corners. Arms, fists and the saber hilt move
-	// through the cape fast and are thin enough to slip between grid points, so every drawn
-	// point is kept off those (hard 1). The torso and legs are left to the grid: pushing
-	// drawn points off them on their own made the cape pop from frame to frame.
-	if ( g->proxied ) {
-		mcCapsule_t limbs[16]; int nl = 0;
-		const bool all = MCDBG_OFF( "DRAWCOL" );
-		for ( int c = 0; c < nnear && nl < 16; c++ ) if ( all || nearCaps[c].hard == 1 ) limbs[nl++] = nearCaps[c];
-		if ( nl ) for ( int d = 0; d < g->numDraw; d++ ) {
-			if ( g->drawFree[d] <= 0.0f ) continue;
-			vec3_t nrm;
-			Collide( &out[d * 3], &drawTarget[d * 3], limbs, nl, nrm, true, MC_MARGIN );
-		}
-	}
 	// safety net: a degenerate pose (zero-scale bones, a broken model) must
 	// never put NaNs on screen or keep them in the state - fall back to the
 	// animation and start the cloth over next frame
