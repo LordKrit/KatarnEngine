@@ -22,6 +22,7 @@ Per character instance:
 #include "tr_meshcloth.h"
 
 #include <vector>
+#include <queue>
 #include <unordered_map>
 #include <string>
 #include <cmath>
@@ -64,6 +65,10 @@ struct mcDef_t {
 	float			maxAccel;	// units/s^2 of character acceleration the cloth feels, 0 = no limit, -1 = cvar
 	float			maxSpin;	// degrees/s of the attached edge's turning the cloth feels, 0 = no limit, -1 = default
 	float			spread;		// 0..1 sideways-only pull toward the animated shape (keeps a cape from roping)
+	float			reach;		// >0: a point may stray from its animated spot by at most reach x its distance
+								// along the cloth from the attached edge (on top of the tether); 0 = off
+	float			turn;		// 0..1 fraction of the attached edge's turning the free cloth is carried along by
+								// directly (angular inertia scale); the rest it feels as inertia. 0 = off
 	float			thickness;	// cloth thickness in units: keeps it this far off the body (half) and off itself (full)
 	float			weight;		// relative mass per area: 1 = normal cloth, 2 = heavy wool/leather (air moves it half as much), 0.5 = silk
 	int				proxy;		// simulation grid: 0 or -1 = none (every point simulated), N = a coarse grid of about N points
@@ -94,6 +99,8 @@ struct mcGroup_t {
 	std::vector<float>					lraLen;			// bind-pose distance to it along the cloth
 	float								bindLinkSum;	// total bind length of the structural links
 	std::vector<float>					bindPos;		// 3 per particle, model bind pose
+	mutable std::vector<float>			rootDist;		// per particle: bind distance along the cloth from the attached edge (lazy)
+	mutable float						reach = -1.0f, turn = -1.0f;	// from the defs (lazy)
 	std::vector<int>					linkA, linkB;
 	std::vector<char>					linkBend;
 	std::vector<int>					tris;			// particle indices
@@ -869,7 +876,12 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 		// lifted up during a fall. A hard stop remains at twice the limit.
 		vec3_t d;
 		mcSub( pp, t, d );
-		const float len = mcLen( d ), maxLen = f * g->tether[p];
+		float maxLen = f * g->tether[p];
+		if ( g->reach > 0.0f && (int)g->rootDist.size() == g->numParticles ) {
+			const float rl = g->reach * g->rootDist[p] * in->linkScale;
+			if ( rl < maxLen ) maxLen = rl;
+		}
+		const float len = mcLen( d );
 		if ( len > maxLen && len > 1e-5f && !MCDBG_OFF( "NOTETHER" ) ) {
 			const float k = 1.0f - powf( 0.85f, bendScale > 0.0f ? bendScale * 6.0f : 6.0f );	// ~15% per 16/6 ms, frame-rate independent
 			float target = len - ( len - maxLen ) * k;
@@ -1007,6 +1019,39 @@ void UpdateSide( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> 
 // into a rope. Measure how fast the attached edge turns about the up axis
 // this frame; any turning beyond the limit carries the free cloth round
 // with it instead of winding it up.
+
+// bind-pose distance of every particle from the attached edge, along the cloth's links
+static void ComputeRootDist( const mcGroup_t *g ) {
+	if ( g->reach < 0.0f ) {
+		float r = 0.0f, t = 0.0f;
+		for ( const mcDef_t *d : g->defs ) { if ( d->reach > r ) r = d->reach; if ( d->turn > t ) t = d->turn; }
+		g->reach = r; g->turn = t;
+	}
+	if ( (int)g->rootDist.size() == g->numParticles ) return;
+	const int n = g->numParticles;
+	std::vector<std::vector<std::pair<int, float>>> adj( n );
+	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+		if ( g->linkBend[l] ) continue;
+		const int a = g->linkA[l], b = g->linkB[l];
+		vec3_t d; mcSub( &g->bindPos[a * 3], &g->bindPos[b * 3], d );
+		const float len = mcLen( d );
+		adj[a].push_back( { b, len } ); adj[b].push_back( { a, len } );
+	}
+	std::vector<float> dist( n, 1e9f );
+	std::priority_queue<std::pair<float, int>, std::vector<std::pair<float, int>>, std::greater<std::pair<float, int>>> q;
+	for ( int p = 0; p < n; p++ ) if ( g->freedom[p] <= 0.0f ) { dist[p] = 0.0f; q.push( { 0.0f, p } ); }
+	while ( !q.empty() ) {
+		const auto top = q.top(); q.pop();
+		if ( top.first > dist[top.second] ) continue;
+		for ( const auto &e : adj[top.second] ) {
+			const float nd = top.first + e.second;
+			if ( nd < dist[e.first] ) { dist[e.first] = nd; q.push( { nd, e.first } ); }
+		}
+	}
+	for ( float &d : dist ) if ( d > 1e8f ) d = 0.0f;	// no attached point reachable: no reach limit (tether only)
+	g->rootDist.swap( dist );
+}
+
 void SpinLimit( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &target, int timeMs, float defSpin ) {
 	const size_t n3 = (size_t)g->numParticles * 3;
 	const int dtMs = timeMs - in->pinTime;
@@ -1046,6 +1091,27 @@ void SpinLimit( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &
 	in->pinPrev.assign( target.begin(), target.end() );
 	in->pinTime = timeMs;
 	if ( angle == 0.0f ) return;
+	// angular inertia scale: the attached edge's turn this frame (whatever turned it: the body
+	// turning, the legs re-facing or the torso aiming, it is read from the posed attachment
+	// itself) carries the free cloth along by 'turn', position and velocity alike; the cloth
+	// feels only the rest of the turn as inertia
+	if ( g->turn > 0.0f ) {
+		const float ca = angle * g->turn;
+		const float cs = cosf( ca ), sn = sinf( ca );
+		for ( int p = 0; p < g->numParticles; p++ ) {
+			if ( g->freedom[p] <= 0.0f ) continue;
+			float *pts[2] = { &in->p[p * 3], &in->prev[p * 3] };
+			for ( float *q : pts ) {
+				vec3_t r, par, perp, side;
+				mcSub( q, c1, r );
+				mcScale( up, mcDot( r, up ), par );
+				mcSub( r, par, perp );
+				mcCross( up, perp, side );
+				for ( int k = 0; k < 3; k++ ) q[k] = c1[k] + par[k] + perp[k] * cs + side[k] * sn;
+			}
+		}
+		angle -= ca;
+	}
 	const float dt = dtMs * 0.001f;
 	for ( int p = 0; p < g->numParticles; p++ ) {
 		if ( g->freedom[p] <= 0.0f ) continue;
@@ -1175,6 +1241,7 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 
 void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t origin, const vec3_t axis[3],
 			   const mcCapsule_t *caps, int ncaps, const mcParams_t *prm, mcBoneFn_t boneFn, void *boneCtx ) {
+	ComputeRootDist( g );
 	// animated (target) positions of every particle, and skinned normals of every vertex
 	std::vector<float> &target = in->scratchTarget;
 	std::vector<float> &drawTarget = in->drawTarget;
@@ -1464,6 +1531,18 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	}
 	pushLimbs();
 	for ( int d = 0; d < g->numDraw; d++ ) mcAdd( &drawTarget[d * 3], &out[d * 3], &out[d * 3] );
+	// the attached part of a cape rides the spine, but the shoulders and upper arms move on their own
+	// (a raised arm, a torso attack while the legs run) and would show through it. Attached points
+	// follow the skin smoothly, so pushing them off those capsules is smooth too.
+	if ( g->proxied && !MCDBG_OFF( "NOATTACHPUSH" ) ) {
+		mcCapsule_t sh[16]; int ns = 0;
+		for ( int c = 0; c < nnear && ns < 16; c++ ) if ( nearCaps[c].hard >= 1 ) sh[ns++] = nearCaps[c];
+		if ( ns ) for ( int d = 0; d < g->numDraw; d++ ) {
+			if ( g->drawFree[d] > 0.0f ) continue;
+			vec3_t nrm;
+			Collide( &out[d * 3], &drawTarget[d * 3], sh, ns, nrm, true, MC_MARGIN );
+		}
+	}
 #ifdef MC_DEBUG
 	if ( g->proxied && getenv( "MC_DUMPSTRETCH" ) ) {
 		for ( size_t l = 0; l < g->drawLinkA.size(); l++ ) {
@@ -1539,6 +1618,8 @@ int MC_LoadConfig( const char *text ) {
 		d.maxAccel = -1.0f;
 		d.maxSpin = -1.0f;
 		d.spread = 0.0f;
+		d.reach = 0.0f;
+		d.turn = 0.0f;
 		d.weight = 1.0f;
 		d.thickness = 1.2f;
 		d.proxy = -1;
@@ -1552,6 +1633,8 @@ int MC_LoadConfig( const char *text ) {
 			else if ( !Q_stricmp( tok, "proxy" ) ) { d.proxy = atoi( COM_ParseExt( &p, qfalse ) ); if ( d.proxy < 0 ) d.proxy = 0; if ( d.proxy > 4000 ) d.proxy = 4000; }
 			else if ( !Q_stricmp( tok, "weight" ) ) { d.weight = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.weight < 0.1f ) d.weight = 0.1f; if ( d.weight > 10.0f ) d.weight = 10.0f; }
 			else if ( !Q_stricmp( tok, "spread" ) ) d.spread = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
+			else if ( !Q_stricmp( tok, "reach" ) ) { d.reach = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.reach < 0.0f ) d.reach = 0.0f; }
+			else if ( !Q_stricmp( tok, "turn" ) ) d.turn = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "maxspin" ) ) { d.maxSpin = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxSpin < 0.0f ) d.maxSpin = 0.0f; }
 			else if ( !Q_stricmp( tok, "maxaccel" ) ) { d.maxAccel = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxAccel < 0.0f ) d.maxAccel = 0.0f; }
 			else if ( !Q_stricmp( tok, "smooth" ) ) d.smooth = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
