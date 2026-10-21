@@ -79,6 +79,7 @@ namespace
 		int blinkStart = -1000;
 		int lastTime = 0;
 		std::string model;
+		std::string glm;
 		std::vector<int> boneIndex;
 		int boneModel = -1;
 	};
@@ -317,11 +318,12 @@ void CG_FaceUpdate(const centity_t* cent)
 	if (!gent || !gent->client || gent->playerModel < 0 || gent->ghoul2.size() <= gent->playerModel) return;
 	CGhoul2Info& g2 = gent->ghoul2[gent->playerModel];
 	FaceState& st = g_face[gent->s.number];
-	if (st.boneModel != g2.mModelindex)
+	// re-check the model whenever the character's model file changes (playermodel, NPC spawn reuse)
+	if (st.glm != g2.mFileName)
 	{
+		st.glm = g2.mFileName;
 		st.model = ModelFolder(g2);
 		st.boneIndex.clear();
-		st.boneModel = g2.mModelindex;
 	}
 	const FaceDef& def = LoadDef(st.model);
 	if (!def.valid) return;
