@@ -2076,6 +2076,7 @@ where the character aims) by whatever the head itself has not turned, within nat
 with a quick saccade-like smoothing. Models without these bones are untouched.
 -------------------------
 */
+extern void CG_FaceUpdate(const centity_t* cent);
 static void CG_G2EyeAngles(const centity_t* cent)
 {
 	gentity_t* gent = cent->gent;
@@ -2877,6 +2878,7 @@ static void CG_G2ClientNeckAngles(const centity_t* cent, const vec3_t look_angle
 			NEGATIVE_Z, cgs.model_draw);
 	}
 	CG_G2EyeAngles(cent);
+	CG_FaceUpdate(cent);
 }
 
 static void CG_UpdateLookAngles(const centity_t* cent, vec3_t look_angles, const float look_speed,

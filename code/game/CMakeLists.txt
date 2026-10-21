@@ -211,6 +211,7 @@ set(SPGameCGameFiles
 	"${SPDir}/cgame/cg_main.cpp"
 	"${SPDir}/cgame/cg_marks.cpp"
 	"${SPDir}/cgame/cg_players.cpp"
+	"${SPDir}/cgame/cg_face.cpp"
 	"${SPDir}/cgame/cg_playerstate.cpp"
 	"${SPDir}/cgame/cg_predict.cpp"
 	"${SPDir}/cgame/cg_scoreboard.cpp"

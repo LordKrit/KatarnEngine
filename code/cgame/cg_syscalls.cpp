@@ -218,9 +218,16 @@ void cgi_S_StopSounds()
 	Q_syscall(CG_S_STOPSOUNDS);
 }
 
+extern void CG_FaceOnVoice(int entityNum, int sfx);
+extern void CG_FaceRememberSound(int handle, const char* name);
+
 void cgi_S_StartSound(const vec3_t origin, const int entityNum, const int entchannel, const sfxHandle_t sfx)
 {
 	Q_syscall(CG_S_STARTSOUND, origin, entityNum, entchannel, sfx);
+	if (entchannel == CHAN_VOICE || entchannel == CHAN_VOICE_ATTEN || entchannel == CHAN_VOICE_GLOBAL)
+	{
+		CG_FaceOnVoice(entityNum, sfx);
+	}
 }
 
 void cgi_AS_ParseSets()
@@ -276,7 +283,9 @@ void cgi_S_Respatialize(const int entityNum, const vec3_t origin, vec3_t axis[3]
 
 sfxHandle_t cgi_S_RegisterSound(const char* sample)
 {
-	return Q_syscall(CG_S_REGISTERSOUND, sample);
+	const sfxHandle_t h = Q_syscall(CG_S_REGISTERSOUND, sample);
+	CG_FaceRememberSound(h, sample);
+	return h;
 }
 
 void cgi_S_StartBackgroundTrack(const char* intro, const char* loop, const qboolean bForceStart)
