@@ -133,3 +133,7 @@ BF2.update({
     'smile3': corners(0.16, 0.14) + side('CheekLower', (0.03, 0, 0.10), (0.03, 0, 0.10)) + lids(12, -4)
               + side('EyesackLower', (0, 0, 0.06), (0, 0, 0.06)) + brows(0.04, 0.02, 0),
 })
+
+BF2['doublethefall'] = (jaw(6) + corners(0.20, 0.16) + [('move', UPPER, (0, 0, 0.12)), ('move', LOWER[:3], (0, 0, -0.04))]
+                        + side('CheekLower', (0.03, 0, 0.12), (0.03, 0, 0.12)) + side('NasolabialBulge', (0.03, -0.02, 0.08), (0.03, -0.02, 0.08))
+                        + side('EyesackLower', (0, 0, 0.08), (0, 0, 0.08)) + lids(14, -6) + brows(-0.04, 0.02, 0.04, 0.03))
