@@ -183,6 +183,7 @@ extern cvar_t* r_ssrStrength;
 extern cvar_t* r_ssrDistance;
 extern cvar_t* r_ssrSteps;
 extern cvar_t* r_ssrGloss;
+extern cvar_t* r_ssrRough;
 
 extern cvar_t* r_normalMapping;
 extern cvar_t* r_specularMapping;

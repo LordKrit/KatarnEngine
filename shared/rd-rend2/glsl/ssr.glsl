@@ -17,6 +17,7 @@ uniform sampler2D u_ScreenDepthMap;   // scene depth
 uniform vec4 u_ViewInfo;              // znear, zfar, proj[0][0], proj[1][1]
 uniform vec4 u_Color;                 // world up in view space (xyz), strength (w)
 uniform vec4 u_Local0;                // max distance, thickness, steps, roughness blur
+uniform vec4 u_Local1;                // roughness rejection (x)
 uniform vec2 u_InvTexRes;
 
 in vec2 var_ScreenTex;
@@ -117,9 +118,26 @@ void main()
 	col += texture(u_ScreenImageMap, hitUV + vec2(0.0,  blur) * u_InvTexRes * 4.0).rgb * 0.15;
 	col += texture(u_ScreenImageMap, hitUV + vec2(0.0, -blur) * u_InvTexRes * 4.0).rgb * 0.15;
 
+	// rough surfaces (rock, carpet, grating) have busy textures: measure local contrast of the
+	// floor around this pixel and fade the reflection out on high-contrast ones
+	vec2 px = u_InvTexRes * 1.5;
+	float l0 = dot(texture(u_ScreenImageMap, uv).rgb, vec3(0.333));
+	float sum = 0.0, sum2 = 0.0;
+	for (int k = 0; k < 8; k++)
+	{
+		float a = float(k) * 0.785398;
+		vec2 o = vec2(cos(a), sin(a)) * px * (1.0 + float(k & 1));
+		float l = dot(texture(u_ScreenImageMap, uv + o).rgb, vec3(0.333));
+		sum += l; sum2 += l * l;
+	}
+	float mean = sum / 8.0;
+	float stdev = sqrt(max(sum2 / 8.0 - mean * mean, 0.0));
+	float busy = (stdev + abs(l0 - mean)) / max(mean, 0.02);
+	float glossy = 1.0 - smoothstep(0.06, 0.06 + 0.25 / max(u_Local1.x, 0.05), busy);
+
 	// Schlick fresnel: polished stone / metal floor
 	float NdotV = clamp(dot(N, -V), 0.0, 1.0);
 	float fresnel = 0.25 + 0.75 * pow(1.0 - NdotV, 4.0);
 
-	out_Color = vec4(col * fresnel * fade * floorMask * u_Color.w, 1.0);
+	out_Color = vec4(col * fresnel * fade * floorMask * glossy * u_Color.w, 1.0);
 }

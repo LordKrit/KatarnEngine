@@ -24,6 +24,15 @@ static gradeVar_t gradeVars[] = {
 	{ "r_gradeHighlights",  "1 1 1" , nullptr }, // multiplier for the bright end (gain colour)
 	{ "r_gradeBlack",       "0"     , nullptr }, // black crush (0..0.1)
 	{ "r_gradeVignette",    "0.25"  , nullptr }, // 0..1
+	// reflections and atmosphere can also be set per map in the same file
+	{ "r_ssrStrength",      "1"      , nullptr },
+	{ "r_ssrGloss",         "1"      , nullptr },
+	{ "r_ssrRough",         "1"      , nullptr },
+	{ "r_atmosDensity",     "0.00012", nullptr },
+	{ "r_atmosFalloff",     "0.0012" , nullptr },
+	{ "r_atmosStart",       "256"    , nullptr },
+	{ "r_atmosColor",       "0.55 0.6 0.7", nullptr },
+	{ "r_atmosShafts",      "0.6"    , nullptr },
 };
 static const int numGradeVars = ARRAY_LEN(gradeVars);
 

@@ -585,6 +585,7 @@ void RB_ScreenSpaceReflections(FBO_t* srcFbo, vec4i_t box)
 	GLSL_SetUniformVec4(&tr.ssrShader, UNIFORM_VIEWINFO, viewInfo);
 	GLSL_SetUniformVec4(&tr.ssrShader, UNIFORM_COLOR, up);
 	GLSL_SetUniformVec4(&tr.ssrShader, UNIFORM_LOCAL0, params);
+	{ vec4_t r = { r_ssrRough->value, 0, 0, 0 }; GLSL_SetUniformVec4(&tr.ssrShader, UNIFORM_LOCAL1, r); }
 	GLSL_SetUniformVec2(&tr.ssrShader, UNIFORM_INVTEXRES, invRes);
 	RB_InstantTriangle();
 

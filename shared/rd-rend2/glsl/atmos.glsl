@@ -77,12 +77,14 @@ void main()
 			if (any(lessThan(s, vec2(0.0))) || any(greaterThan(s, vec2(1.0)))) break;
 			float sd = texture(u_ScreenDepthMap, s).r;
 			float lum = dot(texture(u_ScreenImageMap, s).rgb, vec3(0.2126, 0.7152, 0.0722));
-			acc += (sd >= 0.99999 ? min(lum, 4.0) : 0.0) * decay;
+			acc += (sd >= 0.99999 ? min(lum, 1.5) : 0.0) * decay;
 			decay *= 0.96;
 		}
 		float facing = smoothstep(-0.1, 0.6, cosSun);
 		shafts = u_Local2.rgb * acc / float(N) * u_Local1.w * facing * u_Local3.z;
 	}
+
+	if (sky) shafts *= 0.25;   // the sky is already bright; shafts matter in front of it
 
 	// premultiplied: result = scene * (1 - hide) + haze * hide + shafts
 	out_Color = vec4(haze * hide + shafts, hide);

@@ -158,6 +158,7 @@ cvar_t* r_ssrStrength;
 cvar_t* r_ssrDistance;
 cvar_t* r_ssrSteps;
 cvar_t* r_ssrGloss;
+cvar_t* r_ssrRough;
 
 cvar_t* r_normalMapping;
 cvar_t* r_specularMapping;
@@ -1624,6 +1625,7 @@ static void R_Register(void)
 	r_ssrStrength = ri_Cvar_Get_NoComm("r_ssrStrength", "1", CVAR_ARCHIVE, "");
 	r_ssrDistance = ri_Cvar_Get_NoComm("r_ssrDistance", "1200", CVAR_ARCHIVE, "");
 	r_ssrSteps = ri_Cvar_Get_NoComm("r_ssrSteps", "48", CVAR_ARCHIVE, "");
+	r_ssrRough = ri_Cvar_Get_NoComm("r_ssrRough", "1", CVAR_ARCHIVE, "how strongly rough-looking surfaces are kept from reflecting (0 = everything reflects)");
 	r_ssrGloss = ri_Cvar_Get_NoComm("r_ssrGloss", "1", CVAR_ARCHIVE, "blur of the reflection, 0 = mirror");
 	r_ssao = ri_Cvar_Get_NoComm("r_ssao", "1", CVAR_LATCH | CVAR_ARCHIVE, "");
 
