@@ -625,9 +625,9 @@ void RB_Atmosphere(FBO_t* srcFbo, vec4i_t box)
 	ToViewSpace(mv, tr.sunDirection, sun);
 	sscanf(r_atmosColor->string, "%f %f %f", &col[0], &col[1], &col[2]);
 
-	// haze base = floor of the world
-	float base = tr.world->bmodels ? tr.world->bmodels[0].bounds[0][2] : 0.0f;
-	float camH = backEnd.viewParms.ori.origin[2] - base;
+	// haze is measured from about floor level under the camera (the world's lowest point is
+	// often a skybox far below the playable floor, which made the haze vanish)
+	float camH = 64.0f;
 
 	// sun on screen
 	vec2_t sunUV = { 0.5f, 0.5f };
