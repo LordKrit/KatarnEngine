@@ -78,6 +78,9 @@ def material_shader(mat):
             else:
                 ao = np.ones(c.shape[:2], np.float32)
             rough = 1.0 - np.clip(c[..., 3], 0, 1)
+            if rough.mean() < 0.08: rough[:] = 0.63            # no smoothness channel
+            rough = np.maximum(rough, 0.2)
+            if ao.mean() < 0.25: ao = np.ones_like(ao)        # blue channel isn't AO here
             rmo = np.stack([rough, np.zeros_like(rough), ao], -1)
             Image.fromarray((rmo * 255).astype(np.uint8)).save(base + '_rmo.png', optimize=True)
             if alpha is not None:
