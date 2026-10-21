@@ -227,6 +227,7 @@ int cmdcmp(const void* a, const void* b)
 /* This array MUST be sorted correctly by alphabetical name field */
 extern void CG_FaceExpr_f();
 extern void CG_FaceLip_f();
+extern void CG_FaceInfo_f();
 extern void CG_FaceLook_f();
 static consoleCommand_t commands[] = {
 	{ "+md_wheel", CG_MDWheel_Down_f }, // the radial weapon / force wheel (cg_main.cpp), held
@@ -240,6 +241,7 @@ static consoleCommand_t commands[] = {
 	{ "dpweapnext", CG_DPNextWeapon_f },
 	{ "dpweapprev", CG_DPPrevWeapon_f },
 	{ "faceexpr", CG_FaceExpr_f },
+	{ "faceinfo", CG_FaceInfo_f },
 	{ "facelip", CG_FaceLip_f },
 	{ "facelook", CG_FaceLook_f },
 	{ "forcenext", CG_NextForcePower_f },

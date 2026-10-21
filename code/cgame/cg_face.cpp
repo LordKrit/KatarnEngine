@@ -144,6 +144,7 @@ namespace
 		const std::string path = "ext_data/faces/" + model + ".face";
 		if (gi.FS_ReadFile(path.c_str(), reinterpret_cast<void**>(&buf)) <= 0 || !buf)
 		{
+			Com_Printf("face: no %s\n", path.c_str());
 			return def;
 		}
 		std::unordered_map<std::string, int> byName;
@@ -189,6 +190,7 @@ namespace
 		}
 		gi.FS_FreeFile(buf);
 		def.valid = !def.bones.empty();
+		if (!def.valid) Com_Printf("face: %s has no bones\n", path.c_str());
 		if (def.valid)
 		{
 			Com_Printf("face: %s, %d bones, %d poses\n", model.c_str(), static_cast<int>(def.bones.size()),
@@ -287,10 +289,16 @@ void CG_FaceOnVoice(const int entityNum, const int sfx)
 {
 	if (entityNum < 0 || entityNum >= MAX_GENTITIES) return;
 	const auto it = g_soundNames.find(sfx);
-	if (it == g_soundNames.end()) return;
+	if (it == g_soundNames.end())
+	{
+		if (cg_developer.integer) Com_Printf("face: voice sfx %d on %d has no name\n", sfx, entityNum);
+		return;
+	}
 	FaceState& st = g_face[entityNum];
 	int len = 0;
-	if (LoadLip(it->second, st.lip, len))
+	const bool have = LoadLip(it->second, st.lip, len);
+	if (cg_developer.integer) Com_Printf("face: voice %s on %d, lipsync %s\n", it->second.c_str(), entityNum, have ? "yes" : "no (volume)");
+	if (have)
 	{
 		st.lipStart = cg.time;
 		st.lipEnd = cg.time + len + 100;
@@ -489,4 +497,26 @@ void CG_FaceLook_f()
 	}
 	const gentity_t* t = FindWho(CG_Argv(2));
 	if (t) e->client->renderInfo.lookTarget = t->s.number;
+}
+
+void CG_FaceInfo_f()
+{
+	gentity_t* e = FindWho(cgi_Argc() > 1 ? CG_Argv(1) : "player");
+	if (!e || !e->client || e->playerModel < 0 || e->ghoul2.size() <= e->playerModel)
+	{
+		Com_Printf("faceinfo: no Ghoul2 character\n");
+		return;
+	}
+	CGhoul2Info& g2 = e->ghoul2[e->playerModel];
+	const std::string model = ModelFolder(g2);
+	const FaceDef& def = LoadDef(model);
+	const FaceState& st = g_face[e->s.number];
+	int found = 0;
+	for (const int b : st.boneIndex) found += b >= 0;
+	Com_Printf("faceinfo: entity %d, glm %s, model '%s', face file %s (%d bones, %d poses), bones found %d/%d\n",
+		e->s.number, g2.mFileName, model.c_str(), def.valid ? "loaded" : "MISSING",
+		static_cast<int>(def.bones.size()), static_cast<int>(def.poses.size()), found, static_cast<int>(st.boneIndex.size()));
+	Com_Printf("  expression '%s' %.2f -> %.2f, lipsync %s, voice volume %d, update ran %d ms ago\n", st.expr.c_str(),
+		st.exprW, st.exprTarget, !st.lip.empty() && cg.time < st.lipEnd ? "playing" : "none",
+		gi.VoiceVolume[e->s.number], cg.time - st.lastTime);
 }
