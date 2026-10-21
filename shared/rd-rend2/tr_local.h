@@ -185,6 +185,9 @@ extern cvar_t* r_ssrSteps;
 extern cvar_t* r_ssrGloss;
 extern cvar_t* r_ssrRough;
 extern cvar_t* r_ssrMaterials;
+extern cvar_t* r_ambientCube;
+extern cvar_t* r_saberLights;
+extern cvar_t* r_aoHorizon;
 
 extern cvar_t* r_normalMapping;
 extern cvar_t* r_specularMapping;
@@ -469,6 +472,7 @@ typedef struct trRefEntity_s {
 	vec3_t		ambientLight;	// color normalized to 0-255
 	int			ambientLightInt;	// 32 bit rgba packed
 	vec3_t		directedLight;
+	vec4_t		ambientCube[6];	// +x -x +y -y +z -z ambient, 0-255; [0][3] = 1 when valid
 } trRefEntity_t;
 
 typedef struct {
@@ -786,6 +790,7 @@ struct LightsBlock
 		vec4_t origin;
 		vec3_t color;
 		float radius;
+		vec4_t axis; // xyz = half the light's length along its axis (tube lights: saber blades), 0 = point
 	};
 
 	matrix_t shadowVP1;
@@ -824,9 +829,11 @@ struct EntityBlock
 	float fxVolumetricBase;
 	vec3_t modelLightDir;
 	float vertexLerp;
+	vec4_t ambientCube[6];
 	bool operator == (const EntityBlock& other) const
 	{
 		return (
+			memcmp(this->ambientCube, other.ambientCube, sizeof(ambientCube)) == 0 &&
 			Matrix16Compare(this->modelMatrix, other.modelMatrix) == qtrue &&
 			VectorCompare4(this->lightOrigin, other.lightOrigin) == qtrue &&
 			VectorCompare(this->ambientLight, other.ambientLight) == qtrue &&

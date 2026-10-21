@@ -2141,7 +2141,13 @@ static void RB_RenderSSAO()
 {
 	const float zmax = backEnd.viewParms.zFar;
 	const float zmin = r_znear->value;
-	const vec4_t viewInfo = { zmax / zmin, zmax, 0.0f, 0.0f };
+	vec4_t viewInfo = { zmax / zmin, zmax, 0.0f, 0.0f };
+	vec4_t aoViewInfo = { zmax / zmin, zmax, 0.0f, 0.0f };
+	if (r_aoHorizon->integer)   // horizon-based AO; 0 = the old rend2 one
+	{
+		aoViewInfo[2] = backEnd.viewParms.projectionMatrix[0];
+		aoViewInfo[3] = backEnd.viewParms.projectionMatrix[5];
+	}
 
 	FBO_Bind(tr.quarterFbo[0]);
 
@@ -2152,7 +2158,7 @@ static void RB_RenderSSAO()
 	GLSL_BindProgram(&tr.ssaoShader);
 
 	GL_BindToTMU(tr.hdrDepthImage, TB_COLORMAP);
-	GLSL_SetUniformVec4(&tr.ssaoShader, UNIFORM_VIEWINFO, viewInfo);
+	GLSL_SetUniformVec4(&tr.ssaoShader, UNIFORM_VIEWINFO, aoViewInfo);
 
 	RB_InstantTriangle();
 
@@ -2436,6 +2442,37 @@ static void RB_UpdateLightsConstants(gpuFrame_t* frame, const trRefdef_t* refdef
 			1.0f);
 		VectorCopy(dlight->color, lightData->color);
 		lightData->radius = dlight->radius;
+		VectorClear4(lightData->axis);
+	}
+
+	// Saber blades: the game adds a point light at each blade's middle. Stretch it into a
+	// tube along the blade so walls, floors and faces are lit along its whole length.
+	if (r_saberLights->integer)
+	{
+		for (int e = 0; e < refdef->num_entities; e++)
+		{
+			const refEntity_t& re = refdef->entities[e].e;
+			if (re.reType != RT_SABER_GLOW || re.saberLength < 1.0f)
+				continue;
+			vec3_t mid;
+			VectorMA(re.origin, re.saberLength * 0.5f, re.axis[0], mid);
+			for (int i = 0; i < lightsBlock.numLights; ++i)
+			{
+				LightsBlock::Light* l = lightsBlock.lights + i;
+				vec3_t d;
+				VectorSubtract(l->origin, mid, d);
+				if (l->axis[3] == 0.0f && DotProduct(d, d) < 6.0f * 6.0f)
+				{
+					VectorScale(re.axis[0], re.saberLength * 0.5f, l->axis);
+					l->axis[3] = 1.0f;
+					// the stock light radius is 2x blade length around the middle; around a
+					// tube that reaches too far, so pull it in a little and brighten the core
+					l->radius *= 0.8f;
+					VectorScale(l->color, 1.3f, l->color);
+					break;
+				}
+			}
+		}
 	}
 	// TODO: Add pshadow data
 
@@ -2512,6 +2549,11 @@ static void RB_UpdateEntityLightConstants(
 	VectorScale(refEntity->ambientLight, normalizeFactor, entityBlock.ambientLight);
 	VectorScale(refEntity->directedLight, normalizeFactor, entityBlock.directedLight);
 	VectorCopy(refEntity->lightDir, entityBlock.lightOrigin);
+	for (int f = 0; f < 6; f++)
+	{
+		VectorScale(refEntity->ambientCube[f], normalizeFactor, entityBlock.ambientCube[f]);
+		entityBlock.ambientCube[f][3] = refEntity->ambientCube[0][3];
+	}
 
 	vec3_t lightDir;
 	float lightRadius = 0.0f;

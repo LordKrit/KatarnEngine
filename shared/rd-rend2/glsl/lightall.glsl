@@ -50,6 +50,7 @@ layout(std140) uniform Entity
 	float u_FXVolumetricBase;
 	vec3 u_ModelLightDir;
 	float u_VertexLerp;
+	vec4 u_AmbientCube[6];
 };
 
 #if defined(USE_SKELETAL_ANIMATION)
@@ -393,6 +394,7 @@ layout(std140) uniform Entity
 	float u_FXVolumetricBase;
 	vec3 u_ModelLightDir;
 	float u_VertexLerp;
+	vec4 u_AmbientCube[6];
 };
 
 struct Light
@@ -400,7 +402,20 @@ struct Light
 	vec4 origin;
 	vec3 color;
 	float radius;
+	vec4 axis;   // tube lights (saber blades): half length along the axis
 };
+
+// nearest point of the light to a surface point (point lights: the origin; tubes: on the segment)
+vec3 LightPosition(in Light light, in vec3 position)
+{
+	vec3 a = light.origin.xyz - light.axis.xyz;
+	vec3 seg = light.axis.xyz * 2.0;
+	float len2 = dot(seg, seg);
+	if (len2 < 1e-4)
+		return light.origin.xyz;
+	float t = clamp(dot(position - a, seg) / len2, 0.0, 1.0);
+	return a + seg * t;
+}
 
 layout(std140) uniform Lights
 {
@@ -957,7 +972,7 @@ vec3 CalcDynamicLightContribution(
 		}
 		Light light = u_Lights[i];
 
-		vec3  L  = light.origin.xyz - position;
+		vec3  L  = LightPosition(light, position) - position;
 		float sqrLightDist = dot(L, L);
 
 		float attenuation = CalcLightAttenuation(light.radius * light.radius / sqrLightDist);
@@ -998,7 +1013,7 @@ vec3 CalcDynamicLightContribution(
 			continue;
 		}
 		Light light = u_Lights[i];
-		vec3 L = light.origin.xyz - position;
+		vec3 L = LightPosition(light, position) - position;
 		float sqrLightDist = dot(L, L);
 		float attenuation = CalcLightAttenuation(light.radius * light.radius / sqrLightDist);
 		L /= sqrt(sqrLightDist);
@@ -1154,6 +1169,18 @@ void main()
 	N = CalcNormal(vertexNormal, var_Tangent, texCoords);
 	L /= sqrt(sqrLightDist);
 
+  #if defined(USE_LIGHT_VECTOR)
+	// directional ambient + floor bounce (ambient cube, world space)
+	if (u_AmbientCube[0].w > 0.5)
+	{
+		vec3 n2 = N * N;
+		vec3 cube = n2.x * (N.x > 0.0 ? u_AmbientCube[0].rgb : u_AmbientCube[1].rgb)
+		          + n2.y * (N.y > 0.0 ? u_AmbientCube[2].rgb : u_AmbientCube[3].rgb)
+		          + n2.z * (N.z > 0.0 ? u_AmbientCube[4].rgb : u_AmbientCube[5].rgb);
+		ambientColor = cube * var_Color.rgb;
+	}
+  #endif
+
   #if defined(USE_SHADOWMAP)
 	vec3 primaryLightDir = normalize(u_PrimaryLightOrigin.xyz);
 	float NPL = clamp(dot(N, primaryLightDir), 0.0, 1.0);
@@ -1214,6 +1241,10 @@ void main()
   #endif
   #endif
 	ambientColor *= AO;
+  #if defined(USE_LIGHTMAP) || defined(USE_LIGHT_VERTEX)
+	// most of a lightmap is bounced light, so let AO darken it too (half strength)
+	lightColor *= mix(1.0, AO, 0.5);
+  #endif
 
 	vec3  H  = normalize(L + E);
 	float NE = abs(dot(N, E)) + 1e-5;

@@ -336,6 +336,68 @@ Calculates all the lighting values that will be used
 by the Calc_* functions
 =================
 */
+/*
+=================
+R_SetupEntityAmbientCube
+
+Directional ambient for models: the light grid is sampled a little way out along each axis,
+so a character standing beside a bright doorway or a dark wall is lit unevenly, and light
+that hits the floor around the feet bounces up onto the undersides (Frostbite-style
+ambient bounce, cheaply). The cube is rescaled later to the entity's final ambient level.
+=================
+*/
+static void R_SetupEntityAmbientCube(trRefEntity_t* ent, const vec3_t lightOrigin)
+{
+	if (!r_ambientCube->integer && r_ambientCube->value <= 0.0f)
+		return;
+
+	static const vec3_t axes[6] = { {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1} };
+	const float reach = 72.0f;
+	trRefEntity_t probe;
+
+	for (int f = 0; f < 6; f++)
+	{
+		probe = *ent;
+		probe.e.renderfx |= RF_LIGHTING_ORIGIN;
+		VectorMA(lightOrigin, reach, axes[f], probe.e.lightingOrigin);
+		probe.e.lightingOrigin[2] += 24.0f;   // body centre rather than the feet
+		R_SetupEntityLightingGrid(&probe, tr.world);
+		// ambient there, plus direct light from that side
+		float facing = Q_max(0.0f, DotProduct(axes[f], probe.lightDir));
+		for (int c = 0; c < 3; c++)
+			ent->ambientCube[f][c] = probe.ambientLight[c] + probe.directedLight[c] * facing * 0.35f;
+	}
+
+	// floor bounce: direct light reaching the ground, tinted by the local ambient colour
+	float down = Q_max(0.0f, ent->lightDir[2]);
+	float ambMax = Q_max(1.0f, Q_max(ent->ambientLight[0], Q_max(ent->ambientLight[1], ent->ambientLight[2])));
+	for (int c = 0; c < 3; c++)
+		ent->ambientCube[5][c] += ent->directedLight[c] * down * 0.3f * (0.5f + 0.5f * ent->ambientLight[c] / ambMax);
+
+	ent->ambientCube[0][3] = 1.0f;
+}
+
+static void R_FinishEntityAmbientCube(trRefEntity_t* ent)
+{
+	if (ent->ambientCube[0][3] < 0.5f)
+		return;
+	// keep the overall ambient level the engine computed; only the direction and tint vary
+	float strength = Com_Clamp(0.0f, 2.0f, r_ambientCube->value);
+	for (int c = 0; c < 3; c++)
+	{
+		float mean = 0.0f;
+		for (int f = 0; f < 6; f++) mean += ent->ambientCube[f][c];
+		mean /= 6.0f;
+		float scale = mean > 0.001f ? ent->ambientLight[c] / mean : 1.0f;
+		for (int f = 0; f < 6; f++)
+		{
+			float v = ent->ambientCube[f][c] * scale;
+			ent->ambientCube[f][c] = ent->ambientLight[c] + (v - ent->ambientLight[c]) * strength;
+			if (ent->ambientCube[f][c] < 0.0f) ent->ambientCube[f][c] = 0.0f;
+		}
+	}
+}
+
 void R_SetupEntityLighting(const trRefdef_t* refdef, trRefEntity_t* ent) {
 	int				i = 0;
 	float			d = 0.0f;
@@ -362,9 +424,11 @@ void R_SetupEntityLighting(const trRefdef_t* refdef, trRefEntity_t* ent) {
 	}
 
 	// if NOWORLDMODEL, only use dynamic lights (menu system, etc)
+	ent->ambientCube[0][3] = 0.0f;
 	if (!(refdef->rdflags & RDF_NOWORLDMODEL)
 		&& tr.world->lightGridData) {
 		R_SetupEntityLightingGrid(ent, tr.world);
+		R_SetupEntityAmbientCube(ent, lightOrigin);
 	}
 	else {
 		ent->ambientLight[0] = ent->ambientLight[1] =
@@ -466,6 +530,8 @@ void R_SetupEntityLighting(const trRefdef_t* refdef, trRefEntity_t* ent) {
 	}
 
 	// save out the byte packet version
+	R_FinishEntityAmbientCube(ent);
+
 	((byte*)&ent->ambientLightInt)[0] = Q_ftol(ent->ambientLight[0]);
 	((byte*)&ent->ambientLightInt)[1] = Q_ftol(ent->ambientLight[1]);
 	((byte*)&ent->ambientLightInt)[2] = Q_ftol(ent->ambientLight[2]);
