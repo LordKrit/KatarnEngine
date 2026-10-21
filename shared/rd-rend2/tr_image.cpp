@@ -3476,6 +3476,9 @@ void R_CreateBuiltinImages(void) {
 		tr.ssrImage = R_CreateImage(
 			"*ssr", NULL, width, height, IMGTYPE_COLORALPHA,
 			IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
+		tr.atmosImage = R_CreateImage(
+			"*atmos", NULL, width, height, IMGTYPE_COLORALPHA,
+			IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
 		tr.ssrOutImage = R_CreateImage(
 			"*ssrOut", NULL, width / 2, height / 2, IMGTYPE_COLORALPHA,
 			IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);

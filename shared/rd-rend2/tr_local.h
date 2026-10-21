@@ -173,6 +173,12 @@ extern cvar_t* r_forceAutoExposureMax;
 extern cvar_t* r_depthPrepass;
 extern cvar_t* r_ssao;
 extern cvar_t* r_ssr;
+extern cvar_t* r_atmos;
+extern cvar_t* r_atmosDensity;
+extern cvar_t* r_atmosFalloff;
+extern cvar_t* r_atmosStart;
+extern cvar_t* r_atmosColor;
+extern cvar_t* r_atmosShafts;
 extern cvar_t* r_ssrStrength;
 extern cvar_t* r_ssrDistance;
 extern cvar_t* r_ssrSteps;
@@ -1541,6 +1547,9 @@ typedef enum
 	UNIFORM_GRADE2,
 	UNIFORM_GRADE3,
 	UNIFORM_LOCAL0,
+	UNIFORM_LOCAL1,
+	UNIFORM_LOCAL2,
+	UNIFORM_LOCAL3,
 
 	UNIFORM_CUBEMAPINFO,
 
@@ -2594,6 +2603,7 @@ typedef struct trGlobals_s {
 	image_t* hdrDepthImage;
 	image_t* ssrImage;
 	image_t* ssrOutImage;
+	image_t* atmosImage;
 	image_t* renderCubeImage;
 	image_t* renderCubeDepthImage;
 	image_t* envBrdfImage;
@@ -2631,6 +2641,7 @@ typedef struct trGlobals_s {
 	FBO_t* historyFbo;
 	FBO_t* ssrFbo;
 	FBO_t* ssrOutFbo;
+	FBO_t* atmosFbo;
 
 	shader_t* defaultShader;
 	shader_t* shadowShader;
@@ -2682,6 +2693,7 @@ typedef struct trGlobals_s {
 	shaderProgram_t calclevels4xShader[2];
 	shaderProgram_t ssaoShader;
 	shaderProgram_t ssrShader;
+	shaderProgram_t atmosShader;
 	shaderProgram_t highpassShader;
 	shaderProgram_t depthBlurShader[2];
 	shaderProgram_t prefilterEnvMapShader;

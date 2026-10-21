@@ -593,3 +593,80 @@ void RB_ScreenSpaceReflections(FBO_t* srcFbo, vec4i_t box)
 	FBO_Blit(tr.ssrOutFbo, outBox, NULL, srcFbo, box, NULL, NULL,
 		r_ssr->integer == 2 ? 0 : (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE));
 }
+
+/*
+=============
+RB_Atmosphere
+
+Height haze lit by the sun plus screen-space sun shafts (see glsl/atmos.glsl).
+=============
+*/
+static void ToViewSpace(const float* m, const vec3_t v, vec3_t out)
+{
+	// world direction -> our view space (x right, y up, z forward)
+	out[0] = m[0] * v[0] + m[4] * v[1] + m[8] * v[2];
+	out[1] = m[1] * v[0] + m[5] * v[1] + m[9] * v[2];
+	out[2] = -(m[2] * v[0] + m[6] * v[1] + m[10] * v[2]);
+}
+
+void RB_Atmosphere(FBO_t* srcFbo, vec4i_t box)
+{
+	if (!r_atmos->integer || !tr.atmosFbo || !srcFbo || !tr.world)
+		return;
+	if (backEnd.refdef.rdflags & RDF_NOWORLDMODEL)
+		return;
+
+	FBO_FastBlit(srcFbo, NULL, tr.ssrFbo, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	const float* mv = backEnd.viewParms.world.modelViewMatrix;
+	const float* pm = backEnd.viewParms.projectionMatrix;
+	vec3_t worldUp = { 0, 0, 1 }, up, sun, col = { 0.55f, 0.6f, 0.7f };
+	ToViewSpace(mv, worldUp, up);
+	ToViewSpace(mv, tr.sunDirection, sun);
+	sscanf(r_atmosColor->string, "%f %f %f", &col[0], &col[1], &col[2]);
+
+	// haze base = floor of the world
+	float base = tr.world->bmodels ? tr.world->bmodels[0].bounds[0][2] : 0.0f;
+	float camH = backEnd.viewParms.ori.origin[2] - base;
+
+	// sun on screen
+	vec2_t sunUV = { 0.5f, 0.5f };
+	float sunVis = 0.0f;
+	if (sun[2] > 0.05f)
+	{
+		sunUV[0] = sun[0] * pm[0] / sun[2] * 0.5f + 0.5f;
+		sunUV[1] = sun[1] * pm[5] / sun[2] * 0.5f + 0.5f;
+		float off = Q_max(fabsf(sunUV[0] - 0.5f), fabsf(sunUV[1] - 0.5f));
+		sunVis = Com_Clamp(0.0f, 1.0f, (1.2f - off) / 0.5f);
+	}
+	float sunMax = Q_max(tr.sunLight[0], Q_max(tr.sunLight[1], tr.sunLight[2]));
+	vec3_t sunCol = { 1, 0.95f, 0.85f };
+	if (sunMax > 0.0f) VectorScale(tr.sunLight, 1.0f / sunMax, sunCol);
+
+	vec4_t viewInfo, u0, u1, u2, u3, color;
+	VectorSet4(viewInfo, backEnd.viewParms.zNear, backEnd.viewParms.zFar, pm[0], pm[5]);
+	VectorSet4(color, col[0], col[1], col[2], r_atmosDensity->value);
+	VectorSet4(u0, up[0], up[1], up[2], camH);
+	VectorSet4(u1, sun[0], sun[1], sun[2], r_atmosShafts->value);
+	VectorSet4(u2, sunCol[0], sunCol[1], sunCol[2], r_atmosFalloff->value);
+	VectorSet4(u3, sunUV[0], sunUV[1], sunVis, r_atmosStart->value);
+
+	FBO_Bind(tr.atmosFbo);
+	GL_SetViewportAndScissor(0, 0, tr.atmosImage->width, tr.atmosImage->height);
+	GL_Cull(CT_TWO_SIDED);
+	GL_State(GLS_DEPTHTEST_DISABLE);
+	GLSL_BindProgram(&tr.atmosShader);
+	GL_BindToTMU(tr.ssrImage, TB_COLORMAP);
+	GL_BindToTMU(tr.renderDepthImage, TB_LIGHTMAP);
+	GLSL_SetUniformVec4(&tr.atmosShader, UNIFORM_VIEWINFO, viewInfo);
+	GLSL_SetUniformVec4(&tr.atmosShader, UNIFORM_COLOR, color);
+	GLSL_SetUniformVec4(&tr.atmosShader, UNIFORM_LOCAL0, u0);
+	GLSL_SetUniformVec4(&tr.atmosShader, UNIFORM_LOCAL1, u1);
+	GLSL_SetUniformVec4(&tr.atmosShader, UNIFORM_LOCAL2, u2);
+	GLSL_SetUniformVec4(&tr.atmosShader, UNIFORM_LOCAL3, u3);
+	RB_InstantTriangle();
+
+	vec4i_t outBox = { 0, 0, tr.atmosImage->width, tr.atmosImage->height };
+	FBO_Blit(tr.atmosFbo, outBox, NULL, srcFbo, box, NULL, NULL,
+		r_atmos->integer == 2 ? 0 : (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA));
+}

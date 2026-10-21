@@ -141,6 +141,9 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_Grade2", GLSL_VEC4, 1 },
 	{ "u_Grade3", GLSL_VEC4, 1 },
 	{ "u_Local0", GLSL_VEC4, 1 },
+	{ "u_Local1", GLSL_VEC4, 1 },
+	{ "u_Local2", GLSL_VEC4, 1 },
+	{ "u_Local3", GLSL_VEC4, 1 },
 
 	{ "u_CubeMapInfo", GLSL_VEC4, 1 },
 
@@ -2323,6 +2326,20 @@ static int GLSL_LoadGPUProgramSSR(
 	return 1;
 }
 
+static int GLSL_LoadGPUProgramAtmos(
+	ShaderProgramBuilder& builder,
+	Allocator& scratchAlloc)
+{
+	GLSL_LoadGPUProgramBasic(builder, scratchAlloc, &tr.atmosShader, "atmos", fallback_atmosProgram);
+	GLSL_InitUniforms(&tr.atmosShader);
+	qglUseProgram(tr.atmosShader.program);
+	GLSL_SetUniformInt(&tr.atmosShader, UNIFORM_SCREENIMAGEMAP, TB_COLORMAP);
+	GLSL_SetUniformInt(&tr.atmosShader, UNIFORM_SCREENDEPTHMAP, TB_LIGHTMAP);
+	qglUseProgram(0);
+	GLSL_FinishGPUShader(&tr.atmosShader);
+	return 1;
+}
+
 static int GLSL_LoadGPUProgramSSAO(
 	ShaderProgramBuilder& builder,
 	Allocator& scratchAlloc)
@@ -2821,6 +2838,7 @@ void GLSL_LoadGPUShaders()
 	numEtcShaders += GLSL_LoadGPUProgramHighPass(builder, allocator);
 	numEtcShaders += GLSL_LoadGPUProgramSSAO(builder, allocator);
 	numEtcShaders += GLSL_LoadGPUProgramSSR(builder, allocator);
+	numEtcShaders += GLSL_LoadGPUProgramAtmos(builder, allocator);
 	if (r_cubeMapping->integer)
 		numEtcShaders += GLSL_LoadGPUProgramPrefilterEnvMap(builder, allocator);
 	numEtcShaders += GLSL_LoadGPUProgramDepthBlur(builder, allocator);
@@ -2882,6 +2900,7 @@ void GLSL_ShutdownGPUShaders(void)
 	GLSL_DeleteGPUShader(&tr.highpassShader);
 	GLSL_DeleteGPUShader(&tr.ssaoShader);
 	GLSL_DeleteGPUShader(&tr.ssrShader);
+	GLSL_DeleteGPUShader(&tr.atmosShader);
 
 	for (i = 0; i < 2; i++)
 		GLSL_DeleteGPUShader(&tr.depthBlurShader[i]);

@@ -587,6 +587,12 @@ void FBO_Init(void)
 		FBO_AttachTextureImage(tr.ssrOutImage, 0);
 		FBO_SetupDrawBuffers();
 		R_CheckFBO(tr.ssrOutFbo);
+
+		tr.atmosFbo = FBO_Create("_atmos", tr.atmosImage->width, tr.atmosImage->height);
+		FBO_Bind(tr.atmosFbo);
+		FBO_AttachTextureImage(tr.atmosImage, 0);
+		FBO_SetupDrawBuffers();
+		R_CheckFBO(tr.atmosFbo);
 	}
 
 	if (r_drawSunRays->integer)

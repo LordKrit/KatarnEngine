@@ -148,6 +148,12 @@ cvar_t* r_forceAutoExposureMax;
 cvar_t* r_depthPrepass;
 cvar_t* r_ssao;
 cvar_t* r_ssr;
+cvar_t* r_atmos;
+cvar_t* r_atmosDensity;
+cvar_t* r_atmosFalloff;
+cvar_t* r_atmosStart;
+cvar_t* r_atmosColor;
+cvar_t* r_atmosShafts;
 cvar_t* r_ssrStrength;
 cvar_t* r_ssrDistance;
 cvar_t* r_ssrSteps;
@@ -1608,6 +1614,12 @@ static void R_Register(void)
 	r_cameraExposure = ri_Cvar_Get_NoComm("r_cameraExposure", "0.1", CVAR_ARCHIVE | CVAR_CHEAT, "");
 
 	r_depthPrepass = ri_Cvar_Get_NoComm("r_depthPrepass", "1", CVAR_ARCHIVE, "");
+	r_atmos = ri_Cvar_Get_NoComm("r_atmos", "1", CVAR_ARCHIVE, "Height haze and sun shafts (needs r_hdr 1)");
+	r_atmosDensity = ri_Cvar_Get_NoComm("r_atmosDensity", "0.00012", CVAR_ARCHIVE, "haze per game unit");
+	r_atmosFalloff = ri_Cvar_Get_NoComm("r_atmosFalloff", "0.0012", CVAR_ARCHIVE, "how fast haze thins with height");
+	r_atmosStart = ri_Cvar_Get_NoComm("r_atmosStart", "256", CVAR_ARCHIVE, "haze starts this far from the camera");
+	r_atmosColor = ri_Cvar_Get_NoComm("r_atmosColor", "0.55 0.6 0.7", CVAR_ARCHIVE, "haze colour (HDR)");
+	r_atmosShafts = ri_Cvar_Get_NoComm("r_atmosShafts", "0.6", CVAR_ARCHIVE, "sun shaft strength");
 	r_ssr = ri_Cvar_Get_NoComm("r_ssr", "1", CVAR_ARCHIVE, "Screen-space reflections on floors (needs r_hdr 1)");
 	r_ssrStrength = ri_Cvar_Get_NoComm("r_ssrStrength", "1", CVAR_ARCHIVE, "");
 	r_ssrDistance = ri_Cvar_Get_NoComm("r_ssrDistance", "1200", CVAR_ARCHIVE, "");
