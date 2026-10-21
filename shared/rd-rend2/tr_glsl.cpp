@@ -136,6 +136,10 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_InvTexRes",           GLSL_VEC2, 1 },
 	{ "u_AutoExposureMinMax",  GLSL_VEC2, 1 },
 	{ "u_ToneMinAvgMaxLinear", GLSL_VEC3, 1 },
+	{ "u_Grade0", GLSL_VEC4, 1 },
+	{ "u_Grade1", GLSL_VEC4, 1 },
+	{ "u_Grade2", GLSL_VEC4, 1 },
+	{ "u_Grade3", GLSL_VEC4, 1 },
 
 	{ "u_CubeMapInfo", GLSL_VEC4, 1 },
 

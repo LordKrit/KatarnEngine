@@ -100,6 +100,19 @@ void RB_ToneMap(FBO_t* hdrFbo, vec4i_t hdrBox, FBO_t* ldrFbo, vec4i_t ldrBox, in
 	GLSL_SetUniformVec4(shader, UNIFORM_COLOR, color);
 	GLSL_SetUniformVec2(shader, UNIFORM_AUTOEXPOSUREMINMAX, tr.refdef.autoExposureMinMax);
 	GLSL_SetUniformVec3(shader, UNIFORM_TONEMINAVGMAXLINEAR, tr.refdef.toneMinAvgMaxLinear);
+	{
+		vec4_t g0, g1, g2, g3;
+		if (R_GradeEnabled())
+			R_GradeUniforms(g0, g1, g2, g3);
+		else
+		{
+			VectorSet4(g0, 1, 1, 1, 0); VectorSet4(g1, 1, 1, 1, -1); VectorSet4(g2, 1, 1, 1, 0); VectorSet4(g3, 1, 1, 1, 0);
+		}
+		GLSL_SetUniformVec4(shader, UNIFORM_GRADE0, g0);
+		GLSL_SetUniformVec4(shader, UNIFORM_GRADE1, g1);
+		GLSL_SetUniformVec4(shader, UNIFORM_GRADE2, g2);
+		GLSL_SetUniformVec4(shader, UNIFORM_GRADE3, g3);
+	}
 	RB_InstantTriangle();
 }
 

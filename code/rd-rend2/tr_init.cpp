@@ -1516,6 +1516,7 @@ static consoleCommand_t	commands[] = {
 	{ "capframes",			R_CaptureFrameData_f },
 	{ "r_weather",			R_WeatherEffect_f },
 	{ "weather",			R_SetWeatherEffect_f },
+	{ "grade",				R_Grade_f },
 };
 
 static const size_t numCommands = ARRAY_LEN(commands);
@@ -1801,6 +1802,7 @@ static void R_Register(void)
 	{
 		ri.Cvar_Set("r_modelpoolmegs", "0");
 	}
+	R_GradeRegisterCvars();
 	r_environmentMapping = ri.Cvar_Get("r_environmentMapping", "1", CVAR_ARCHIVE_ND);
 
 	for (size_t i = 0; i < numCommands; i++)
