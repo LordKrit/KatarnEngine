@@ -77,3 +77,40 @@ BF2 = {
                ('rot', [P + '[LR]_EyelidLower'], X, -6, None)]
               + side('EyesackLower', (0, 0, 0.08), (0, 0, 0.08)) + side('ForeheadIn', (0, 0, -0.06), (0, 0, -0.06)),
 }
+
+# --- more expressions
+def brows(inner=0.0, mid=0.0, outer=0.0, squeeze=0.0, l=1.0, r=1.0):
+    out = []
+    for nm, dz in (('ForeheadIn', inner), ('ForeheadMid', mid), ('ForeheadOut', outer)):
+        sq = squeeze if nm == 'ForeheadIn' else 0.0
+        out += side(nm, (-sq, 0, dz * l), (-sq, 0, dz * r))
+    return out
+
+def lids(upper=0.0, lower=0.0):
+    out = []
+    if upper: out.append(('rot', [P + '[LR]_EyelidUpper'], X, upper, None))
+    if lower: out.append(('rot', [P + '[LR]_EyelidLower'], X, lower, None))
+    return out
+
+BF2.update({
+    'frown': brows(-0.12, -0.06, 0, 0.06) + corners(-0.02, -0.14) + side('ChinSide', (0, 0, 0.06), (0, 0, 0.06)),
+    'disgust': side('Nostril', (0.04, 0, 0.10), (0.04, 0, 0.10)) + side('NasolabialFurrow', (0.02, 0, 0.12), (0.02, 0, 0.12))
+               + [('move', UPPER, (0, 0, 0.10))] + corners(-0.02, -0.06) + brows(-0.12, -0.04, 0, 0.05) + lids(10),
+    'fear': brows(0.22, 0.14, 0.04, 0.05) + lids(-10) + jaw(5) + corners(0.12, -0.04),
+    'determined': brows(-0.10, -0.04, 0, 0.04) + lids(6) + [('move', UPPER + LOWER[:3], (0, 0, 0))] + corners(0.04, -0.03)
+                  + side('Masseter', (0.03, 0, 0), (0.03, 0, 0)),
+    'contempt': side('LipCorner', (0.10, -0.02, 0.10), (0, 0, -0.03)) + side('Nostril', (0.02, 0, 0.04), (0, 0, 0))
+                + lids(10) + brows(0, 0, 0, 0, 0.1, 0.0),
+    'evilgrin': corners(0.20, 0.12) + [('move', UPPER, (0, 0, 0.06))] + jaw(3) + brows(-0.14, -0.04, 0.04, 0.05)
+                + lids(8) + side('CheekLower', (0.03, 0, 0.08), (0.03, 0, 0.08)),
+    'worried': brows(0.18, 0.06, -0.04, 0.04) + corners(-0.02, -0.08) + lids(4),
+    'shout': jaw(16) + corners(0.12, -0.06) + [('move', UPPER, (0, 0, 0.12))] + brows(-0.14, -0.06, 0, 0.06)
+             + side('Nostril', (0.04, 0, 0.05), (0.04, 0, 0.05)) + lids(-4),
+    'grimace': corners(0.22, -0.06) + [('move', UPPER, (0, 0, 0.10)), ('move', LOWER[:3], (0, 0, -0.08))] + jaw(2)
+               + brows(-0.10, -0.04, 0, 0.06) + lids(16),
+    'focus': brows(-0.06, -0.02, 0, 0.03) + lids(8, -4),
+    'eyesclosed': lids(48, -12),
+    'browraise_l': brows(0.20, 0.22, 0.16, 0, 1.0, 0.0),
+    'browraise_r': brows(0.20, 0.22, 0.16, 0, 0.0, 1.0),
+    'wince': lids(28, -8) + brows(-0.10, 0, 0, 0.06) + corners(0.14, -0.04) + side('CheekLower', (0, 0, 0.08), (0, 0, 0.08)),
+})
