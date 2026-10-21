@@ -2049,6 +2049,8 @@ void R_GenerateDrawSurfs(viewParms_t* viewParms, trRefdef_t* refdef) {
 	}
 
 	R_AddWorldSurfaces(viewParms, refdef);
+	if (!(refdef->rdflags & RDF_NOWORLDMODEL) && r_drawworld->integer)
+		R_HDWorldAddSurfaces(viewParms);
 
 	R_AddEntitySurfaces(refdef);
 

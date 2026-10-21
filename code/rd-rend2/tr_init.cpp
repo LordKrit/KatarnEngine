@@ -2335,6 +2335,8 @@ RE_Shutdown
 */
 void RE_Shutdown(qboolean destroyWindow, qboolean restarting)
 {
+	R_HDWorldShutdown();
+
 	R_VideoCaptureShutdown(R_VideoReadbackGL()); // its pixel buffer objects (the GL context may go away below)
 	s_videoGLLoaded = false;
 	R_VideoEncoderShutdown(); // the recording workers (a recording's frames were flushed when its file closed)

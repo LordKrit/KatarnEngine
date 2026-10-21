@@ -4507,6 +4507,7 @@ void RE_LoadWorldMap(const char* name) {
 	{
 		ri.Error(ERR_DROP, "ERROR: attempted to redundantly load world map");
 	}
+	R_HDWorldShutdown();
 
 	// set default map light scale
 	tr.mapLightScale = 1.0f;
@@ -4552,6 +4553,7 @@ void RE_LoadWorldMap(const char* name) {
 	R_PushDebugGroup(AL_SCENE, "World loading");
 	R_PushDebugGroup(AL_VIEW, "Weather depth");
 	R_InitWeatherForMap();
+	R_HDWorldLoad(name);
 	R_GradeLoadForMap();
 
 	// Render all cubemaps
