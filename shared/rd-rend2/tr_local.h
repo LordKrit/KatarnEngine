@@ -172,6 +172,11 @@ extern cvar_t* r_forceAutoExposureMax;
 
 extern cvar_t* r_depthPrepass;
 extern cvar_t* r_ssao;
+extern cvar_t* r_ssr;
+extern cvar_t* r_ssrStrength;
+extern cvar_t* r_ssrDistance;
+extern cvar_t* r_ssrSteps;
+extern cvar_t* r_ssrGloss;
 
 extern cvar_t* r_normalMapping;
 extern cvar_t* r_specularMapping;
@@ -1535,6 +1540,7 @@ typedef enum
 	UNIFORM_GRADE1,
 	UNIFORM_GRADE2,
 	UNIFORM_GRADE3,
+	UNIFORM_LOCAL0,
 
 	UNIFORM_CUBEMAPINFO,
 
@@ -2586,6 +2592,7 @@ typedef struct trGlobals_s {
 	image_t* pointShadowArrayImage;
 	image_t* screenSsaoImage;
 	image_t* hdrDepthImage;
+	image_t* ssrImage;
 	image_t* renderCubeImage;
 	image_t* renderCubeDepthImage;
 	image_t* envBrdfImage;
@@ -2621,6 +2628,7 @@ typedef struct trGlobals_s {
 	FBO_t* smaaResolveFbo;
 	FBO_t* temporalResolveFbo;
 	FBO_t* historyFbo;
+	FBO_t* ssrFbo;
 
 	shader_t* defaultShader;
 	shader_t* shadowShader;
@@ -2671,6 +2679,7 @@ typedef struct trGlobals_s {
 	shaderProgram_t tonemapShader[2];
 	shaderProgram_t calclevels4xShader[2];
 	shaderProgram_t ssaoShader;
+	shaderProgram_t ssrShader;
 	shaderProgram_t highpassShader;
 	shaderProgram_t depthBlurShader[2];
 	shaderProgram_t prefilterEnvMapShader;

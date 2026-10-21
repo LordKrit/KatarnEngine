@@ -147,6 +147,11 @@ cvar_t* r_forceAutoExposureMax;
 
 cvar_t* r_depthPrepass;
 cvar_t* r_ssao;
+cvar_t* r_ssr;
+cvar_t* r_ssrStrength;
+cvar_t* r_ssrDistance;
+cvar_t* r_ssrSteps;
+cvar_t* r_ssrGloss;
 
 cvar_t* r_normalMapping;
 cvar_t* r_specularMapping;
@@ -1603,6 +1608,11 @@ static void R_Register(void)
 	r_cameraExposure = ri_Cvar_Get_NoComm("r_cameraExposure", "0.1", CVAR_ARCHIVE | CVAR_CHEAT, "");
 
 	r_depthPrepass = ri_Cvar_Get_NoComm("r_depthPrepass", "1", CVAR_ARCHIVE, "");
+	r_ssr = ri_Cvar_Get_NoComm("r_ssr", "1", CVAR_ARCHIVE, "Screen-space reflections on floors (needs r_hdr 1)");
+	r_ssrStrength = ri_Cvar_Get_NoComm("r_ssrStrength", "0.6", CVAR_ARCHIVE, "");
+	r_ssrDistance = ri_Cvar_Get_NoComm("r_ssrDistance", "1200", CVAR_ARCHIVE, "");
+	r_ssrSteps = ri_Cvar_Get_NoComm("r_ssrSteps", "48", CVAR_ARCHIVE, "");
+	r_ssrGloss = ri_Cvar_Get_NoComm("r_ssrGloss", "1", CVAR_ARCHIVE, "blur of the reflection, 0 = mirror");
 	r_ssao = ri_Cvar_Get_NoComm("r_ssao", "1", CVAR_LATCH | CVAR_ARCHIVE, "");
 
 	r_normalMapping = ri_Cvar_Get_NoComm("r_normalMapping", "1", CVAR_ARCHIVE | CVAR_LATCH, "Disable/enable normal mapping");

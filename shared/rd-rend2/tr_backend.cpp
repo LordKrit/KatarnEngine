@@ -3111,6 +3111,8 @@ static const void* RB_PostProcess(const void* data)
 	dstBox[2] = backEnd.viewParms.viewportWidth;
 	dstBox[3] = backEnd.viewParms.viewportHeight;
 
+	RB_ScreenSpaceReflections(srcFbo, dstBox);
+
 #if 0
 	if (R_SsaoActive())
 	{

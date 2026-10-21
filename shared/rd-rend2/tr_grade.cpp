@@ -13,7 +13,7 @@ defaults, "grade preset <name>" applies a named look and "grade" prints the curr
 struct gradeVar_t { const char* name; const char* def; cvar_t* cv; };
 
 static gradeVar_t gradeVars[] = {
-	{ "r_grade",            "1"     , nullptr }, // 0 = stock rend2 tonemap
+	{ "r_grade",            "0"     , nullptr }, // 0 = stock rend2 tonemap
 	{ "r_gradeCurve",       "1"     , nullptr }, // 0 = stock filmic, 1 = ACES, 2 = Uchimura (GT, soft highlights)
 	{ "r_gradeExposure",    "0"     , nullptr }, // stops
 	{ "r_gradeContrast",    "1.12"  , nullptr }, // around 18% grey, in log space

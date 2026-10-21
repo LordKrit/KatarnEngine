@@ -3471,6 +3471,11 @@ void R_CreateBuiltinImages(void) {
 		glowImageHeight = Q_max(1, glowImageHeight >> 1);
 	}
 
+	if (r_hdr->integer)
+		tr.ssrImage = R_CreateImage(
+			"*ssr", NULL, width, height, IMGTYPE_COLORALPHA,
+			IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
+
 	if (r_drawSunRays->integer)
 		tr.sunRaysImage = R_CreateImage(
 			"*sunRays", NULL, width, height, IMGTYPE_COLORALPHA,

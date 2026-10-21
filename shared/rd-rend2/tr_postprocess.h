@@ -31,6 +31,7 @@ qboolean R_GradeEnabled(void);
 void R_GradeUniforms(vec4_t g0, vec4_t g1, vec4_t g2, vec4_t g3);
 void R_GradeLoadForMap(void);
 void R_Grade_f(void);
+void RB_ScreenSpaceReflections(FBO_t* srcFbo, vec4i_t box);
 void RB_ToneMap(FBO_t* hdrFbo, vec4i_t hdrBox, FBO_t* ldrFbo, vec4i_t ldrBox, int autoExposure);
 void RB_BokehBlur(FBO_t* src, vec4i_t srcBox, FBO_t* dst, vec4i_t dstBox, float blur);
 void RB_SunRays(FBO_t* srcFbo, vec4i_t srcBox, FBO_t* dstFbo, vec4i_t dstBox);

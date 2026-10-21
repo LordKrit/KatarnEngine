@@ -140,6 +140,7 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_Grade1", GLSL_VEC4, 1 },
 	{ "u_Grade2", GLSL_VEC4, 1 },
 	{ "u_Grade3", GLSL_VEC4, 1 },
+	{ "u_Local0", GLSL_VEC4, 1 },
 
 	{ "u_CubeMapInfo", GLSL_VEC4, 1 },
 
@@ -2308,6 +2309,20 @@ static int GLSL_LoadGPUProgramHighPass(
 	return 1;
 }
 
+static int GLSL_LoadGPUProgramSSR(
+	ShaderProgramBuilder& builder,
+	Allocator& scratchAlloc)
+{
+	GLSL_LoadGPUProgramBasic(builder, scratchAlloc, &tr.ssrShader, "ssr", fallback_ssrProgram);
+	GLSL_InitUniforms(&tr.ssrShader);
+	qglUseProgram(tr.ssrShader.program);
+	GLSL_SetUniformInt(&tr.ssrShader, UNIFORM_SCREENIMAGEMAP, TB_COLORMAP);
+	GLSL_SetUniformInt(&tr.ssrShader, UNIFORM_SCREENDEPTHMAP, TB_LIGHTMAP);
+	qglUseProgram(0);
+	GLSL_FinishGPUShader(&tr.ssrShader);
+	return 1;
+}
+
 static int GLSL_LoadGPUProgramSSAO(
 	ShaderProgramBuilder& builder,
 	Allocator& scratchAlloc)
@@ -2805,6 +2820,7 @@ void GLSL_LoadGPUShaders()
 	numEtcShaders += GLSL_LoadGPUProgramCalcLuminanceLevel(builder, allocator);
 	numEtcShaders += GLSL_LoadGPUProgramHighPass(builder, allocator);
 	numEtcShaders += GLSL_LoadGPUProgramSSAO(builder, allocator);
+	numEtcShaders += GLSL_LoadGPUProgramSSR(builder, allocator);
 	if (r_cubeMapping->integer)
 		numEtcShaders += GLSL_LoadGPUProgramPrefilterEnvMap(builder, allocator);
 	numEtcShaders += GLSL_LoadGPUProgramDepthBlur(builder, allocator);
@@ -2865,6 +2881,7 @@ void GLSL_ShutdownGPUShaders(void)
 
 	GLSL_DeleteGPUShader(&tr.highpassShader);
 	GLSL_DeleteGPUShader(&tr.ssaoShader);
+	GLSL_DeleteGPUShader(&tr.ssrShader);
 
 	for (i = 0; i < 2; i++)
 		GLSL_DeleteGPUShader(&tr.depthBlurShader[i]);

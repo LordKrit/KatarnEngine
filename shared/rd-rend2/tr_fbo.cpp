@@ -574,6 +574,15 @@ void FBO_Init(void)
 		R_CheckFBO(tr.historyFbo);
 	}
 
+	if (tr.ssrImage)
+	{
+		tr.ssrFbo = FBO_Create("_ssr", tr.ssrImage->width, tr.ssrImage->height);
+		FBO_Bind(tr.ssrFbo);
+		FBO_AttachTextureImage(tr.ssrImage, 0);
+		FBO_SetupDrawBuffers();
+		R_CheckFBO(tr.ssrFbo);
+	}
+
 	if (r_drawSunRays->integer)
 	{
 		tr.sunRaysFbo = FBO_Create(

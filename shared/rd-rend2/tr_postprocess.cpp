@@ -547,3 +547,42 @@ void RB_BloomUpscale(FBO_t* sourceFBO, FBO_t* destFBO)
 	// Draw fullscreen triangle
 	qglDrawArrays(GL_TRIANGLES, 0, 3);
 }
+/*
+=============
+RB_ScreenSpaceReflections
+
+Adds floor reflections to the HDR scene in srcFbo (see glsl/ssr.glsl).
+=============
+*/
+void RB_ScreenSpaceReflections(FBO_t* srcFbo, vec4i_t box)
+{
+	if (!r_ssr->integer || !tr.ssrFbo || !srcFbo || r_ssrStrength->value <= 0.0f)
+		return;
+	if (backEnd.refdef.rdflags & RDF_NOWORLDMODEL)
+		return;
+
+	// copy the scene so the pass can read it while adding into the original
+	FBO_FastBlit(srcFbo, NULL, tr.ssrFbo, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	const float* mv = backEnd.viewParms.world.modelViewMatrix;
+	const float* pm = backEnd.viewParms.projectionMatrix;
+	vec4_t viewInfo, up, params;
+	VectorSet4(viewInfo, backEnd.viewParms.zNear, backEnd.viewParms.zFar, pm[0], pm[5]);
+	// world +z in our view space (x right, y up, z forward)
+	VectorSet4(up, mv[8], mv[9], -mv[10], r_ssrStrength->value);
+	VectorSet4(params, r_ssrDistance->value, 24.0f, (float)Q_min(96, Q_max(8, r_ssrSteps->integer)), r_ssrGloss->value);
+	vec2_t invRes = { 1.0f / tr.ssrImage->width, 1.0f / tr.ssrImage->height };
+
+	FBO_Bind(srcFbo);
+	GL_SetViewportAndScissor(box[0], box[1], box[2], box[3]);
+	GL_Cull(CT_TWO_SIDED);
+	GL_State(GLS_DEPTHTEST_DISABLE | GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE);
+	GLSL_BindProgram(&tr.ssrShader);
+	GL_BindToTMU(tr.ssrImage, TB_COLORMAP);
+	GL_BindToTMU(tr.renderDepthImage, TB_LIGHTMAP);
+	GLSL_SetUniformVec4(&tr.ssrShader, UNIFORM_VIEWINFO, viewInfo);
+	GLSL_SetUniformVec4(&tr.ssrShader, UNIFORM_COLOR, up);
+	GLSL_SetUniformVec4(&tr.ssrShader, UNIFORM_LOCAL0, params);
+	GLSL_SetUniformVec2(&tr.ssrShader, UNIFORM_INVTEXRES, invRes);
+	RB_InstantTriangle();
+}
