@@ -1,0 +1,4 @@
+{"pelvis":"Hips","lower_lumbar":"Spine","upper_lumbar":"Spine1","thoracic":"Spine2","cervical":"Neck","cranium":"Head",
+"lclavical":"LeftShoulder","lhumerus":"LeftArm","lradius":"LeftForeArm","lhand":"LeftHand",
+"rclavical":"RightShoulder","rhumerus":"RightArm","rradius":"RightForeArm","rhand":"RightHand",
+"lfemurYZ":"LeftUpLeg","ltibia":"LeftLeg","ltalus":"LeftFoot","rfemurYZ":"RightUpLeg","rtibia":"RightLeg","rtalus":"RightFoot"}
