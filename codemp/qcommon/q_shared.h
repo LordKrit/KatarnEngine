@@ -120,7 +120,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #define UNUSED_VAR
 #endif
 
-#if (defined _MSC_VER)
+#if (defined _MSC_VER) || (defined _WIN32)
 #define Q_EXPORT __declspec(dllexport)
 #elif (defined __SUNPRO_C)
 #define Q_EXPORT __global
