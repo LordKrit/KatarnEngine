@@ -2445,35 +2445,6 @@ static void RB_UpdateLightsConstants(gpuFrame_t* frame, const trRefdef_t* refdef
 		VectorClear4(lightData->axis);
 	}
 
-	// Saber blades: the game adds a point light at each blade's middle. Stretch it into a
-	// tube along the blade so walls, floors and faces are lit along its whole length.
-	if (r_saberLights->integer)
-	{
-		for (int e = 0; e < refdef->num_entities; e++)
-		{
-			const refEntity_t& re = refdef->entities[e].e;
-			if (re.reType != RT_SABER_GLOW || re.saberLength < 1.0f)
-				continue;
-			vec3_t mid;
-			VectorMA(re.origin, re.saberLength * 0.5f, re.axis[0], mid);
-			for (int i = 0; i < lightsBlock.numLights; ++i)
-			{
-				LightsBlock::Light* l = lightsBlock.lights + i;
-				vec3_t d;
-				VectorSubtract(l->origin, mid, d);
-				if (l->axis[3] == 0.0f && DotProduct(d, d) < 6.0f * 6.0f)
-				{
-					VectorScale(re.axis[0], re.saberLength * 0.5f, l->axis);
-					l->axis[3] = 1.0f;
-					// the stock light radius is 2x blade length around the middle; around a
-					// tube that reaches too far, so pull it in a little and brighten the core
-					l->radius *= 0.8f;
-					VectorScale(l->color, 1.3f, l->color);
-					break;
-				}
-			}
-		}
-	}
 	// TODO: Add pshadow data
 
 	tr.lightsUboOffset = RB_AppendConstantsData(

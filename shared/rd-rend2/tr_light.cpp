@@ -362,6 +362,13 @@ static void R_SetupEntityAmbientCube(trRefEntity_t* ent, const vec3_t lightOrigi
 		VectorMA(lightOrigin, reach, axes[f], probe.e.lightingOrigin);
 		probe.e.lightingOrigin[2] += 24.0f;   // body centre rather than the feet
 		R_SetupEntityLightingGrid(&probe, tr.world);
+		// a probe inside a wall or outside the grid has no light data: use the centre instead
+		// of black (that made characters go dark next to walls)
+		if (VectorLength(probe.ambientLight) + VectorLength(probe.directedLight) < 1.0f)
+		{
+			VectorCopy(ent->ambientLight, probe.ambientLight);
+			VectorClear(probe.directedLight);
+		}
 		// ambient there, plus direct light from that side
 		float facing = Q_max(0.0f, DotProduct(axes[f], probe.lightDir));
 		for (int c = 0; c < 3; c++)
@@ -392,6 +399,8 @@ static void R_FinishEntityAmbientCube(trRefEntity_t* ent)
 		for (int f = 0; f < 6; f++)
 		{
 			float v = ent->ambientCube[f][c] * scale;
+			// keep every side within 0.6x..1.6x of the average so no side goes black
+			v = Com_Clamp(ent->ambientLight[c] * 0.6f, ent->ambientLight[c] * 1.6f, v);
 			ent->ambientCube[f][c] = ent->ambientLight[c] + (v - ent->ambientLight[c]) * strength;
 			if (ent->ambientCube[f][c] < 0.0f) ent->ambientCube[f][c] = 0.0f;
 		}

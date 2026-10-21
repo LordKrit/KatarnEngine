@@ -138,7 +138,7 @@ float horizonAO(vec2 tex)
 		}
 	}
 	occ /= float(DIRS * 2);
-	return clamp(1.0 - occ * 1.6, 0.0, 1.0);
+	return clamp(1.0 - occ * 1.2, 0.25, 1.0);
 }
 
 void main()

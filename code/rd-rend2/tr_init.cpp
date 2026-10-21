@@ -161,7 +161,6 @@ cvar_t* r_ssrGloss;
 cvar_t* r_ssrRough;
 cvar_t* r_ssrMaterials;
 cvar_t* r_ambientCube;
-cvar_t* r_saberLights;
 cvar_t* r_aoHorizon;
 
 cvar_t* r_normalMapping;
@@ -1630,7 +1629,6 @@ static void R_Register(void)
 	r_ssrDistance = ri_Cvar_Get_NoComm("r_ssrDistance", "1200", CVAR_ARCHIVE, "");
 	r_ssrSteps = ri_Cvar_Get_NoComm("r_ssrSteps", "48", CVAR_ARCHIVE, "");
 	r_aoHorizon = ri_Cvar_Get_NoComm("r_aoHorizon", "1", CVAR_ARCHIVE, "1 = horizon-based ambient occlusion (needs r_ssao 1), 0 = stock rend2 SSAO");
-	r_saberLights = ri_Cvar_Get_NoComm("r_saberLights", "1", CVAR_ARCHIVE, "lightsaber blades light the scene along their whole length");
 	r_ambientCube = ri_Cvar_Get_NoComm("r_ambientCube", "1", CVAR_ARCHIVE, "directional ambient + floor bounce on models from the light grid (strength)");
 	r_ssrMaterials = ri_Cvar_Get_NoComm("r_ssrMaterials", "1", CVAR_ARCHIVE, "0 = every floor may reflect, 1 = shiny materials and untagged surfaces, 2 = only shiny materials");
 	r_ssrRough = ri_Cvar_Get_NoComm("r_ssrRough", "1", CVAR_ARCHIVE, "how strongly rough-looking surfaces are kept from reflecting (0 = everything reflects)");

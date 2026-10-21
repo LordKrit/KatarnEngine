@@ -186,7 +186,6 @@ extern cvar_t* r_ssrGloss;
 extern cvar_t* r_ssrRough;
 extern cvar_t* r_ssrMaterials;
 extern cvar_t* r_ambientCube;
-extern cvar_t* r_saberLights;
 extern cvar_t* r_aoHorizon;
 
 extern cvar_t* r_normalMapping;
