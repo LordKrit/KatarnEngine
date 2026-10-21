@@ -119,7 +119,7 @@ void main()
 
 	// Schlick fresnel: polished stone / metal floor
 	float NdotV = clamp(dot(N, -V), 0.0, 1.0);
-	float fresnel = 0.08 + 0.92 * pow(1.0 - NdotV, 5.0);
+	float fresnel = 0.25 + 0.75 * pow(1.0 - NdotV, 4.0);
 
 	out_Color = vec4(col * fresnel * fade * floorMask * u_Color.w, 1.0);
 }

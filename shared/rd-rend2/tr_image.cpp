@@ -3472,9 +3472,14 @@ void R_CreateBuiltinImages(void) {
 	}
 
 	if (r_hdr->integer)
+	{
 		tr.ssrImage = R_CreateImage(
 			"*ssr", NULL, width, height, IMGTYPE_COLORALPHA,
 			IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
+		tr.ssrOutImage = R_CreateImage(
+			"*ssrOut", NULL, width / 2, height / 2, IMGTYPE_COLORALPHA,
+			IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
+	}
 
 	if (r_drawSunRays->integer)
 		tr.sunRaysImage = R_CreateImage(

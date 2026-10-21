@@ -573,10 +573,12 @@ void RB_ScreenSpaceReflections(FBO_t* srcFbo, vec4i_t box)
 	VectorSet4(params, r_ssrDistance->value, 24.0f, (float)Q_min(96, Q_max(8, r_ssrSteps->integer)), r_ssrGloss->value);
 	vec2_t invRes = { 1.0f / tr.ssrImage->width, 1.0f / tr.ssrImage->height };
 
-	FBO_Bind(srcFbo);
-	GL_SetViewportAndScissor(box[0], box[1], box[2], box[3]);
+	// trace at half resolution into a separate target: the scene FBO has the depth
+	// texture attached, so it can't be sampled while drawing into it
+	FBO_Bind(tr.ssrOutFbo);
+	GL_SetViewportAndScissor(0, 0, tr.ssrOutImage->width, tr.ssrOutImage->height);
 	GL_Cull(CT_TWO_SIDED);
-	GL_State(GLS_DEPTHTEST_DISABLE | GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE);
+	GL_State(GLS_DEPTHTEST_DISABLE);
 	GLSL_BindProgram(&tr.ssrShader);
 	GL_BindToTMU(tr.ssrImage, TB_COLORMAP);
 	GL_BindToTMU(tr.renderDepthImage, TB_LIGHTMAP);
@@ -585,4 +587,9 @@ void RB_ScreenSpaceReflections(FBO_t* srcFbo, vec4i_t box)
 	GLSL_SetUniformVec4(&tr.ssrShader, UNIFORM_LOCAL0, params);
 	GLSL_SetUniformVec2(&tr.ssrShader, UNIFORM_INVTEXRES, invRes);
 	RB_InstantTriangle();
+
+	// add (or, with r_ssr 2, show only) the reflections
+	vec4i_t outBox = { 0, 0, tr.ssrOutImage->width, tr.ssrOutImage->height };
+	FBO_Blit(tr.ssrOutFbo, outBox, NULL, srcFbo, box, NULL, NULL,
+		r_ssr->integer == 2 ? 0 : (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE));
 }

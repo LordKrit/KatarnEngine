@@ -2593,6 +2593,7 @@ typedef struct trGlobals_s {
 	image_t* screenSsaoImage;
 	image_t* hdrDepthImage;
 	image_t* ssrImage;
+	image_t* ssrOutImage;
 	image_t* renderCubeImage;
 	image_t* renderCubeDepthImage;
 	image_t* envBrdfImage;
@@ -2629,6 +2630,7 @@ typedef struct trGlobals_s {
 	FBO_t* temporalResolveFbo;
 	FBO_t* historyFbo;
 	FBO_t* ssrFbo;
+	FBO_t* ssrOutFbo;
 
 	shader_t* defaultShader;
 	shader_t* shadowShader;

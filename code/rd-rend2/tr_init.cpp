@@ -1609,7 +1609,7 @@ static void R_Register(void)
 
 	r_depthPrepass = ri_Cvar_Get_NoComm("r_depthPrepass", "1", CVAR_ARCHIVE, "");
 	r_ssr = ri_Cvar_Get_NoComm("r_ssr", "1", CVAR_ARCHIVE, "Screen-space reflections on floors (needs r_hdr 1)");
-	r_ssrStrength = ri_Cvar_Get_NoComm("r_ssrStrength", "0.6", CVAR_ARCHIVE, "");
+	r_ssrStrength = ri_Cvar_Get_NoComm("r_ssrStrength", "1", CVAR_ARCHIVE, "");
 	r_ssrDistance = ri_Cvar_Get_NoComm("r_ssrDistance", "1200", CVAR_ARCHIVE, "");
 	r_ssrSteps = ri_Cvar_Get_NoComm("r_ssrSteps", "48", CVAR_ARCHIVE, "");
 	r_ssrGloss = ri_Cvar_Get_NoComm("r_ssrGloss", "1", CVAR_ARCHIVE, "blur of the reflection, 0 = mirror");
