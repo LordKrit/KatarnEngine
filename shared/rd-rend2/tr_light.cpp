@@ -434,7 +434,10 @@ void R_SetupEntityLighting(const trRefdef_t* refdef, trRefEntity_t* ent) {
 
 	// if NOWORLDMODEL, only use dynamic lights (menu system, etc)
 	ent->ambientCube[0][3] = 0.0f;
-	if (!(refdef->rdflags & RDF_NOWORLDMODEL)
+	if (!(refdef->rdflags & RDF_NOWORLDMODEL) && R_HDWorldActive()) {
+		R_HDWorldEntityLighting(ent);
+	}
+	else if (!(refdef->rdflags & RDF_NOWORLDMODEL)
 		&& tr.world->lightGridData) {
 		R_SetupEntityLightingGrid(ent, tr.world);
 		R_SetupEntityAmbientCube(ent, lightOrigin);

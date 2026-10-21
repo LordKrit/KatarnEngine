@@ -3055,6 +3055,7 @@ void R_HDWorldLoad(const char* bspName);
 void R_HDWorldShutdown(void);
 void R_HDWorldAddSurfaces(viewParms_t* viewParms);
 qboolean R_HDWorldActive(void);
+void R_HDWorldEntityLighting(trRefEntity_t* ent);
 void R_AddDrawSurf(surfaceType_t* surface, int entityNum, const shader_t* shader, int fogIndex, const int dlightMap, int postRender, int cubemap);
 bool R_IsPostRenderEntity(const trRefEntity_t* refEntity);
 

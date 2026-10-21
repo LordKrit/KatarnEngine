@@ -178,7 +178,7 @@ static void R_HDLoadFile(const char* path)
 		totalTris += ni / 3;
 	}
 	ri.FS_FreeFile(buf);
-	ri.Printf(PRINT_ALL, "hdworld: %s - %d triangles\n", path, totalTris);
+	ri.Printf(PRINT_ALL, "hdworld: %d triangles loaded\n", totalTris);
 }
 
 void R_HDWorldLoad(const char* bspName)
@@ -257,4 +257,14 @@ void R_HDWorldAddSurfaces(viewParms_t* viewParms)
 			continue;
 		R_AddDrawSurf((surfaceType_t*)&c->surf, REFENTITYNUM_WORLD, c->shader, 0, 0, 0, 0);
 	}
+}
+
+void R_HDWorldEntityLighting(trRefEntity_t* ent)
+{
+	vec3_t amb = { 0.45f, 0.42f, 0.38f }, sun = { 1, 0.95f, 0.85f };
+	sscanf(r_hdAmbient->string, "%f %f %f", &amb[0], &amb[1], &amb[2]);
+	sscanf(r_hdSun->string, "%f %f %f", &sun[0], &sun[1], &sun[2]);
+	VectorScale(amb, 255.0f * 0.8f, ent->ambientLight);
+	VectorScale(sun, 255.0f * 0.6f, ent->directedLight);
+	VectorCopy(tr.sunDirection, ent->lightDir);
 }

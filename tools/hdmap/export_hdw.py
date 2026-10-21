@@ -67,7 +67,7 @@ def material_shader(mat):
                 nm = image_array(nam)
                 if nm.shape[:2] != c.shape[:2]:
                     nm = np.asarray(Image.fromarray((nm * 255).astype(np.uint8)).resize((c.shape[1], c.shape[0])), np.float32) / 255
-                if nm[..., 3].min() < 0.5:
+                if mat is not None and getattr(mat, 'blend_method', 'OPAQUE') != 'OPAQUE' and nm[..., 3].min() < 0.5:
                     alpha = (nm[..., 3] * 255).astype(np.uint8); info['alpha'] = True
                 # normal: rg -> xyz
                 x = nm[..., 0] * 2 - 1; y = nm[..., 1] * 2 - 1
@@ -84,6 +84,17 @@ def material_shader(mat):
                 Image.fromarray(np.dstack([rgb, alpha])).save(base + '.png', optimize=True)
             else:
                 Image.fromarray(rgb).save(base + '.jpg', quality=92)
+            info['tex'] = True
+        else:
+            col = (0.7, 0.7, 0.7)
+            if mat and mat.use_nodes:
+                for n in mat.node_tree.nodes:
+                    if n.type == 'BSDF_PRINCIPLED':
+                        col = tuple(n.inputs['Base Color'].default_value[:3]); break
+            elif mat:
+                col = tuple(mat.diffuse_color[:3])
+            c = (np.clip(np.array(col), 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
+            Image.fromarray(np.tile(c, (8, 8, 1))).save(base + '.jpg', quality=95)
             info['tex'] = True
     except Exception as e:
         print('texture failed for', key, e)
