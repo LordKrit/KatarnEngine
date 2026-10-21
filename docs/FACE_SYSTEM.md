@@ -26,3 +26,10 @@ surprise squint` (add more in face_poses.py).
     facelip  <who> <sound path>
     facelook <who> <who2|off>
 `<who>`: `player`, an entity number, or a targetname / NPC_targetname / script_targetname.
+
+## Custom audio (cutscenes)
+    cineaudio play <file> [who]     plays a sound as someone's voice, with lipsync
+    cineaudio stop [who]
+A bare file name is looked up in `sound/cine/` (e.g. `cineaudio play dooku.mp3` plays
+`sound/cine/dooku.mp3` on the player). Make its lipsync with `tools/face/make_lipsync.bat`
+(Rhubarb Lip Sync) and put `dooku.lip` beside it; without one the mouth follows the volume.

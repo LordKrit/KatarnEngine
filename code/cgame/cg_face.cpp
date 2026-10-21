@@ -522,3 +522,44 @@ void CG_FaceInfo_f()
 		st.exprW, st.exprTarget, !st.lip.empty() && cg.time < st.lipEnd ? "playing" : "none",
 		gi.VoiceVolume[e->s.number], cg.time - st.lastTime);
 }
+
+// cineaudio play <file> [who]  - play any sound as someone's voice line, with lipsync
+//   <file>: full path ("sound/chars/dooku/misc/taunt1.mp3") or a bare name, looked up in sound/cine/
+//   [who]: player (default), entity number, or targetname / NPC_targetname / script_targetname
+// cineaudio stop [who]          - stop that person's lipsync (the sound itself finishes)
+void CG_CineAudio_f()
+{
+	if (cgi_Argc() < 2 || (Q_stricmp(CG_Argv(1), "play") && Q_stricmp(CG_Argv(1), "stop")))
+	{
+		Com_Printf("usage: cineaudio play <file> [who]   |   cineaudio stop [who]\n");
+		return;
+	}
+	const bool play = !Q_stricmp(CG_Argv(1), "play");
+	const char* whoName = cgi_Argc() > (play ? 3 : 2) ? CG_Argv(play ? 3 : 2) : "player";
+	gentity_t* e = FindWho(whoName);
+	if (!e)
+	{
+		Com_Printf("cineaudio: nobody called %s\n", whoName);
+		return;
+	}
+	if (!play)
+	{
+		g_face[e->s.number].lip.clear();
+		g_face[e->s.number].lipEnd = 0;
+		return;
+	}
+	if (cgi_Argc() < 3)
+	{
+		Com_Printf("usage: cineaudio play <file> [who]\n");
+		return;
+	}
+	std::string path = CG_Argv(2);
+	if (path.find('/') == std::string::npos) path = "sound/cine/" + path;
+	const sfxHandle_t h = cgi_S_RegisterSound(path.c_str());
+	if (!h)
+	{
+		Com_Printf("cineaudio: can't load %s\n", path.c_str());
+		return;
+	}
+	cgi_S_StartSound(nullptr, e->s.number, CHAN_VOICE_GLOBAL, h);
+}
