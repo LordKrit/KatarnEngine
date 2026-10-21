@@ -77,31 +77,37 @@ void main()
 	vec2 hitUV = vec2(-1.0);
 	float travelled = 0.0;
 
+	// march until the ray first passes behind something, then refine the crossing. A thin
+	// object (a character) is found even when one step jumps right through it; if the
+	// crossing turns out to be far behind the surface it's occluded, not a hit, so stop
+	// rather than reflecting the wall behind the character.
+	float prevDz = -1.0;
 	for (int i = 0; i < 96; i++)
 	{
 		if (i >= steps) break;
-		// steps grow with distance so far reflections stay cheap
-		float s = stepLen * (0.5 + float(i) / float(steps)) * (1.0 + jitter * 0.5);
+		// short first steps (nearby feet/legs), growing with distance
+		float s = stepLen * (0.25 + 1.25 * float(i) / float(steps)) * (1.0 + jitter * 0.5);
 		ray += R * s;
 		travelled += s;
 		if (ray.z <= u_ViewInfo.x) break;
 		vec2 suv = Project(ray);
 		if (any(lessThan(suv, vec2(0.0))) || any(greaterThan(suv, vec2(1.0)))) break;
-		float sceneZ = LinearZ(suv);
-		float dz = ray.z - sceneZ;
-		if (dz > 0.0 && dz < u_Local0.y + s * 1.5)
+		float dz = ray.z - LinearZ(suv);
+		if (dz > 0.0 && prevDz <= 0.0)
 		{
-			// refine with a short binary search
 			vec3 a = ray - R * s, b = ray;
-			for (int j = 0; j < 5; j++)
+			for (int j = 0; j < 6; j++)
 			{
 				vec3 m = (a + b) * 0.5;
-				vec2 muv = Project(m);
-				if (m.z - LinearZ(muv) > 0.0) b = m; else a = m;
+				if (m.z - LinearZ(Project(m)) > 0.0) b = m; else a = m;
 			}
-			hitUV = Project(b);
+			vec2 buv = Project(b);
+			float bdz = b.z - LinearZ(buv);
+			if (bdz < u_Local0.y)
+				hitUV = buv;
 			break;
 		}
+		prevDz = dz;
 	}
 
 	if (hitUV.x < 0.0) { out_Color = vec4(0.0); return; }
