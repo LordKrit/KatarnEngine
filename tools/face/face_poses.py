@@ -114,3 +114,22 @@ BF2.update({
     'browraise_r': brows(0.20, 0.22, 0.16, 0, 0.0, 1.0),
     'wince': lids(28, -8) + brows(-0.10, 0, 0, 0.06) + corners(0.14, -0.04) + side('CheekLower', (0, 0, 0.08), (0, 0, 0.08)),
 })
+
+# --- from the film references (Dooku)
+BF2.update({
+    'sad': brows(0.14, 0.02, -0.06, 0.04) + lids(14) + corners(-0.02, -0.12) + jaw(2)
+           + side('ChinSide', (0, 0, 0.04), (0, 0, 0.04)),
+    'afraid': brows(0.22, 0.16, 0.06, 0.04) + lids(-12, 4) + jaw(9) + corners(0.06, -0.06)
+              + [('move', LOWER[:3], (0, 0, -0.04))],
+    'cocky': side('LipCorner', (0.06, -0.01, 0.08), (0.02, 0, 0.02)) + lids(12) + brows(-0.04, 0, 0.04, 0.02)
+             + side('CheekLower', (0, 0, 0.04), (0, 0, 0)),
+    'afraid2': brows(0.18, 0.12, 0.02, 0.05) + lids(-10) + [('move', UPPER, (0, 0, -0.03)), ('move', LOWER[:3], (0, -0.02, 0.05))]
+               + corners(-0.04, -0.06),
+    'focused': brows(0.04, 0.16, 0.10, 0.08) + lids(-16, 2) + [('move', LOWER[:3], (0, 0, 0.03))] + corners(0.02, -0.08)
+               + side('Nostril', (0.02, 0, 0.02), (0.02, 0, 0.02)),
+    'smile2': corners(0.08, 0.06) + lids(10) + brows(-0.08, -0.02, 0, 0.03) + side('CheekLower', (0, 0, 0.04), (0, 0, 0.04)),
+    'superiority': lids(18) + brows(0.02, 0.06, 0.10) + corners(-0.02, -0.07) + [('move', LOWER[:3], (0, -0.02, 0.04))]
+                   + side('Nostril', (0.03, 0, 0.03), (0.03, 0, 0.03)),
+    'smile3': corners(0.16, 0.14) + side('CheekLower', (0.03, 0, 0.10), (0.03, 0, 0.10)) + lids(12, -4)
+              + side('EyesackLower', (0, 0, 0.06), (0, 0, 0.06)) + brows(0.04, 0.02, 0),
+})
