@@ -88,6 +88,7 @@ def albedo(si):
                 a = np.asarray(im, np.float32).reshape(-1, 3).mean(0) / 255.0
                 col = a ** 2.2 * 1.0   # textures are sRGB-ish
                 col = np.clip(col / max(col.max(), 1e-3) * min(col.max(), 0.85), 0.03, 0.85)
+                col = col * 0.65 + col.mean() * 0.35   # tame saturation: bounces compound colour
                 break
             except Exception:
                 pass
@@ -194,6 +195,22 @@ def cosine_dirs(n, k, rng):
     b = np.cross(n, t)
     return (x[..., None] * t[:, None] + y[..., None] * b[:, None] + z[..., None] * n[:, None])
 
+def edge_aware_blur(b, r):
+    """average each texel with neighbours that lie on the same surface (similar normal,
+    close in space); invalid (nan) texels are filled from valid neighbours"""
+    valid = mask & np.isfinite(b).all(-1)
+    bz = np.where(valid[..., None], b, 0.0)
+    acc = np.zeros_like(b); wsum = np.zeros(b.shape[:3], np.float32)
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            sb = np.roll(bz, (dy, dx), (1, 2)); sv = np.roll(valid, (dy, dx), (1, 2))
+            sn = np.roll(texel_n, (dy, dx), (1, 2)); sp = np.roll(texel_pos, (dy, dx), (1, 2))
+            w = sv & ((sn * texel_n).sum(-1) > 0.85) & (np.linalg.norm(sp - texel_pos, axis=-1) < 40.0)
+            wf = w.astype(np.float32) * np.exp(-(dx * dx + dy * dy) / (2.0 * (r * 0.6) ** 2))
+            acc += sb * wf[..., None]; wsum += wf
+    out = acc / np.maximum(wsum, 1e-4)[..., None]
+    return np.where((mask & (wsum > 1e-3))[..., None], out, 0.0).astype(np.float32)
+
 direct = lm.copy()
 cur = lm.copy()
 total_bounce = np.zeros_like(lm)
@@ -212,20 +229,17 @@ for bounce in range(A.bounces):
         if hit.any():
             rad[hit] = sample_lm(cur, tri[hit], res['u'][hit], res['v'][hit])
             back[hit] = np.einsum('ij,ij->i', tri_n[tri[hit]], dirs[hit]) > 0.0
-        g = rad.reshape(-1, A.rays, 3).mean(1)
-        # texels whose rays mostly hit back faces sit inside geometry (lightmap padding): no bounce
-        bf = back.reshape(-1, A.rays).mean(1)
-        g[bf > 0.2] = 0.0
+        rad[back] = 0.0
+        bk = back.reshape(-1, A.rays)
+        front = (~bk).sum(1).astype(np.float32)
+        g = rad.reshape(-1, A.rays, 3).sum(1) / np.maximum(front, 1.0)[:, None]
+        # mostly inside geometry (lightmap padding): mark invalid, filled from neighbours later
+        g[bk.mean(1) > 0.6] = np.nan
         gathered[s0:s0 + CH] = g
         print(f'\r bounce {bounce + 1}: {min(s0 + CH, len(P))}/{len(P)}', end='', flush=True)
     print()
-    b = np.zeros_like(lm); b[mask] = gathered * A.strength
-    # denoise: 5x5 mean over valid texels of the same lightmap page
-    from scipy.ndimage import uniform_filter
-    valid = (mask & (b.sum(-1) > 0)).astype(np.float32)
-    num = np.stack([uniform_filter(b[..., c] * valid, size=(1, 5, 5)) for c in range(3)], -1)
-    den = uniform_filter(valid, size=(1, 5, 5))[..., None]
-    b = np.where(valid[..., None] > 0, num / np.maximum(den, 1e-4), 0.0).astype(np.float32)
+    b = np.full_like(lm, np.nan); b[mask] = gathered * A.strength
+    b = edge_aware_blur(b, 4)
     total_bounce += b
     cur = direct + b     # next bounce gathers from (direct + this bounce)
 
