@@ -46,6 +46,9 @@ const int	MC_STALE_MS		= 250;
 const float	MC_TELEPORT		= 120.0f;
 const int	MC_FORGET_MS	= 10000;
 const float	MC_MARGIN		= 0.6f;
+const float	MC_SWING_FREE	= 240.0f;	// deg/s of attachment tilt the cloth lags by itself; faster is carried
+const float	MC_TWIST_FREE	= 540.0f;	// deg/s of attachment turn about up the cloth lags by itself; faster is carried
+const float	MC_FLOOR_GAP	= 0.8f;		// units cloth keeps above the floor
 const float	MC_WELD			= 0.01f;
 const int	MC_SETTLE_STEPS	= 40;
 const float	MC_DEFAULT_SPIN	= 0.0f;		// degrees/s, 0 = no spin limit unless the config sets one		// 0.64 s of settling when a character appears	// bind-pose distance that counts as the same point
@@ -1052,6 +1055,46 @@ static void ComputeRootDist( const mcGroup_t *g ) {
 	g->rootDist.swap( dist );
 }
 
+// rotate the free particles (position and previous position: velocity turns with them) about an
+// axis through c by angle a (radians)
+static void RotateFree( const mcGroup_t *g, mcInstance_t *in, const vec3_t c, const vec3_t axis, float a ) {
+	const float cs = cosf( a ), sn = sinf( a );
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] <= 0.0f ) continue;
+		float *pts[2] = { &in->p[p * 3], &in->prev[p * 3] };
+		for ( float *q : pts ) {
+			vec3_t r, par, perp, side;
+			mcSub( q, c, r );
+			mcScale( axis, mcDot( r, axis ), par );
+			mcSub( r, par, perp );
+			mcCross( axis, perp, side );
+			for ( int k = 0; k < 3; k++ ) q[k] = c[k] + par[k] + perp[k] * cs + side[k] * sn;
+		}
+	}
+}
+
+// keep free cloth above the floor under the character (plane from a trace by the renderer)
+static void FloorCollide( const mcGroup_t *g, mcInstance_t *in, const mcParams_t *prm ) {
+	if ( !prm->floor ) return;
+	for ( int p = 0; p < g->numParticles; p++ ) {
+		if ( g->freedom[p] <= 0.0f ) continue;
+		float *pp = &in->p[p * 3], *pv = &in->prev[p * 3];
+		vec3_t r;
+		mcSub( pp, prm->floorPt, r );
+		const float d = mcDot( r, prm->floorN ) - MC_FLOOR_GAP;
+		if ( d >= 0.0f ) continue;
+		mcMA( pp, -d, prm->floorN, pp );
+		// friction: lose most of the sliding along the floor
+		vec3_t v, vn;
+		mcSub( pp, pv, v );
+		mcScale( prm->floorN, mcDot( v, prm->floorN ), vn );
+		vec3_t vt;
+		mcSub( v, vn, vt );
+		mcMA( pv, 0.6f, vt, pv );
+		if ( mcDot( v, prm->floorN ) < 0.0f ) mcAdd( pv, vn, pv );
+	}
+}
+
 void SpinLimit( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &target, int timeMs, float defSpin ) {
 	const size_t n3 = (size_t)g->numParticles * 3;
 	const int dtMs = timeMs - in->pinTime;
@@ -1088,9 +1131,75 @@ void SpinLimit( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &
 		}
 		angle = atan2f( sx, sy );	// radians this frame, about up
 	}
+	// best-fit rotation of the attached points this frame (Horn's quaternion), split into the twist
+	// about 'up' (handled below as before) and the swing (tilt: flips, rolls, lunges). A swing faster
+	// than MC_SWING_FREE deg/s is carried over to the free cloth, so in a front flip or a cartwheel
+	// the cape turns with the body instead of being left behind, inverted, inside it.
+	if ( np >= 6 ) {
+		float M[3][3] = { { 0 } };
+		float spread = 0.0f;
+		for ( int p = 0; p < g->numParticles; p++ ) {
+			if ( g->freedom[p] > 0.0f ) continue;
+			vec3_t a, b;
+			mcSub( &in->pinPrev[p * 3], c0, a );
+			mcSub( &target[p * 3], c1, b );
+			spread += mcDot( a, a );
+			for ( int i = 0; i < 3; i++ ) for ( int j = 0; j < 3; j++ ) M[i][j] += a[i] * b[j];
+		}
+		const float Sxx = M[0][0], Sxy = M[0][1], Sxz = M[0][2], Syx = M[1][0], Syy = M[1][1], Syz = M[1][2];
+		const float Szx = M[2][0], Szy = M[2][1], Szz = M[2][2];
+		float N[4][4] = {
+			{ Sxx + Syy + Szz, Syz - Szy, Szx - Sxz, Sxy - Syx },
+			{ Syz - Szy, Sxx - Syy - Szz, Sxy + Syx, Szx + Sxz },
+			{ Szx - Sxz, Sxy + Syx, -Sxx + Syy - Szz, Syz + Szy },
+			{ Sxy - Syx, Szx + Sxz, Syz + Szy, -Sxx - Syy + Szz } };
+		// largest eigenvector by power iteration on N + shift*I (shift keeps it positive definite)
+		const float shift = spread + 1e-3f;
+		float q[4] = { 1, 0, 0, 0 };
+		for ( int it = 0; it < 40; it++ ) {
+			float r[4];
+			for ( int i = 0; i < 4; i++ ) r[i] = shift * q[i] + N[i][0] * q[0] + N[i][1] * q[1] + N[i][2] * q[2] + N[i][3] * q[3];
+			const float l = sqrtf( r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3] );
+			if ( l < 1e-12f ) break;
+			for ( int i = 0; i < 4; i++ ) q[i] = r[i] / l;
+		}
+		if ( q[0] < 0 ) for ( float &v : q ) v = -v;
+		// twist about up, swing = q * conj(twist)
+		const float tv = q[1] * up[0] + q[2] * up[1] + q[3] * up[2];
+		float tw[4] = { q[0], tv * up[0], tv * up[1], tv * up[2] };
+		float tl = sqrtf( tw[0] * tw[0] + tw[1] * tw[1] + tw[2] * tw[2] + tw[3] * tw[3] );
+		if ( tl > 1e-6f ) {
+			for ( float &v : tw ) v /= tl;
+			const float cw[4] = { tw[0], -tw[1], -tw[2], -tw[3] };
+			float sw[4];
+			sw[0] = q[0] * cw[0] - q[1] * cw[1] - q[2] * cw[2] - q[3] * cw[3];
+			sw[1] = q[0] * cw[1] + q[1] * cw[0] + q[2] * cw[3] - q[3] * cw[2];
+			sw[2] = q[0] * cw[2] - q[1] * cw[3] + q[2] * cw[0] + q[3] * cw[1];
+			sw[3] = q[0] * cw[3] + q[1] * cw[2] - q[2] * cw[1] + q[3] * cw[0];
+			if ( sw[0] < 0 ) for ( float &v : sw ) v = -v;
+			const float sv = sqrtf( sw[1] * sw[1] + sw[2] * sw[2] + sw[3] * sw[3] );
+			const float sa = 2.0f * atan2f( sv, sw[0] );
+			const float dts = dtMs * 0.001f;
+			const float freeA = MC_SWING_FREE * ( 3.14159265f / 180.0f ) * dts;
+			if ( sv > 1e-6f && sa > freeA ) {
+				const vec3_t ax = { sw[1] / sv, sw[2] / sv, sw[3] / sv };
+				RotateFree( g, in, c1, ax, sa - freeA );
+			}
+		}
+	}
 	in->pinPrev.assign( target.begin(), target.end() );
 	in->pinTime = timeMs;
 	if ( angle == 0.0f ) return;
+	// a turn faster than MC_TWIST_FREE deg/s (the player's body snapping round with the camera,
+	// an instant re-face in an animation) carries the cloth by the excess
+	{
+		const float freeT = MC_TWIST_FREE * ( 3.14159265f / 180.0f ) * ( dtMs * 0.001f );
+		if ( fabsf( angle ) > freeT ) {
+			const float ex = angle > 0.0f ? angle - freeT : angle + freeT;
+			RotateFree( g, in, c1, up, ex );
+			angle -= ex;
+		}
+	}
 	// angular inertia scale: the attached edge's turn this frame (whatever turned it: the body
 	// turning, the legs re-facing or the torso aiming, it is read from the posed attachment
 	// itself) carries the free cloth along by 'turn', position and velocity alike; the cloth
@@ -1233,6 +1342,7 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 			}
 		}
 		SolveConstraints( g, in, caps, ncaps, bendScale );
+		FloorCollide( g, in, prm );
 		ContactVelocity( g, in );
 	}
 	in->impulse.clear();

@@ -20,6 +20,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 ===========================================================================
 */
 
+#include <unordered_map>
 #include "../server/exe_headers.h"
 
 #include "../client/client.h"	//FIXME!! EVIL - just include the definitions needed
@@ -2968,6 +2969,37 @@ void G2_ConstructGhoulSkeleton(CGhoul2Info_v& ghoul2, const int frameNum, const 
 	}
 }
 
+
+// the floor under a character, for its cloth: one trace per character per frame
+static void MC_FloorUnder(const trRefEntity_t* ent, int timeMs, mcParams_t& prm)
+{
+	struct floorCache_t { int time; int ok; float pt[3]; float n[3]; };
+	static std::unordered_map<const void*, floorCache_t> cache;
+	floorCache_t& c = cache[ent];
+	if (c.time != timeMs)
+	{
+		c.time = timeMs;
+		c.ok = 0;
+		trace_t tr;
+		vec3_t start, end;
+		VectorCopy(ent->e.origin, start);
+		VectorCopy(ent->e.origin, end);
+		start[2] += 8.0f;
+		end[2] -= 96.0f;
+		ri.SV_Trace(&tr, start, nullptr, nullptr, end, ENTITYNUM_NONE, CONTENTS_SOLID, G2_NOCOLLIDE, 0);
+		if (tr.fraction < 1.0f && !tr.startsolid && !tr.allsolid && tr.plane.normal[2] > 0.5f)
+		{
+			c.ok = 1;
+			VectorCopy(tr.endpos, c.pt);
+			VectorCopy(tr.plane.normal, c.n);
+		}
+		if (cache.size() > 256) cache.clear();
+	}
+	prm.floor = c.ok;
+	VectorCopy(c.pt, prm.floorPt);
+	VectorCopy(c.n, prm.floorN);
+}
+
 /*
 ==============
 Mesh cloth glue (see tr_meshcloth.h)
@@ -3189,6 +3221,7 @@ static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* sur
 	}
 	prm.gust = r_meshClothGust->value;
 	prm.timeSec = 0.0f;
+	MC_FloorUnder(ent, backEnd.refdef.time, prm);
 
 	MC_Apply(surface, bones, backEnd.refdef.time, ent->e.origin, axis, caps, ncaps, &prm,
 		MC_BoneFn, bones, &tess.xyz[tess.numVertexes], &tess.normal[tess.numVertexes]);

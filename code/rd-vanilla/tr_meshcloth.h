@@ -73,6 +73,9 @@ struct mcParams_t {
 	float	wind[3];		// world wind velocity, units/s (still air = 0 0 0)
 	float	gust;			// 0..1 how much the wind strength varies over time
 	float	timeSec;		// current time for gusts (filled in by MC_Apply)
+	int		floor;			// 1: floorPt / floorN hold the floor plane under the character (world)
+	float	floorPt[3];
+	float	floorN[3];
 };
 
 // Returns the 3x4 skinning matrix (model space) for a skeleton bone index.
