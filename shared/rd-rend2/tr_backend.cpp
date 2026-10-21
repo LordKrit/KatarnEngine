@@ -600,9 +600,10 @@ static void RB_BeginDrawingView(void) {
 		clearBits |= GL_COLOR_BUFFER_BIT;
 	}
 
-	if (r_measureOverdraw->integer || r_shadows->integer == 2)
+	if (r_measureOverdraw->integer || r_shadows->integer == 2 || r_ssr->integer)
 	{
 		clearBits |= GL_STENCIL_BUFFER_BIT;
+		qglStencilMask(~0U);
 	}
 
 	if (r_fastsky->integer && !(backEnd.refdef.rdflags & RDF_NOWORLDMODEL))
@@ -1080,6 +1081,22 @@ static void RB_SetRenderState(const RenderState& renderState)
 {
 	GL_Cull(renderState.cullType);
 	GL_State(renderState.stateBits);
+
+	static uint8_t lastMark = 0;
+	if (renderState.reflectMark)
+	{
+		qglStencilMask(0x80);
+		qglStencilFunc(GL_ALWAYS, renderState.reflectMark == 1 ? 0x80 : 0, 0x80);
+		qglStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+	}
+	else if (lastMark)
+	{
+		qglStencilMask(~0U);
+		qglStencilFunc(GL_ALWAYS, 0U, ~0U);
+		qglStencilOp(GL_KEEP, GL_INCR, GL_INCR);
+	}
+	lastMark = renderState.reflectMark;
+
 	GL_DepthRange(
 		renderState.depthRange.minDepth,
 		renderState.depthRange.maxDepth);
@@ -3097,7 +3114,7 @@ static const void* RB_PostProcess(const void* data)
 	{
 		// Resolve the MSAA before anything else
 		// Can't resolve just part of the MSAA FBO, so multiple views will suffer a performance hit here
-		FBO_FastBlit(tr.renderFbo, NULL, tr.msaaResolveFbo, NULL, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+		FBO_FastBlit(tr.renderFbo, NULL, tr.msaaResolveFbo, NULL, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
 		srcFbo = tr.msaaResolveFbo;
 
 		if (r_dynamicGlow->integer)

@@ -591,8 +591,16 @@ void RB_ScreenSpaceReflections(FBO_t* srcFbo, vec4i_t box)
 
 	// add (or, with r_ssr 2, show only) the reflections
 	vec4i_t outBox = { 0, 0, tr.ssrOutImage->width, tr.ssrOutImage->height };
+	// only where a reflective surface was drawn (stencil bit 0x80, written in RB_SetRenderState)
+	qglStencilMask(0);
+	qglStencilFunc(GL_EQUAL, 0x80, 0x80);
+	qglStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
 	FBO_Blit(tr.ssrOutFbo, outBox, NULL, srcFbo, box, NULL, NULL,
-		r_ssr->integer == 2 ? 0 : (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE));
+		(r_ssr->integer == 2 ? 0 : (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE)) | GLS_STENCILTEST_ENABLE);
+	GL_State(GLS_DEPTHTEST_DISABLE);
+	qglStencilMask(~0U);
+	qglStencilFunc(GL_ALWAYS, 0U, ~0U);
+	qglStencilOp(GL_KEEP, GL_INCR, GL_INCR);
 }
 
 /*

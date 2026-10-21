@@ -1572,6 +1572,32 @@ void RB_ShadowTessEnd(shaderCommands_t* input, const VertexArraysProperties* ver
 	RB_AddDrawItem(backEndData->currentPass, key, item);
 }
 
+// Which surfaces screen-space reflections may show on: written into stencil bit 0x80 by the
+// first stage of opaque surfaces in the main view (see RB_ScreenSpaceReflections).
+static uint8_t RB_ReflectMark(const shader_t* shader, int stage)
+{
+	if (!r_ssr->integer || !tr.ssrFbo || stage != 0)
+		return 0;
+	if (backEnd.viewParms.flags & (VPF_DEPTHSHADOW | VPF_POINTSHADOW | VPF_SHADOWCASCADES))
+		return 0;
+	if (backEnd.viewParms.targetFbo && backEnd.viewParms.targetFbo != tr.renderFbo)
+		return 0;   // cubemap / portal renders
+	if (shader->sort > SS_OPAQUE || shader->isSky)
+		return 0;
+
+	switch (shader->surfaceFlags & MATERIAL_MASK)
+	{
+	case MATERIAL_SOLIDMETAL: case MATERIAL_HOLLOWMETAL: case MATERIAL_GLASS: case MATERIAL_MARBLE:
+	case MATERIAL_WATER: case MATERIAL_ICE: case MATERIAL_BPGLASS: case MATERIAL_PLASTIC:
+	case MATERIAL_TILES: case MATERIAL_SHATTERGLASS: case MATERIAL_ARMOR: case MATERIAL_COMPUTER:
+		return 1;
+	case MATERIAL_NONE:
+		return r_ssrMaterials->integer >= 2 ? 2 : 1;
+	default:
+		return r_ssrMaterials->integer == 0 ? 1 : 2;
+	}
+}
+
 static void RB_IterateStagesGeneric(shaderCommands_t* input, const VertexArraysProperties* vertexArrays)
 {
 	Allocator& frameAllocator = *backEndData->perFrameMemory;
@@ -2070,6 +2096,9 @@ static void RB_IterateStagesGeneric(shaderCommands_t* input, const VertexArraysP
 		item.renderState.stateBits = stateBits;
 		item.renderState.cullType = forceRefraction ? CT_TWO_SIDED : cullType;
 		item.renderState.depthRange = RB_GetDepthRange(backEnd.currentEntity, input->shader);
+		item.renderState.reflectMark = RB_ReflectMark(input->shader, stage);
+		if (item.renderState.reflectMark)
+			item.renderState.stateBits |= GLS_STENCILTEST_ENABLE;
 		item.program = sp;
 		item.ibo = input->externalIBO ? input->externalIBO : backEndData->currentFrame->dynamicIbo;
 		item.uniformData = uniformDataWriter.Finish(frameAllocator);

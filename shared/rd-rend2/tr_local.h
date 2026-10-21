@@ -184,6 +184,7 @@ extern cvar_t* r_ssrDistance;
 extern cvar_t* r_ssrSteps;
 extern cvar_t* r_ssrGloss;
 extern cvar_t* r_ssrRough;
+extern cvar_t* r_ssrMaterials;
 
 extern cvar_t* r_normalMapping;
 extern cvar_t* r_specularMapping;
@@ -4065,6 +4066,7 @@ struct RenderState
 	uint32_t cullType; // this is stupid
 
 	bool transformFeedback;
+	uint8_t reflectMark; // 0 = leave stencil alone, 1 = reflective floor, 2 = opaque, not reflective
 };
 
 struct DrawItem
