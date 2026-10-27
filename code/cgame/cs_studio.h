@@ -17,7 +17,7 @@ namespace cs
 		bool GetActorTransform(int ent, float origin[3], float angles[3]) override;
 		void SetActorTransform(int ent, const float origin[3], const float angles[3]) override;
 		void SetActorAI(int ent, bool on) override;
-		bool SetActorProfile(int ent, const std::string& profile, std::string& why) override;
+		bool SetActorProfile(int ent, const std::string& profile, std::string& why, bool force) override;
 		std::string MapName() override;
 		bool WriteFile(const std::string& path, const std::string& data) override;
 		bool ReadFile(const std::string& path, std::string& out) override;
@@ -63,7 +63,7 @@ namespace cs
 	std::string DefaultProfile(int ent);
 	std::string CurrentProfile(int ent);
 	bool CheckProfile(int ent, const std::string& profile, std::string& why);
-	bool SetProfile(int ent, const std::string& profile, std::string& why);
+	bool SetProfile(int ent, const std::string& profile, std::string& why, bool force = false);
 	bool ViewRay(float sx, float sy, float dir[3]);			// virtual screen point -> world direction
 }
 

@@ -57,6 +57,7 @@ namespace cs
 		bool ai = false;		// false = cinematic (stands still), true = normal NPC AI
 		bool adopted = false;	// an NPC that was already in the level (not spawned by the studio)
 		std::string profile;	// animation profile (_humanoid_X); "" = the model's own
+		bool profileForced = false;	// applied without the skeleton checks
 		std::vector<AnimClip> clips;	// sorted by startUs
 
 		// camera
@@ -76,7 +77,8 @@ namespace cs
 		virtual void SetActorTransform(int ent, const float origin[3], const float angles[3]) = 0;
 		virtual void SetActorAI(int ent, bool on) = 0;
 		// animation profile ("" = the model's own); false + why if the skeletons don't match
-		virtual bool SetActorProfile(int ent, const std::string& profile, std::string& why) = 0;
+		// force: skip the skeleton checks
+		virtual bool SetActorProfile(int ent, const std::string& profile, std::string& why, bool force) = 0;
 		virtual std::string MapName() = 0;
 		// files, relative to the game's write directory
 		virtual bool WriteFile(const std::string& path, const std::string& data) = 0;
@@ -139,7 +141,7 @@ namespace cs
 		bool SetTransform(int id, const float origin[3], const float angles[3], bool coalesce);
 		bool SetAI(int id, bool on);
 		bool Rename(int id, const std::string& name);
-		bool SetProfile(int id, const std::string& profile);	// validated by the host; refused = no change
+		bool SetProfile(int id, const std::string& profile, bool force = false);	// validated by the host unless forced
 		bool SetNpcType(int id, const std::string& npcType);	// respawns the actor as another NPC
 		int Duplicate(int id);									// copy beside it (actors and cameras)
 

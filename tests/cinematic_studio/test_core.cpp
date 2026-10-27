@@ -42,9 +42,9 @@ public:
 		for (int i = 0; i < 3; i++) { ents[ent].o[i] = o[i]; ents[ent].a[i] = a[i]; }
 	}
 	void SetActorAI(int ent, bool on) override { ents[ent].ai = on; }
-	bool SetActorProfile(int ent, const std::string& p, std::string& why) override
+	bool SetActorProfile(int ent, const std::string& p, std::string& why, bool force) override
 	{
-		if (p == "_humanoid_alien") { why = "different bones"; return false; }
+		if (p == "_humanoid_alien" && !force) { why = "different bones"; return false; }
 		ents[ent].profile = p;
 		return true;
 	}
@@ -229,6 +229,11 @@ static void TestPhase2()
 	CHECK(!s.SetProfile(v, "_humanoid_alien") && s.Find(v)->profile == "_humanoid_vader");	// refused, unchanged
 	CHECK(s.Undo() && h.ents[ent].profile.empty() && s.Find(v)->profile.empty());
 	CHECK(s.Redo() && h.ents[ent].profile == "_humanoid_vader");
+	// forced: no checks, remembered, saved
+	CHECK(s.SetProfile(v, "_humanoid_alien", true) && h.ents[ent].profile == "_humanoid_alien" && s.Find(v)->profileForced);
+	CHECK(s.Save("Forced"));
+	{ Scene f(&h); std::vector<std::string> w; CHECK(f.Load("Forced", false, false, w) && f.objects[0].profileForced && h.ents[f.objects[0].entNum].profile == "_humanoid_alien"); f.Clear(); }
+	CHECK(s.Undo() && h.ents[ent].profile == "_humanoid_vader" && !s.Find(v)->profileForced);
 
 	// clips stay sorted, select the edited clip, undo
 	AnimClip c; c.anim = "BOTH_STAND1"; c.startUs = 2'000'000; c.lengthUs = 1'000'000;

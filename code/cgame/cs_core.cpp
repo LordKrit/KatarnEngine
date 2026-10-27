@@ -109,7 +109,7 @@ namespace cs
 		if (!o.profile.empty())
 		{
 			std::string why;
-			if (!host_->SetActorProfile(o.entNum, o.profile, why))
+			if (!host_->SetActorProfile(o.entNum, o.profile, why, o.profileForced))
 			{
 				host_->Log(1, o.name + ": animation profile " + o.profile + " not applied (" + why + ")");
 				o.profile.clear();
@@ -238,15 +238,15 @@ namespace cs
 		return true;
 	}
 
-	bool Scene::SetProfile(const int id, const std::string& profile)
+	bool Scene::SetProfile(const int id, const std::string& profile, const bool force)
 	{
 		Object* o = Find(id);
 		if (!o || o->type != ObjType::Actor) return false;
-		if (o->profile == profile) return true;
+		if (o->profile == profile && o->profileForced == force) return true;
 		if (o->entNum >= 0)
 		{
 			std::string why;
-			if (!host_->SetActorProfile(o->entNum, profile, why))
+			if (!host_->SetActorProfile(o->entNum, profile, why, force))
 			{
 				host_->Log(2, "Can't use " + (profile.empty() ? std::string("the model's own profile") : profile) + " on " + o->name + ": " + why);
 				return false;
@@ -254,6 +254,7 @@ namespace cs
 		}
 		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = host_->NowMs();
 		o->profile = profile;
+		o->profileForced = force && !profile.empty();
 		op.after = *o;
 		Push(op);
 		return true;
@@ -408,7 +409,7 @@ namespace cs
 		const int ent = cur->entNum;
 		const bool aiChanged = cur->ai != state.ai;
 		const bool typeChanged = cur->type == ObjType::Actor && cur->npcType != state.npcType;
-		const bool profileChanged = cur->profile != state.profile;
+		const bool profileChanged = cur->profile != state.profile || cur->profileForced != state.profileForced;
 		*cur = state;
 		cur->entNum = ent;		// the live entity, not the one in the snapshot
 		if (cur->type != ObjType::Actor) return;
@@ -426,7 +427,7 @@ namespace cs
 			if (profileChanged)
 			{
 				std::string why;
-				if (!host_->SetActorProfile(cur->entNum, cur->profile, why))
+				if (!host_->SetActorProfile(cur->entNum, cur->profile, why, cur->profileForced))
 					host_->Log(1, cur->name + ": animation profile not applied (" + why + ")");
 			}
 		}
@@ -551,6 +552,7 @@ namespace cs
 				j.set("ai", o.ai);
 				j.set("adopted", o.adopted);
 				if (!o.profile.empty()) j.set("profile", o.profile);
+				if (o.profileForced) j.set("profileForced", true);
 				Json clips = Json::MakeArray();
 				for (auto& c : o.clips)
 				{
@@ -665,6 +667,7 @@ namespace cs
 				o.npcType = j.get("npc").asString();
 				o.ai = j.get("ai").asBool(false);
 				o.profile = j.get("profile").asString();
+				o.profileForced = j.get("profileForced").asBool(false);
 				const Json& clips = j.get("clips");
 				for (size_t k = 0; k < clips.size(); k++)
 				{

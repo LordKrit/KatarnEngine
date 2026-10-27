@@ -843,7 +843,17 @@ namespace
 				if (s.scene.SetProfile(obj->id, "")) s.animsEnt = -1;
 			}
 			y += 11;
-			TextClip(ix, y, ok ? "compatible skeleton" : s.profileWhy, w, ok ? kDim : kRed);
+			if (ok) TextClip(ix, y, "compatible skeleton", w, kDim);
+			else
+			{
+				// force skips the checks: the actor may pose wrongly if the skeletons really differ
+				TextClip(ix, y, s.profileWhy, w - 40, kRed);
+				if (Button(ix + w - 38, y - 1, 38, 10, "FORCE", false, obj && Q_stricmp(pick.c_str(), cur.c_str())))
+				{
+					ReleasePreview();
+					if (s.scene.SetProfile(obj->id, pick, true)) { s.host.Log(1, obj->name + " forced to " + pick + " (no skeleton checks)"); s.animsEnt = -1; }
+				}
+			}
 			if (!obj) TextClip(ix + 90, y, "(add to scene to switch)", w - 90, kDim);
 			y += kRow;
 		}

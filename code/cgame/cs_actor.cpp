@@ -98,13 +98,24 @@ namespace cs
 			return cache.emplace(path, info).first->second;
 		}
 
+		std::string ProfileGla(const std::string& profile);
+
+		// the .gla the model itself was built on. Stock models name it in the .glm; when the engine
+		// can't tell (e.g. the retargeted BF2 models), it's the skeleton folder of the actor's own
+		// animation set (the one it had before the studio switched anything).
 		std::string ModelGla(const gentity_t* e)
 		{
 			const char* n = gi.G2API_GetAnimFileNameIndex(e->ghoul2[e->playerModel].mModelindex);
-			if (!n || !n[0]) return "";
-			std::string s = n;
-			if (s.size() < 4 || Q_stricmp(s.c_str() + s.size() - 4, ".gla")) s += ".gla";
-			return s;
+			if (n && n[0])
+			{
+				std::string s = n;
+				if (s.size() < 4 || Q_stricmp(s.c_str() + s.size() - 4, ".gla")) s += ".gla";
+				return s;
+			}
+			const int n2 = e->s.number;
+			const int own = g_csOrigSet[n2] ? g_csOrigSet[n2] - 1 : e->client->clientInfo.animFileIndex;
+			if (own < 0 || own >= level.numKnownAnimFileSets || !level.knownAnimFileSets[own].filename[0]) return "";
+			return ProfileGla(level.knownAnimFileSets[own].filename);
 		}
 
 		// "models/players/_humanoid_vader/_humanoid.gla" -> "_humanoid_vader"
@@ -296,13 +307,15 @@ namespace cs
 		return true;
 	}
 
-	bool SetProfile(const int ent, const std::string& profileIn, std::string& why)
+	bool SetProfile(const int ent, const std::string& profileIn, std::string& why, const bool force)
 	{
 		gentity_t* e = Actor(ent);
 		if (!e) { why = "not a character"; return false; }
 		const std::string own = ModelGla(e);
+		if (own.empty()) { why = "can't tell which skeleton this model uses"; return false; }
 		const std::string profile = profileIn.empty() ? FolderOf(own) : profileIn;
-		if (!CheckProfile(ent, profile, why)) return false;
+		// force: no bone or frame checks (the actor may pose wrongly if the skeletons differ)
+		if (!force && !CheckProfile(ent, profile, why)) return false;
 
 		const qhandle_t ownH = gi.G2API_PrecacheGhoul2Model(own.c_str());
 		const qhandle_t newH = gi.G2API_PrecacheGhoul2Model(ProfileGla(profile).c_str());
@@ -319,7 +332,7 @@ namespace cs
 
 		// every animation must fit in the target skeleton's frames
 		const GlaInfo& target = ReadGla(ProfileGla(profile));
-		if (target.ok && !backHome)
+		if (target.ok && !backHome && !force)
 		{
 			const animFileSet_t& set = level.knownAnimFileSets[setIndex];
 			for (int i = 0; i < MAX_ANIMATIONS; i++)
@@ -345,9 +358,9 @@ namespace cs
 		return true;
 	}
 
-	bool GameHost::SetActorProfile(const int ent, const std::string& profile, std::string& why)
+	bool GameHost::SetActorProfile(const int ent, const std::string& profile, std::string& why, const bool force)
 	{
-		return SetProfile(ent, profile, why);
+		return SetProfile(ent, profile, why, force);
 	}
 
 	bool ViewRay(const float sx, const float sy, float dir[3])

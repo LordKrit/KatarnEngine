@@ -75,5 +75,15 @@ All studio code lives in the SP game DLL (game + cgame), in new `cs_*.cpp` files
 | 5 Replay | `cs_replay.cpp` | `g_main.cpp` (frame hook), `sv_savegame.cpp` (checkpoint reuse) |
 | 6 Camera | `cs_camera.cpp`, `cs_view.cpp` | `cg_view.cpp` |
 | 7 Paths/props | `cs_path.cpp`, `cs_prop.cpp` | `NPC_move.cpp`, `g_misc_model.cpp` |
-| 8 Audio/face | `cs_audio.cpp` | `cg_face.cpp` |
+| 8 Audio/face | `cs_audio.cpp`, `cs_face.cpp` | `cg_face.cpp` |
 | 9 Director | — | `cs_ui.cpp`, `cs_view.cpp` |
+
+## Planned additions requested during development
+- **Face tracks (Phase 8):** the existing face-life commands become timeline tracks per actor:
+  - `faceidle`: idle profile on/off per range (blinks, saccades, moods);
+  - `faceexpr`: expression clips with weight, blend in and out, hold;
+  - **eye posing**: look-at another actor or a point in space, or direct eye yaw/pitch keys with blink
+    keys. Today `facelook` only targets another character.
+  Actors without a face rig show these tracks disabled, as the brief asks.
+- **Animation profiles without safety checks (done in Phase 2.1):** FORCE applies a profile without
+  the bone and frame checks, per actor, saved with the project.

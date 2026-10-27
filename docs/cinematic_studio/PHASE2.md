@@ -73,3 +73,12 @@ Status: **built** (Windows x64 game DLL), core **unit-tested** (318 checks). **N
 ## Next (Phase 3: Ghost Performance Recorder)
 Record the player's performance (position, view, legs/torso animation state, saber/weapon events),
 save takes, replay them as independent actors (ghost preview / solid), overdub while earlier takes play.
+
+## Phase 2.1 (after the first in-game test)
+- Fixed: the profile check said "the model doesn't name its skeleton" for the BF2 models (dooku_bf2...).
+  The engine can't name their skeleton, so the studio now takes it from the actor's own animation set.
+- **FORCE** next to an incompatible profile applies it without bone or frame checks. It's remembered
+  per actor and saved; the actor may pose wrongly if the skeletons really differ.
+- New profiles: `_humanoid_mocap` (the zzzz_Mocap animation set, as its own profile instead of replacing
+  stock `_humanoid`), `_humanoid_MEmocap1`, `_humanoid_rpg`. All three have the standard 53-bone
+  skeleton, so they pass the checks. Installed as `GameData\MD\zzz_cs_profile_*.pk3`.
