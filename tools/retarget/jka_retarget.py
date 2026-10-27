@@ -493,6 +493,7 @@ def cmd_rig(args):
     from rig import NewSkeleton
     src, gla, m, mp, fit = load(args)
     sk = NewSkeleton(src, gla, m, mp, fit, fingers=getattr(args, 'fingers', False), extra_re=getattr(args, 'extra_bones', None))
+    sk.clavicle_k = getattr(args, 'clavicle', 1.0)
     sk.arm_ik = getattr(args, 'arm_ik', False); sk.relax = ({'l': 0.35, 'r': float(__import__('os').environ.get('RGRIP','0.8'))} if getattr(args, 'relax_left', False) else {}); sk.hilt_lift = getattr(args, 'hilt_lift', 0.0) or 1e-9; sk.stock_hand_tags = getattr(args, 'stock_hand_tags', False); sk.ground_drop = getattr(args, 'ground_drop', 0.0); sk.hilt_off = {k: [float(x) for x in v.split(',')] for k, v in (('r', getattr(args, 'hilt_r', None)), ('l', getattr(args, 'hilt_l', None))) if v}
     name = args.name
     skel = args.skeleton or '_humanoid_%s' % name
@@ -675,6 +676,7 @@ def main():
             p.add_argument('--ground-drop', type=float, default=0.0); p.add_argument('--wrap-grip'); p.add_argument('--stock-hand-tags', action='store_true')
             p.add_argument('--relax-left', action='store_true')
             p.add_argument('--arm-ik', action='store_true', help='reach each hand to where Movie Duels puts it relative to the shoulders')
+            p.add_argument('--clavicle', type=float, default=1.0, help='share of the animation\'s clavicle (shrug) motion to keep, e.g. 0.3 for BF2 shoulder armour')
             p.add_argument('--no-twist', action='store_true', help='leave twist/roll joints on their parent limb bone (old behaviour: stiff forearms)')
             p.add_argument('--fingers', action='store_true', help='keep the model\'s finger bones and curl them with Movie Duels\' finger animation')
             p.add_argument('--lod', action='append', help='lower detail versions of the same model (same skeleton), in order: LOD1, LOD2, ...')

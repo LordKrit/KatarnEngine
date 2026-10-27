@@ -390,6 +390,19 @@ class NewSkeleton:
             par = self.parents[i]
             if i < self.nmd:
                 R[:, i] = Rmd[:, i]
+                ck = getattr(self, 'clavicle_k', 1.0)
+                if ck != 1.0 and md.bones[i]['name'].lower() in ('lclavical', 'rclavical') and par >= 0:
+                    # damp the shrug: only part of the clavicle's turn away from its base pose (relative
+                    # to the chest). BF2-style shoulder armour is built for clavicles that barely move.
+                    L0 = self.mdR[par].T @ self.mdR[i]
+                    L = np.einsum('fji,fjk->fik', Rmd[:, par], Rmd[:, i])
+                    D = np.einsum('ji,fjk->fik', L0, L)
+                    q = mat_to_quat_v(D)
+                    ang = 2 * np.arctan2(np.linalg.norm(q[:, 1:], axis=1), q[:, 0])
+                    axis = q[:, 1:] / np.maximum(np.linalg.norm(q[:, 1:], axis=1), 1e-9)[:, None]
+                    h = 0.5 * ang * ck
+                    qk = np.concatenate([np.cos(h)[:, None], axis * np.sin(h)[:, None]], 1)
+                    R[:, i] = Rmd[:, par] @ L0[None] @ quat_to_mat_v(qk)
             else:
                 R[:, i] = R[:, par] @ (bR[par].T @ bR[i])[None]
                 if i in self.curl:

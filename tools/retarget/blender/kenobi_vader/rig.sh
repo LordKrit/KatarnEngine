@@ -4,7 +4,7 @@ for v in "out_reg vader_kenobi" "out_dmg vader_kenobi_broken"; do
   set -- $v
   python3 jka_retarget.py rig /home/claude/kv/$1/vader.glb --gla /home/claude/vbf2/in/hum/_humanoid_vader/_humanoid.gla \
     --map dooku_bf2_map.json --name $2 --tags /home/claude/vader_in/darthvader/model.glm --cloth-mesh cape --fingers --arm-ik \
-    --relax-left --stock-hand-tags --ground-drop 2.6 --max-verts 4000 --max-tris 8000 \
+    --relax-left --clavicle 0.25 --stock-hand-tags --ground-drop 2.6 --max-verts 4000 --max-tris 8000 \
     --lod /home/claude/kv/$1/vader_lod1.glb --lod /home/claude/kv/$1/vader_lod2.glb --lod /home/claude/kv/$1/vader_lod3.glb \
     --out /home/claude/kv/zzz_$2.pk3 2>&1 | grep -E "wrote|rror"
   mkdir -p /home/claude/kv/g_$2 && unzip -o -q -j /home/claude/kv/zzz_$2.pk3 "models/players/$2/model.glm" "models/players/_humanoid_$2/_humanoid.gla" "models/players/$2/model_default.skin" -d /home/claude/kv/g_$2
