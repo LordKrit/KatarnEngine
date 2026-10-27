@@ -29,6 +29,12 @@ This branch is upstream `master` plus mesh cloth only. Nothing else from our for
   the bind pose. Long-range attachments, a soft tether and an optional reach limit keep cloth from flying off.
 - **Collision.**
   - Capsules from `_humanoid` bones: pelvis, spine, neck, head, legs, arms, shoulders, plus a short fist capsule.
+  - The body's real shape (`r_meshClothBodyFit`): on first use each model's own body mesh (every non-cloth
+    surface) is cut into height slices per torso, hip, leg, neck and head bone, and each slice becomes a
+    "stadium" (flat front and back, round sides) reaching out to 95% of the mesh. These ride their bones and
+    push hanging cloth fully out, so capes and robes rest on the actual torso, belt, armour and legs instead
+    of on a few round tubes. They add to the capsules above (arms keep their tuned capsules), cost about
+    15-20% more and are fitted once per model.
   - A saber hilt capsule in each hand, from the `*r_hand` / `*l_hand` bolt tags.
   - A floor plane traced under the character, and wall planes from 8 chest-height traces round it
     (`r_meshClothWalls`), so capes don't swing through walls. The drawn cloth is kept in front of them too.
@@ -109,6 +115,7 @@ Note: a pk3 that carries its own `ext_data/meshcloth.cfg` replaces the whole fil
 | `r_meshClothHilt` | 1 | saber hilt colliders on/off |
 | `r_meshClothHiltLen` / `Back` / `Radius` | 10 / 4 / 1.8 | hilt capsule past and behind the fist, thickness |
 | `r_meshClothWalls` | 1 | wall collision on/off |
+| `r_meshClothBodyFit` | 1 | collision with the body's real shape (fitted from the mesh) on/off |
 | `r_meshClothLodDist` / `r_meshClothCullDist` | 800 / 3000 | reduced detail / no simulation beyond these distances (0 = off) |
 | `r_meshClothSleep` | 1 | resting cloth on still characters stops simulating |
 | `r_meshClothStats` | 0 | 1 = print cost and counts once a second |

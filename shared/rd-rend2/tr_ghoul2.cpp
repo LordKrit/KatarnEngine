@@ -3926,6 +3926,25 @@ static const mcBoneLookup_t* MC_Lookup(const mdxaHeader_t* h)
 	return &c;
 }
 
+// which bones get a fitted body shape (MC_BodyShapes): torso, hips, legs, neck and head
+static const std::vector<int>& MC_BoneClass(const mdxaHeader_t* h)
+{
+	static std::unordered_map<const mdxaHeader_t*, std::vector<int>> cache;
+	auto it = cache.find(h);
+	if (it != cache.end()) return it->second;
+	static const char* const fitBones[] = { "pelvis", "lower_lumbar", "upper_lumbar", "thoracic", "cervical", "cranium",
+		"lfemurYZ", "lfemurX", "ltibia", "ltalus", "rfemurYZ", "rfemurX", "rtibia", "rtalus" };
+	std::vector<int> cls(h->numBones, -1);
+	for (int i = 0; i < h->numBones; i++)
+	{
+		for (const char* n : fitBones)
+		{
+			if (!Q_stricmp(MC_Skel(h, i)->name, n)) cls[i] = 0;
+		}
+	}
+	return cache.emplace(h, std::move(cls)).first->second;
+}
+
 static const float (*MC_BoneFn(void* ctx, const int boneIndex))[4]
 {
 	return reinterpret_cast<const float(*)[4]>(static_cast<CBoneCache*>(ctx)->boneMatrices[boneIndex]);
@@ -4201,7 +4220,7 @@ static mcR2Inst_t* RB_MeshClothUpdate(CRenderableSurface* surf, const mdxmSurfac
 	VectorCopy(ent->e.axis[2], axis[2]);
 
 	// capsules: posed bone origin = skin matrix * bind position, then to world
-	mcCapsule_t caps[MC_NUM_COLLIDERS + 4];
+	mcCapsule_t caps[MC_NUM_COLLIDERS + 4 + 96];
 	int ncaps = 0;
 	const mcBoneLookup_t* lk = MC_Lookup(bones->header);
 	for (int k = 0; k < MC_NUM_COLLIDERS; k++)
@@ -4250,6 +4269,13 @@ static mcR2Inst_t* RB_MeshClothUpdate(CRenderableSurface* surf, const mdxmSurfac
 	{
 		if (MC_HiltCapsule(surface, bones, "*r_hand", ent, axis, caps[ncaps])) ncaps++;
 		if (MC_HiltCapsule(surface, bones, "*l_hand", ent, axis, caps[ncaps])) ncaps++;
+	}
+	// the body's real shape, fitted from the model's own mesh (on top of the capsules above)
+	if (r_meshClothBodyFit->integer)
+	{
+		const std::vector<int>& cls = MC_BoneClass(bones->header);
+		ncaps += MC_BodyShapes(surface, cls.data(), (int)cls.size(), MC_BoneFn, bones, ent->e.origin, axis,
+			caps + ncaps, (int)(sizeof(caps) / sizeof(caps[0])) - ncaps);
 	}
 
 	// CPU skinning: positions, normals and tangents

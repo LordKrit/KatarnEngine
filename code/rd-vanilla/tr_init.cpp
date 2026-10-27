@@ -145,6 +145,7 @@ cvar_t* r_meshClothCullDist;
 cvar_t* r_meshClothSleep;
 cvar_t* r_meshClothStats;
 cvar_t* r_meshClothWalls;
+cvar_t* r_meshClothBodyFit;
 cvar_t* r_shadowRange;
 cvar_t* r_flares;
 cvar_t* r_nobind;
@@ -1808,6 +1809,7 @@ static void R_Register()
 	r_meshClothSleep = ri.Cvar_Get("r_meshClothSleep", "1", CVAR_ARCHIVE);
 	r_meshClothStats = ri.Cvar_Get("r_meshClothStats", "0", CVAR_ARCHIVE);
 	r_meshClothWalls = ri.Cvar_Get("r_meshClothWalls", "1", CVAR_ARCHIVE);
+	r_meshClothBodyFit = ri.Cvar_Get("r_meshClothBodyFit", "1", CVAR_ARCHIVE);
 	r_shadowRange = ri.Cvar_Get("r_shadowRange", "1000", CVAR_ARCHIVE_ND);
 	/*
 	Ghoul2 Insert Start

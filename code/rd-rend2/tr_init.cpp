@@ -275,6 +275,7 @@ cvar_t* r_meshClothCullDist;
 cvar_t* r_meshClothSleep;
 cvar_t* r_meshClothStats;
 cvar_t* r_meshClothWalls;
+cvar_t* r_meshClothBodyFit;
 cvar_t* r_Ghoul2AnimSmooth = 0;
 cvar_t* r_Ghoul2UnSqashAfterSmooth = 0;
 //cvar_t	*r_Ghoul2UnSqash;
@@ -1819,6 +1820,7 @@ static void R_Register(void)
 	r_meshClothSleep = ri.Cvar_Get("r_meshClothSleep", "1", CVAR_ARCHIVE);
 	r_meshClothStats = ri.Cvar_Get("r_meshClothStats", "0", CVAR_ARCHIVE);
 	r_meshClothWalls = ri.Cvar_Get("r_meshClothWalls", "1", CVAR_ARCHIVE);
+	r_meshClothBodyFit = ri.Cvar_Get("r_meshClothBodyFit", "1", CVAR_ARCHIVE);
 	r_Ghoul2AnimSmooth = ri_Cvar_Get_NoComm("r_ghoul2animsmooth", "0.3", CVAR_TEMP, "");
 	r_Ghoul2UnSqashAfterSmooth = ri_Cvar_Get_NoComm("r_ghoul2unsqashaftersmooth", "1", CVAR_TEMP, "");
 	broadsword = ri_Cvar_Get_NoComm("broadsword", "0", CVAR_ARCHIVE, "");

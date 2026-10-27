@@ -324,6 +324,7 @@ extern cvar_t* r_meshClothCullDist;
 extern cvar_t* r_meshClothSleep;
 extern cvar_t* r_meshClothStats;
 extern cvar_t* r_meshClothWalls;
+extern cvar_t* r_meshClothBodyFit;
 void R_MeshClothLoadConfig();
 void R_MeshClothShutdown();
 extern cvar_t* r_Ghoul2AnimSmooth;

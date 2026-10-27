@@ -55,6 +55,12 @@ const float	MC_WELD			= 0.01f;
 const int	MC_SETTLE_STEPS	= 40;
 const int	MC_SLEEP_STEPS	= 30;		// ~0.5 s of stillness before a cloth sleeps
 const float	MC_SLEEP_MOVE	= 0.05f;	// units per step that counts as still (breathing idles stay under it)
+const int	MC_MAX_CAPS		= 128;
+#ifdef MC_DEBUG
+static float MC_FIT_PCT = getenv( "MC_FITPCT" ) ? (float)atof( getenv( "MC_FITPCT" ) ) : 0.95f;
+#else
+const float	MC_FIT_PCT		= 0.95f;	// fitted body shapes reach out to where this share of the mesh is inside them
+#endif
 const float	MC_SLEEP_WAKE	= 0.4f;		// units the pose may drift from where the cloth fell asleep before it wakes
 const float	MC_DEFAULT_SPIN	= 0.0f;		// degrees/s, 0 = no spin limit unless the config sets one		// 0.64 s of settling when a character appears	// bind-pose distance that counts as the same point
 
@@ -814,6 +820,122 @@ int CullCapsules( const mcGroup_t *g, const std::vector<float> &target, const mc
 	return n;
 }
 
+
+// ---------------------------------------------------------------------------
+// Body shape fitted from the model's own mesh (MC_BodyShapes). For every body bone the vertices it
+// mostly carries are cut into slices along their main axis; each slice becomes a "stadium" (a
+// capsule across the slice: flat chest and back, round sides) sized to the mesh, so cloth rests on
+// the real torso, hips and legs instead of on a few round tubes.
+// ---------------------------------------------------------------------------
+struct mcFitShape_t { int bone; float a[3], b[3], r; };
+std::unordered_map<const void *, std::vector<mcFitShape_t>> g_fits;	// per cloth group
+
+static float Pct( std::vector<float> &v, float q ) {
+	if ( v.empty() ) return 0.0f;
+	size_t k = (size_t)( q * ( v.size() - 1 ) );
+	std::nth_element( v.begin(), v.begin() + k, v.end() );
+	return v[k];
+}
+
+// main axis of a point set (power iteration on the covariance)
+static void MainAxis( const std::vector<float> &P, const float *c, float *axis, const float *ortho = nullptr ) {
+	double C[3][3] = {};
+	for ( size_t i = 0; i < P.size(); i += 3 ) {
+		float d[3] = { P[i] - c[0], P[i + 1] - c[1], P[i + 2] - c[2] };
+		if ( ortho ) { const float t = mcDot( d, ortho ); mcMA( d, -t, ortho, d ); }
+		for ( int r = 0; r < 3; r++ ) for ( int q = 0; q < 3; q++ ) C[r][q] += d[r] * d[q];
+	}
+	float v[3] = { 0.577f, 0.577f, 0.577f };
+	if ( ortho ) { const float t = mcDot( v, ortho ); mcMA( v, -t, ortho, v ); if ( mcNorm( v ) < 1e-3f ) { v[0] = 1; v[1] = v[2] = 0; } }
+	for ( int it = 0; it < 32; it++ ) {
+		float w[3];
+		for ( int r = 0; r < 3; r++ ) w[r] = (float)( C[r][0] * v[0] + C[r][1] * v[1] + C[r][2] * v[2] );
+		if ( ortho ) { const float t = mcDot( w, ortho ); mcMA( w, -t, ortho, w ); }
+		if ( mcNorm( w ) < 1e-9f ) break;
+		mcCopy( w, v );
+	}
+	mcCopy( v, axis );
+}
+
+static void FitBody( const mcGroup_t *g, const int *boneClass, int numBones, std::vector<mcFitShape_t> &out ) {
+	out.clear();
+	const mdxmHeader_t *h = HeaderOf( g->surfs[0] );
+	const auto ho = reinterpret_cast<const mdxmHierarchyOffsets_t *>( reinterpret_cast<const byte *>( h ) + sizeof( mdxmHeader_t ) );
+	std::unordered_map<int, std::vector<float>> pts;	// bone -> bind positions
+	for ( const mdxmSurface_t *s : LodSurfaces( g->surfs[0] ) ) {
+		if ( std::find( g->surfs.begin(), g->surfs.end(), s ) != g->surfs.end() ) continue;	// cloth isn't body
+		const auto sh = reinterpret_cast<const mdxmSurfHierarchy_t *>( reinterpret_cast<const byte *>( ho ) + ho->offsets[s->thisSurfaceIndex] );
+		if ( sh->flags & ( G2SURFACEFLAG_OFF | G2SURFACEFLAG_ISBOLT ) ) continue;
+		if ( strstr( sh->name, "_cap_" ) || strstr( sh->name, "_off" ) ) continue;
+		if ( MC_IsClothSurface( s, h->name, sh->name ) ) continue;	// cloth surfaces of other groups
+		const int *refs = reinterpret_cast<const int *>( reinterpret_cast<const byte *>( s ) + s->ofsBoneReferences );
+		const mdxmVertex_t *v = Verts( s );
+		for ( int i = 0; i < s->numVerts; i++ ) {
+			const int nw = G2_GetVertWeights( &v[i] );
+			float tot = 0.0f, best = 0.0f; int bb = -1;
+			for ( int k = 0; k < nw; k++ ) {
+				const float w = G2_GetVertBoneWeight( &v[i], k, tot, nw );
+				if ( w > best ) { best = w; bb = refs[G2_GetVertBoneIndex( &v[i], k )]; }
+			}
+			if ( bb < 0 || bb >= numBones || boneClass[bb] < 0 || best < 0.5f ) continue;
+			auto &P = pts[bb];
+			P.insert( P.end(), v[i].vertCoords, v[i].vertCoords + 3 );
+		}
+	}
+	for ( auto &kv : pts ) {
+		const std::vector<float> &P = kv.second;
+		const int n = (int)( P.size() / 3 );
+		if ( n < 20 ) continue;
+		float c[3] = { 0, 0, 0 };
+		for ( int i = 0; i < n; i++ ) mcAdd( c, &P[i * 3], c );
+		mcScale( c, 1.0f / n, c );
+		// torso, hips, legs and head all stand upright in the bind (T) pose: slice by height
+		float e1[3] = { 0.0f, 0.0f, 1.0f };
+		std::vector<float> proj( n );
+		for ( int i = 0; i < n; i++ ) { float d[3]; mcSub( &P[i * 3], c, d ); proj[i] = mcDot( d, e1 ); }
+		std::vector<float> tmp = proj;
+		const float lo = Pct( tmp, 0.03f ), hi = Pct( tmp, 0.97f );
+		const float len = hi - lo;
+		if ( len < 0.5f ) continue;
+		int K = (int)( len / 3.0f + 0.5f );
+		K = K < 1 ? 1 : ( K > 12 ? 12 : K );
+		for ( int k = 0; k < K; k++ ) {
+			const float s0 = lo + len * k / K, s1 = lo + len * ( k + 1 ) / K;
+			std::vector<float> S;
+			for ( int i = 0; i < n; i++ ) if ( proj[i] >= s0 - 0.5f && proj[i] <= s1 + 0.5f ) S.insert( S.end(), &P[i * 3], &P[i * 3] + 3 );
+			const int m = (int)( S.size() / 3 );
+			if ( m < 6 ) continue;
+			float sc[3] = { 0, 0, 0 };
+			for ( int i = 0; i < m; i++ ) mcAdd( sc, &S[i * 3], sc );
+			mcScale( sc, 1.0f / m, sc );
+			// centre the slice on the bone axis line, at the slice's middle
+			float u[3], vv[3];
+			MainAxis( S, sc, u, e1 );
+			mcCross( e1, u, vv );
+			mcNorm( vv );
+			std::vector<float> du( m ), dv( m );
+			for ( int i = 0; i < m; i++ ) { float d[3]; mcSub( &S[i * 3], sc, d ); du[i] = mcDot( d, u ); dv[i] = mcDot( d, vv ); }
+			// extents each side (the cross-section needn't be centred on the centroid)
+			std::vector<float> pu, nu, pv, nv;
+			for ( int i = 0; i < m; i++ ) { ( du[i] >= 0 ? pu : nu ).push_back( fabsf( du[i] ) ); ( dv[i] >= 0 ? pv : nv ).push_back( fabsf( dv[i] ) ); }
+			const float q = MC_FIT_PCT, au = Pct( pu, q ), bu = Pct( nu, q ), av = Pct( pv, q ), bv = Pct( nv, q );
+			float mid[3];
+			mcMA( sc, 0.5f * ( s0 + s1 ) - mcDot( sc, e1 ) + mcDot( c, e1 ), e1, mid );
+			mcMA( mid, 0.5f * ( au - bu ), u, mid );
+			mcMA( mid, 0.5f * ( av - bv ), vv, mid );
+			const float A = 0.5f * ( au + bu ), B = 0.5f * ( av + bv );
+			if ( B < 0.3f ) continue;
+			mcFitShape_t f;
+			f.bone = kv.first;
+			f.r = B;
+			const float half = A > B ? A - B : 0.0f;
+			mcMA( mid, -half, u, f.a );
+			mcMA( mid, half, u, f.b );
+			out.push_back( f );
+		}
+	}
+}
+
 static void EdgeCollide( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps );
 
 // XPBD compliance (Macklin, Mueller & Chentanez 2016) from a 0..1 'give': the fraction of a
@@ -999,7 +1121,7 @@ static void ClosestSegSeg( const float *p1, const float *q1, const float *p2, co
 }
 static void EdgeCollide( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps ) {
 	for ( int c = 0; c < ncaps; c++ ) {
-		if ( !caps[c].hard ) continue;
+		if ( !caps[c].hard || caps[c].hard == 3 ) continue;	// limbs and hilts only, not the fitted body
 		const float minD = caps[c].r + MC_MARGIN;
 		for ( size_t l = 0; l < g->linkA.size(); l++ ) {
 			if ( g->linkBend[l] ) continue;
@@ -1414,8 +1536,8 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 	// body capsules swept through the substeps (from where they were at the start of this step to
 	// where they are at its end): a fast saber arm moves several units per 16 ms step, and checking
 	// only its end position lets it jump clean through the cape
-	mcCapsule_t capsSub[40];
-	if ( ncaps > 40 ) ncaps = 40;
+	mcCapsule_t capsSub[96];
+	if ( ncaps > 96 ) ncaps = 96;
 	g_mcLiftOverride = prm->liftLimit < -1.5f ? -2.0f : prm->liftLimit;
 	const int sub = prm->iterations < 1 ? 1 : ( prm->iterations > 16 ? 16 : prm->iterations );
 	const float h = MC_DT / sub;
@@ -1558,10 +1680,10 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		mcSub( &target[0], &in->targetPrev[0], d );
 		if ( dt < 0 || dt > MC_STALE_MS || mcLen( d ) > MC_TELEPORT ) in->active = false;
 	}
-	mcCapsule_t nearCaps[32], nearPrev[32], stepFrom[32], stepTo[32];
-	mcCapsule_t useCaps[40];
+	mcCapsule_t nearCaps[96], nearPrev[96], stepFrom[96], stepTo[96];
+	mcCapsule_t useCaps[MC_MAX_CAPS];
 	int nuse = 0;
-	for ( int c = 0; c < ncaps && nuse < 40; c++ ) {
+	for ( int c = 0; c < ncaps && nuse < MC_MAX_CAPS; c++ ) {
 		if ( caps[c].hard == 2 && !g->proxied ) continue;
 		useCaps[nuse] = caps[c];
 		nuse++;
@@ -1569,7 +1691,7 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	// last frame's capsules, if they line up with this frame's (same set of bones)
 	const bool sweep = in->active && (int)in->capsPrev.size() == nuse && !MCDBG_OFF( "NOSWEEP" );
 	int nnear = 0;
-	for ( int c = 0; c < nuse && nnear < 32; c++ ) {
+	for ( int c = 0; c < nuse && nnear < 96; c++ ) {
 		// keep a capsule if the cloth is near where it is now or where it was last frame
 		bool keep = CullCapsules( g, target, &useCaps[c], 1, &nearCaps[nnear], 1 ) == 1;
 		if ( !keep && sweep ) keep = CullCapsules( g, target, &in->capsPrev[c], 1, &nearCaps[nnear], 1 ) == 1;
@@ -1874,7 +1996,7 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 	// follow the skin smoothly, so pushing them off those capsules is smooth too.
 	if ( g->proxied && !MCDBG_OFF( "NOATTACHPUSH" ) ) {
 		mcCapsule_t sh[16]; int ns = 0;
-		for ( int c = 0; c < nnear && ns < 16; c++ ) if ( nearCaps[c].hard >= 1 ) sh[ns++] = nearCaps[c];
+		for ( int c = 0; c < nnear && ns < 16; c++ ) if ( nearCaps[c].hard == 1 || nearCaps[c].hard == 2 ) sh[ns++] = nearCaps[c];
 		if ( ns ) for ( int d = 0; d < g->numDraw; d++ ) {
 			if ( g->drawFree[d] > 0.0f ) continue;
 			vec3_t nrm;
@@ -2018,6 +2140,7 @@ int MC_LoadConfig( const char *text ) {
 }
 
 void MC_Clear( void ) {
+	g_fits.clear();
 	for ( mcGroup_t *g : g_groups ) delete g;
 	g_groups.clear();
 	g_surfs.clear();
@@ -2131,6 +2254,36 @@ void MC_Apply( const void *surfacePtr, const void *instanceKey, int timeMs,
 		for ( int k = 0; k < 3; k++ ) normal[i][k] = normal[i][k] * ( 1.0f - b ) + cn[k] * sgn * b;
 		mcNorm( normal[i] );
 	}
+}
+
+
+int MC_BodyShapes( const void *clothSurface, const int *boneClass, int numBones, mcBoneFn_t boneFn, void *boneCtx,
+				   const vec3_t origin, const vec3_t axis[3], mcCapsule_t *out, int maxOut ) {
+	auto sit = g_surfs.find( static_cast<const mdxmSurface_t *>( clothSurface ) );
+	if ( sit == g_surfs.end() || !sit->second.group ) return 0;
+	const mcGroup_t *g = sit->second.group;
+	auto fit = g_fits.find( g );
+	if ( fit == g_fits.end() ) {
+		std::vector<mcFitShape_t> shapes;
+		FitBody( g, boneClass, numBones, shapes );
+		fit = g_fits.emplace( g, std::move( shapes ) ).first;
+	}
+	int n = 0;
+	for ( const mcFitShape_t &f : fit->second ) {
+		if ( n >= maxOut ) break;
+		const float (*m)[4] = boneFn( boneCtx, f.bone );
+		float pa[3], pb[3];
+		for ( int r = 0; r < 3; r++ ) {
+			pa[r] = m[r][0] * f.a[0] + m[r][1] * f.a[1] + m[r][2] * f.a[2] + m[r][3];
+			pb[r] = m[r][0] * f.b[0] + m[r][1] * f.b[1] + m[r][2] * f.b[2] + m[r][3];
+		}
+		ToWorld( pa, origin, axis, out[n].a );
+		ToWorld( pb, origin, axis, out[n].b );
+		out[n].r = f.r;
+		out[n].hard = 3;	// hanging cloth is pushed fully out of the real body shape
+		n++;
+	}
+	return n;
 }
 
 void MC_TakeStats( mcStats_t *out ) {

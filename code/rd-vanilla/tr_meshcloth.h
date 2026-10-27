@@ -72,6 +72,7 @@ struct mcCapsule_t {
 	float	r;
 	int		hard;	// 1 = limbs/hands: always push cloth fully out, even where the animated cloth is inside;
 					// 2 = the same, for the shoulders (used by grid-simulated cloth only, so older capes keep their tuning)
+					// 3 = body shape fitted from the mesh (MC_BodyShapes): pushes hanging cloth fully out, no edge/draw pushes
 };
 
 struct mcParams_t {
@@ -115,6 +116,7 @@ struct mcStats_t {
 };
 void MC_TakeStats( mcStats_t *out );
 
+
 // Returns the 3x4 skinning matrix (model space) for a skeleton bone index.
 typedef const float ( *( *mcBoneFn_t )( void *ctx, int boneIndex ) )[4];
 
@@ -149,3 +151,9 @@ void MC_Prune( int timeMs );
 // Push all cloth near a point outward, like the blast wave of an explosion.
 // strength: speed (units/s) given to cloth at the centre, fading to 0 at radius.
 void MC_Blast( const float center[3], float strength, float radius );
+
+// Body collision shapes fitted to the model's own (non-cloth) mesh, posed and in world space, for the
+// cloth group of clothSurface. boneClass[bone]: 0 = fit this bone (torso, hips, legs, head), -1 = skip.
+// Fitted once per model (the first call), then only transformed. Returns the number written.
+int MC_BodyShapes( const void *clothSurface, const int *boneClass, int numBones, mcBoneFn_t boneFn, void *boneCtx,
+				   const vec3_t origin, const vec3_t axis[3], mcCapsule_t *out, int maxOut );
