@@ -50,6 +50,7 @@ namespace cs
 		int numFrames = 0;
 		int frameLerp = 50;		// ms per frame
 		bool loops = false;
+		bool extra = false;		// named in the profile's animation.cfg but not in the game's animTable
 	};
 	int ListAnims(int ent, std::vector<AnimInfo>& out);	// animations the actor's skeleton has
 	int AnimByName(const std::string& name);

@@ -27,6 +27,7 @@ JK BUILD: Cinematic Studio - Actor Manager, game side (Phase 2).
 extern int G_ParseAnimFileSet(const char* skeletonName, const char* model_name = nullptr);
 
 int g_csGlaOffset[MAX_GENTITIES];	// per entity: target .gla handle - model's own .gla handle
+static int g_csExtraCur[MAX_GENTITIES];	// per entity: the extra animation the studio posed (0 = none)
 static int g_csOrigSet[MAX_GENTITIES];	// per entity: its own animation set + 1 (0 = never switched)
 
 int CS_GlaOffset(const gentity_t* ent)
@@ -36,13 +37,14 @@ int CS_GlaOffset(const gentity_t* ent)
 
 void CS_ClearEntity(const int entNum)
 {
-	if (entNum >= 0 && entNum < MAX_GENTITIES) g_csGlaOffset[entNum] = 0, g_csOrigSet[entNum] = 0;
+	if (entNum >= 0 && entNum < MAX_GENTITIES) g_csGlaOffset[entNum] = 0, g_csOrigSet[entNum] = 0, g_csExtraCur[entNum] = 0;
 }
 
 void CS_ClearAllEntities()
 {
 	memset(g_csGlaOffset, 0, sizeof g_csGlaOffset);
 	memset(g_csOrigSet, 0, sizeof g_csOrigSet);
+	memset(g_csExtraCur, 0, sizeof g_csExtraCur);
 }
 
 namespace cs
@@ -144,6 +146,98 @@ namespace cs
 		}
 	}
 
+	// ---- animations an animation.cfg names that the game's animTable doesn't know --------------
+	// (e.g. BOTH_ANAKINKATA in _humanoid_rpg). The game's parser skips them, so the studio reads
+	// the cfg itself and plays them by frame range. Ids are MAX_ANIMATIONS + index, keyed by name.
+	namespace
+	{
+		struct ExtraAnim { int firstFrame = 0, numFrames = 0, frameLerp = 50; bool loops = false; };
+		std::vector<std::string> g_extraNames;
+
+		int ExtraId(const std::string& name)
+		{
+			for (size_t i = 0; i < g_extraNames.size(); i++)
+				if (!Q_stricmp(g_extraNames[i].c_str(), name.c_str())) return MAX_ANIMATIONS + static_cast<int>(i);
+			g_extraNames.push_back(name);
+			return MAX_ANIMATIONS + static_cast<int>(g_extraNames.size()) - 1;
+		}
+
+		bool InAnimTable(const char* name)
+		{
+			for (int i = 0; i < MAX_ANIMATIONS; i++)
+				if (animTable[i].name && !Q_stricmp(animTable[i].name, name)) return true;
+			return false;
+		}
+
+		// profile folder -> (extra id -> frames), trimmed to the profile's .gla
+		const std::map<int, ExtraAnim>& Extras(const std::string& profile)
+		{
+			static std::map<std::string, std::map<int, ExtraAnim>> cache;
+			auto it = cache.find(profile);
+			if (it != cache.end()) return it->second;
+			std::map<int, ExtraAnim> out;
+			char* buf = nullptr;
+			const std::string path = "models/players/" + profile + "/animation.cfg";
+			const long len = gi.FS_ReadFile(path.c_str(), reinterpret_cast<void**>(&buf));
+			if (len > 0 && buf)
+			{
+				const GlaInfo& gla = ReadGla(ProfileGla(profile));
+				std::string text(buf, static_cast<size_t>(len));
+				gi.FS_FreeFile(buf);
+				size_t pos = 0;
+				while (pos < text.size())
+				{
+					size_t e = text.find('\n', pos);
+					if (e == std::string::npos) e = text.size();
+					std::string line = text.substr(pos, e - pos);
+					pos = e + 1;
+					const size_t c = line.find("//");
+					if (c != std::string::npos) line.resize(c);
+					char name[128];
+					int first = 0, num = 0, loop = 0, fps = 0;
+					if (sscanf(line.c_str(), "%127s %d %d %d %d", name, &first, &num, &loop, &fps) != 5) continue;
+					if (!Q_stricmp(name, "ROOT") || InAnimTable(name) || num <= 0 || first < 0) continue;
+					if (gla.ok && first + num > gla.numFrames) num = gla.numFrames - first;
+					if (num <= 0) continue;
+					ExtraAnim a;
+					a.firstFrame = first;
+					a.numFrames = num;
+					a.frameLerp = fps ? (fps > 0 ? 1000 / fps : -(1000 / -fps)) : 50;
+					if (a.frameLerp == 0) a.frameLerp = 1;
+					a.loops = loop != -1;
+					out[ExtraId(name)] = a;
+				}
+			}
+			return cache.emplace(profile, out).first->second;
+		}
+
+		// frames of any animation (game or extra) in the actor's current set
+		bool Resolve(const gentity_t* e, const int anim, int& first, int& num, int& lerp, bool& loops, int& gla)
+		{
+			const animFileSet_t* set = Set(e);
+			if (!set) return false;
+			if (anim >= 0 && anim < MAX_ANIMATIONS)
+			{
+				const animation_t& a = set->animations[anim];
+				if (a.numFrames <= 0) return false;
+				first = a.firstFrame; num = a.numFrames; lerp = a.frameLerp; loops = a.loopFrames != -1; gla = a.glaIndex;
+				return true;
+			}
+			const auto& ex = Extras(set->filename);
+			auto it = ex.find(anim);
+			if (it == ex.end()) return false;
+			first = it->second.firstFrame; num = it->second.numFrames; lerp = it->second.frameLerp; loops = it->second.loops; gla = 0;
+			return true;
+		}
+
+		std::string AnimName(const int anim)
+		{
+			if (anim >= 0 && anim < MAX_ANIMATIONS) return animTable[anim].name ? animTable[anim].name : "";
+			const int i = anim - MAX_ANIMATIONS;
+			return i >= 0 && i < static_cast<int>(g_extraNames.size()) ? g_extraNames[i] : "";
+		}
+	}
+
 	int ListAnims(const int ent, std::vector<AnimInfo>& out)
 	{
 		out.clear();
@@ -162,6 +256,17 @@ namespace cs
 			ai.loops = a.loopFrames != -1;
 			out.push_back(ai);
 		}
+		for (const auto& kv : Extras(set->filename))
+		{
+			AnimInfo ai;
+			ai.anim = kv.first;
+			ai.name = AnimName(kv.first);
+			ai.numFrames = kv.second.numFrames;
+			ai.frameLerp = abs(kv.second.frameLerp);
+			ai.loops = kv.second.loops;
+			ai.extra = true;
+			out.push_back(ai);
+		}
 		return static_cast<int>(out.size());
 	}
 
@@ -169,20 +274,22 @@ namespace cs
 	{
 		for (int i = 0; i < MAX_ANIMATIONS; i++)
 			if (animTable[i].name && !Q_stricmp(animTable[i].name, name.c_str())) return i;
-		return -1;
+		for (size_t i = 0; i < g_extraNames.size(); i++)
+			if (!Q_stricmp(g_extraNames[i].c_str(), name.c_str())) return MAX_ANIMATIONS + static_cast<int>(i);
+		return name.empty() ? -1 : ExtraId(name);	// a saved clip can name one before its profile is read
 	}
 
 	bool AnimInfoFor(const int ent, const int anim, AnimInfo& out)
 	{
 		const gentity_t* e = Actor(ent);
-		const animFileSet_t* set = e ? Set(e) : nullptr;
-		if (!set || anim < 0 || anim >= MAX_ANIMATIONS || set->animations[anim].numFrames <= 0) return false;
-		const animation_t& a = set->animations[anim];
+		int first, num, lerp, gla; bool loops;
+		if (!e || !Resolve(e, anim, first, num, lerp, loops, gla)) return false;
 		out.anim = anim;
-		out.name = animTable[anim].name ? animTable[anim].name : "";
-		out.numFrames = a.numFrames;
-		out.frameLerp = a.frameLerp ? abs(a.frameLerp) : 50;
-		out.loops = a.loopFrames != -1;
+		out.name = AnimName(anim);
+		out.numFrames = num;
+		out.frameLerp = lerp ? abs(lerp) : 50;
+		out.loops = loops;
+		out.extra = anim >= MAX_ANIMATIONS;
 		return true;
 	}
 
@@ -190,10 +297,14 @@ namespace cs
 		const int startFrame, int endFrame, const int blendMs)
 	{
 		gentity_t* e = Actor(ent);
-		const animFileSet_t* set = e ? Set(e) : nullptr;
-		if (!set || anim < 0 || anim >= MAX_ANIMATIONS) return false;
-		const animation_t& a = set->animations[anim];
-		if (a.numFrames <= 0) return false;
+		animation_t a{};
+		{
+			int first, num, lerp, gla; bool loops;
+			if (!e || !Resolve(e, anim, first, num, lerp, loops, gla)) return false;
+			a.firstFrame = static_cast<unsigned short>(first); a.numFrames = static_cast<short>(num);
+			a.frameLerp = static_cast<short>(lerp); a.glaIndex = static_cast<char>(gla);
+		}
+		const bool extra = anim >= MAX_ANIMATIONS;
 		if (endFrame < 0 || endFrame >= a.numFrames) endFrame = a.numFrames - 1;
 		const int s0 = a.firstFrame + std::max(0, std::min(startFrame, endFrame));
 		const int s1 = a.firstFrame + endFrame + 1;	// G2 end frame is exclusive
@@ -211,14 +322,15 @@ namespace cs
 		{
 			gi.G2API_SetBoneAnimIndex(g, e->lowerLumbarBone, s0, s1, flags, animSpeed, t, setFrame, blendMs);
 			if (e->motionBone != -1) gi.G2API_SetBoneAnimIndex(g, e->motionBone, s0, s1, flags, animSpeed, t, setFrame, blendMs);
-			e->client->ps.torsoAnim = anim;
+			if (!extra) e->client->ps.torsoAnim = anim;	// the game can't name an extra one
 			e->client->ps.torsoAnimTimer = 100000000;	// held by the studio
 		}
 		if ((parts & PARTS_LEGS) && e->rootBone != -1)
 		{
 			gi.G2API_SetBoneAnimIndex(g, e->rootBone, s0, s1, flags, animSpeed, t, setFrame, blendMs);
-			e->client->ps.legsAnim = anim;
+			if (!extra) e->client->ps.legsAnim = anim;
 			e->client->ps.legsAnimTimer = 100000000;
+			g_csExtraCur[e->s.number] = extra ? anim : 0;
 		}
 		return true;
 	}
@@ -229,6 +341,7 @@ namespace cs
 		if (!e) return;
 		e->client->ps.legsAnimTimer = 0;
 		e->client->ps.torsoAnimTimer = 0;
+		g_csExtraCur[e->s.number] = 0;
 	}
 
 	bool CurrentFrame(const int ent, int& anim, float& relFrame)
@@ -236,15 +349,16 @@ namespace cs
 		const gentity_t* e = Actor(ent);
 		const animFileSet_t* set = e ? Set(e) : nullptr;
 		if (!set || e->rootBone == -1) return false;
-		anim = e->client->ps.legsAnim;
-		if (anim < 0 || anim >= MAX_ANIMATIONS) return false;
+		anim = g_csExtraCur[e->s.number] ? g_csExtraCur[e->s.number] : e->client->ps.legsAnim;
+		int first, num, lerp, gla; bool loops;
+		if (!Resolve(e, anim, first, num, lerp, loops, gla)) return false;
 		float cur = 0;
 		int sf = 0, ef = 0, fl = 0;
 		float sp = 0;
 		int ml = 0;
 		auto* g = const_cast<CGhoul2Info*>(&e->ghoul2[e->playerModel]);
 		if (!gi.G2API_GetBoneAnimIndex(g, e->rootBone, AnimTime(), &cur, &sf, &ef, &fl, &sp, &ml)) return false;
-		relFrame = cur - static_cast<float>(set->animations[anim].firstFrame);
+		relFrame = cur - static_cast<float>(first);
 		return true;
 	}
 
@@ -330,21 +444,26 @@ namespace cs
 		const int setIndex = backHome ? g_csOrigSet[n] - 1 : G_ParseAnimFileSet(profile.c_str(), nullptr);
 		if (setIndex < 0 || setIndex >= level.numKnownAnimFileSets) { why = "no animation.cfg for " + profile; return false; }
 
-		// every animation must fit in the target skeleton's frames
+		// animations past the end of the target .gla (a mistake in the pack's animation.cfg) are
+		// trimmed to fit, or dropped if they start past it, instead of blocking the switch
 		const GlaInfo& target = ReadGla(ProfileGla(profile));
-		if (target.ok && !backHome && !force)
+		why.clear();
+		if (target.ok && !backHome)
 		{
-			const animFileSet_t& set = level.knownAnimFileSets[setIndex];
+			animFileSet_t& tset = level.knownAnimFileSets[setIndex];
+			int trimmed = 0;
+			std::string first;
 			for (int i = 0; i < MAX_ANIMATIONS; i++)
 			{
-				const animation_t& a = set.animations[i];
+				animation_t& a = tset.animations[i];
 				if (a.numFrames > 0 && a.glaIndex == 0 && a.firstFrame + a.numFrames > target.numFrames)
 				{
-					why = std::string(animTable[i].name ? animTable[i].name : "an animation") + " needs frame " +
-						std::to_string(a.firstFrame + a.numFrames) + " but " + profile + " has " + std::to_string(target.numFrames);
-					return false;
+					a.numFrames = static_cast<short>(std::max(0, target.numFrames - static_cast<int>(a.firstFrame)));
+					if (first.empty()) first = AnimName(i);
+					trimmed++;
 				}
 			}
+			if (trimmed) why = std::to_string(trimmed) + " animation(s) ran past the end of " + profile + " and were trimmed (" + first + ")";
 		}
 
 		g_csGlaOffset[e->s.number] = newH ? newH - ownH : 0;

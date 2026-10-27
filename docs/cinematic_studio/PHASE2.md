@@ -82,3 +82,12 @@ save takes, replay them as independent actors (ghost preview / solid), overdub w
 - New profiles: `_humanoid_mocap` (the zzzz_Mocap animation set, as its own profile instead of replacing
   stock `_humanoid`), `_humanoid_MEmocap1`, `_humanoid_rpg`. All three have the standard 53-bone
   skeleton, so they pass the checks. Installed as `GameData\MD\zzz_cs_profile_*.pk3`.
+
+## Phase 2.2
+- A profile whose `animation.cfg` runs past the end of its `.gla` (e.g. `_humanoid_MEmocap1`: BOTH_STAND4
+  needs frame 25416, the .gla has 25347) no longer refuses to apply: those animations are trimmed to fit
+  (dropped if they start past the end) and the log says how many.
+- **Extra animations:** names in a profile's `animation.cfg` that the game doesn't know (80 in `_humanoid_rpg`
+  such as BOTH_ANAKINKATA, 5 in `_humanoid_MEmocap1` such as BOTH_STAND11) are read by the studio and
+  listed with a `*`. They play, freeze, scrub and go on the timeline like any other; the game's own AI
+  can't use them.

@@ -888,7 +888,7 @@ namespace
 			const float ry = y + static_cast<float>(r) * 9;
 			if (a->anim == s.browseAnim) Rect(ix, ry, w, 9, kSel);
 			else if (Inside(s.cx, s.cy, ix, ry, w, 9)) Rect(ix, ry, w, 9, kHover);
-			TextClip(ix + 2, ry + 0.5f, a->name, w - 34, kTextCol);
+			TextClip(ix + 2, ry + 0.5f, a->name + (a->extra ? "  *" : ""), w - 34, a->extra ? kAccent : kTextCol);
 			Text(ix + w - 30, ry + 0.5f, Fmt("%d", a->numFrames), kDim, 0.36f);
 			if (TakeClick(ix, ry, w, 9))
 			{

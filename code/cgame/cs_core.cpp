@@ -251,6 +251,7 @@ namespace cs
 				host_->Log(2, "Can't use " + (profile.empty() ? std::string("the model's own profile") : profile) + " on " + o->name + ": " + why);
 				return false;
 			}
+			if (!why.empty()) host_->Log(1, o->name + ": " + why);
 		}
 		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = host_->NowMs();
 		o->profile = profile;
