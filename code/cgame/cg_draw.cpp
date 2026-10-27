@@ -25,6 +25,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 // active (after loading) gameplay
 
 #include "cg_headers.h"
+#include "cs_studio.h"
 
 #include "cg_media.h"
 #include "../game/objectives.h"
@@ -10879,6 +10880,13 @@ void CG_DrawActive(const stereoFrame_t stereoView)
 		VectorCopy(base_org, cg.refdef.vieworg);
 	}
 
-	// draw status bar and other floating elements
-	CG_Draw2D();
+	// draw status bar and other floating elements (Cinematic Studio replaces the HUD while open)
+	if (CS_IsOpen())
+	{
+		CS_Draw2D();
+	}
+	else
+	{
+		CG_Draw2D();
+	}
 }

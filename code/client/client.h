@@ -439,3 +439,6 @@ void CL_DataPad_f();
 void CL_EndScreenDissolve_f();
 int Key_GetCatcher();
 void Key_SetCatcher(int catcher);
+
+// JK BUILD Cinematic Studio: the studio (cgame) has keyboard/mouse focus (cl_keys.cpp)
+qboolean CL_StudioWantsInput();

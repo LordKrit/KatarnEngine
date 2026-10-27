@@ -60,7 +60,11 @@ using cgameExport_t = enum
 	CG_DRAW_DATAPAD_OBJECTIVES,
 	CG_DRAW_DATAPAD_WEAPONS,
 	CG_DRAW_DATAPAD_INVENTORY,
-	CG_DRAW_DATAPAD_FORCEPOWERS
+	CG_DRAW_DATAPAD_FORCEPOWERS,
+	// JK BUILD Cinematic Studio: keyboard and mouse while the studio has focus (cvar cs_active 1).
+	// Both return 1 if the studio used the event (it then doesn't reach bindings / the view).
+	CG_KEY_EVENT,		// arg0 key (| K_CHAR_FLAG for typed characters), arg1 down
+	CG_MOUSE_EVENT		// arg0 dx, arg1 dy
 };
 
 /*

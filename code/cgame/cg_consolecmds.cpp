@@ -230,6 +230,7 @@ extern void CG_FaceIdle_f();
 extern void CG_FaceLip_f();
 extern void CG_FaceInfo_f();
 extern void CG_CineAudio_f();
+extern void CS_Command_f();
 extern void CG_FaceLook_f();
 static consoleCommand_t commands[] = {
 	{ "+md_wheel", CG_MDWheel_Down_f }, // the radial weapon / force wheel (cg_main.cpp), held
@@ -237,6 +238,7 @@ static consoleCommand_t commands[] = {
 	{ "cam_disable", CMD_CGCam_Disable }, //gets out of camera mode for debuggin
 	{ "cam_enable", CGCam_Enable }, //gets into camera mode for precise camera placement
 	{ "cineaudio", CG_CineAudio_f },
+	{ "studio", CS_Command_f },	// JK BUILD Cinematic Studio
 	{ "dpforcenext", CG_DPNextForcePower_f },
 	{ "dpforceprev", CG_DPPrevForcePower_f },
 	{ "dpinvnext", CG_DPNextInventory_f },

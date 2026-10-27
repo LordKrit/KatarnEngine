@@ -25,6 +25,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "client.h"
+#include "vmachine.h"
 #include "client_ui.h"
 
 /*
@@ -1360,6 +1361,12 @@ void CL_KeyDownEvent(const int key, const unsigned time)
 		return;
 	}
 
+	// Cinematic Studio gets the key first (it hands back Escape when it has nothing to close)
+	if (CL_StudioWantsInput() && VM_Call(CG_KEY_EVENT, key, qtrue))
+	{
+		return;
+	}
+
 	// keys can still be used for bound actions
 	if ((cls.state == CA_CINEMATIC || CL_IsRunningInGameCinematic()) && !Key_GetCatcher())
 	{
@@ -1443,8 +1450,27 @@ void CL_KeyUpEvent(const int key, const unsigned time)
 	//
 	CL_ParseBinding(key, qfalse, time);
 
+	if (CL_StudioWantsInput())
+		VM_Call(CG_KEY_EVENT, key, qfalse);
+
 	if (Key_GetCatcher() & KEYCATCH_UI)
 		_UI_KeyEvent(key, qfalse);
+}
+
+/*
+===================
+CL_StudioWantsInput
+
+JK BUILD Cinematic Studio: the studio (in cgame) sees keys and the mouse first while it's open,
+unless the console or a menu has them.
+===================
+*/
+qboolean CL_StudioWantsInput()
+{
+	static cvar_t* csActive = nullptr;
+	if (!csActive) csActive = Cvar_Get("cs_active", "0", CVAR_ROM);
+	return static_cast<qboolean>(csActive->integer && cls.state == CA_ACTIVE && cls.cgameStarted &&
+		!(Key_GetCatcher() & (KEYCATCH_CONSOLE | KEYCATCH_UI)));
 }
 
 /*
@@ -1471,6 +1497,12 @@ Normal keyboard characters, already shifted / capslocked / etc
 */
 void CL_CharEvent(const int key)
 {
+	// Cinematic Studio text fields
+	if (CL_StudioWantsInput() && key != '`' && key != '~' && VM_Call(CG_KEY_EVENT, key | K_CHAR_FLAG, qtrue))
+	{
+		return;
+	}
+
 	// delete is not a printable character and is otherwise handled by Field_KeyDownEvent
 	if (key == 127)
 		return;

@@ -26,6 +26,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "FxScheduler.h"
 
 #include "../client/vmachine.h"
+#include "cs_studio.h"
 #include "g_local.h"
 
 #include "../qcommon/sstring.h"
@@ -239,6 +240,10 @@ extern "C" Q_EXPORT intptr_t QDECL vmMain(const intptr_t command, const intptr_t
 			CG_DrawDataPadForceSelect();
 		}
 		return 0;
+	case CG_KEY_EVENT:		// JK BUILD Cinematic Studio
+		return CS_KeyEvent(static_cast<int>(arg0), static_cast<int>(arg1));
+	case CG_MOUSE_EVENT:
+		return CS_MouseEvent(static_cast<int>(arg0), static_cast<int>(arg1));
 	default:;
 	}
 	return -1;
@@ -3391,6 +3396,8 @@ void CG_Init(const int serverCommandSequence)
 
 	cg.missionFailedScreen = qfalse; // Screen hasn't been opened.
 	cgi_UI_MenuCloseAll(); // So the loadscreen menu will turn off just after the opening snapshot
+
+	CS_Init();	// JK BUILD Cinematic Studio
 }
 
 /*
@@ -3402,6 +3409,7 @@ Called before every level change or subsystem restart
 */
 void CG_Shutdown()
 {
+	CS_Shutdown();	// JK BUILD Cinematic Studio
 	in_camera = false;
 	CG_MDWheel_Reset();
 	FX_Free();

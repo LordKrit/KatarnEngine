@@ -26,6 +26,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "client.h"
+#include "vmachine.h"
 #include "client_ui.h"
 
 #ifndef _WIN32
@@ -546,6 +547,10 @@ CL_MouseEvent
 */
 void CL_MouseEvent(const int dx, const int dy, int time)
 {
+	if (CL_StudioWantsInput() && VM_Call(CG_MOUSE_EVENT, dx, dy))
+	{
+		return;	// Cinematic Studio cursor / camera
+	}
 	if (Key_GetCatcher() & KEYCATCH_UI)
 	{
 		_UI_MouseEvent(dx, dy);

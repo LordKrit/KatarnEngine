@@ -5509,6 +5509,35 @@ void SP_NPC_Droid_Saber(gentity_t* self)
 	SP_NPC_spawner(self);
 }
 
+// JK BUILD Cinematic Studio: spawn an NPC of a type at a spot, standing still (cinematic behaviour).
+// Returns the NPC or nullptr (unknown NPC type, out of entities).
+gentity_t* CS_SpawnNPC(const char* npcType, const vec3_t origin, const float yaw, const char* targetname)
+{
+	gentity_t* spawner = G_Spawn();
+	if (!spawner || !npcType || !npcType[0])
+	{
+		if (spawner) G_FreeEntity(spawner);
+		return nullptr;
+	}
+	G_SetOrigin(spawner, origin);
+	VectorCopy(spawner->currentOrigin, spawner->s.origin);
+	spawner->s.angles[YAW] = yaw;
+	gi.linkentity(spawner);
+	spawner->NPC_type = Q_strlwr(G_NewString(npcType));
+	spawner->NPC_targetname = G_NewString(targetname ? targetname : "");
+	spawner->count = 1;
+	spawner->delay = 0;
+	spawner->wait = 500;
+	spawner->spawnflags |= SFB_CINEMATIC;	// no default AI: actors hold their mark until told otherwise
+	NPC_PrecacheByClassName(spawner->NPC_type);
+	gentity_t* npc = NPC_Spawn_Do(spawner, qtrue);	// frees the spawner when it succeeds
+	if (!npc)
+	{
+		G_FreeEntity(spawner);
+	}
+	return npc;
+}
+
 //NPC console commands
 /*
 NPC_Spawn_f

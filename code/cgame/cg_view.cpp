@@ -26,6 +26,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 // this line must stay at top so the whole PCH thing works...
 #include "cg_headers.h"
+#include "cs_studio.h"
 
 #include "cg_media.h"
 #include "FxScheduler.h"
@@ -3191,6 +3192,11 @@ void CG_DrawActiveFrame(const int server_time, const stereoFrame_t stereo_view)
 		// Build cg.refdef (view origin, angles, FOV, etc.).
 		inwater = CG_CalcViewValues();
 	}
+
+	// JK BUILD Cinematic Studio: its clock and free/scene cameras (the ICARUS camera above still
+	// works when the studio isn't driving the view)
+	CS_Frame();
+	CS_ApplyView();
 
 	// Zoom‑based fog handling.
 	if (cg.zoomMode != 0)
