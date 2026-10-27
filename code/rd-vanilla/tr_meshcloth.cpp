@@ -805,6 +805,8 @@ int CullCapsules( const mcGroup_t *g, const std::vector<float> &target, const mc
 	return n;
 }
 
+static void EdgeCollide( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps );
+
 // XPBD compliance (Macklin, Mueller & Chentanez 2016) from a 0..1 'give': the fraction of a
 // constraint's error left over per substep at the reference 6 substeps per 16 ms. Calibrated
 // so the default setup behaves exactly like the old position projection, but stiffness no
@@ -961,6 +963,76 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 #ifdef MC_DEBUG
 			g_mcDbgTether++;
 #endif
+		}
+	}
+	if ( !MCDBG_OFF( "NOEDGECOL" ) ) EdgeCollide( g, in, caps, ncaps );
+}
+
+
+// Edge against capsule: arms, fists and hilts are thinner than the gap between neighbouring cloth
+// points on coarse (grid-simulated) capes, so a point-only test lets a forearm slip between two
+// points and end up on the wrong side of the cape. Here each cloth edge is tested against the
+// limb axis: if the closest pair of points is inside the limb, both ends of the edge are pushed
+// out along the separating direction, shared by how close each end is.
+static void ClosestSegSeg( const float *p1, const float *q1, const float *p2, const float *q2, float &s, float &t ) {
+	vec3_t d1, d2, r;
+	mcSub( q1, p1, d1 ); mcSub( q2, p2, d2 ); mcSub( p1, p2, r );
+	const float a = mcDot( d1, d1 ), e = mcDot( d2, d2 ), f = mcDot( d2, r );
+	if ( a < 1e-8f && e < 1e-8f ) { s = t = 0.0f; return; }
+	if ( a < 1e-8f ) { s = 0.0f; t = Clamp01( f / e ); return; }
+	const float c = mcDot( d1, r );
+	if ( e < 1e-8f ) { t = 0.0f; s = Clamp01( -c / a ); return; }
+	const float b = mcDot( d1, d2 ), den = a * e - b * b;
+	s = den > 1e-8f ? Clamp01( ( b * f - c * e ) / den ) : 0.0f;
+	t = ( b * s + f ) / e;
+	if ( t < 0.0f ) { t = 0.0f; s = Clamp01( -c / a ); }
+	else if ( t > 1.0f ) { t = 1.0f; s = Clamp01( ( b - c ) / a ); }
+}
+static void EdgeCollide( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps ) {
+	for ( int c = 0; c < ncaps; c++ ) {
+		if ( !caps[c].hard ) continue;
+		const float minD = caps[c].r + MC_MARGIN;
+		for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+			if ( g->linkBend[l] ) continue;
+			const int a = g->linkA[l], b = g->linkB[l];
+			const float wa = g->freedom[a] > 0.0f && g->hardCol[a] ? 1.0f : 0.0f, wb = g->freedom[b] > 0.0f && g->hardCol[b] ? 1.0f : 0.0f;
+			if ( wa + wb == 0.0f ) continue;
+			float *pa = &in->p[a * 3], *pb = &in->p[b * 3];
+			float s, t;
+			ClosestSegSeg( pa, pb, caps[c].a, caps[c].b, s, t );
+			if ( s < 0.02f || s > 0.98f ) continue;		// an end point: the point test handles it
+			vec3_t cp, ca, ab, cab, n;
+			mcSub( pb, pa, ab ); mcMA( pa, s, ab, cp );
+			mcSub( caps[c].b, caps[c].a, cab ); mcMA( caps[c].a, t, cab, ca );
+			mcSub( cp, ca, n );
+			const float d = mcLen( n );
+			if ( d >= minD ) continue;
+			// which side of the limb this piece of cloth belongs on: the side the animated cloth is on.
+			// Where the animated cloth itself wraps the limb (modelled around it), leave it alone.
+			const float *ta = &in->target[a * 3], *tb = &in->target[b * 3];
+			float st, tt;
+			ClosestSegSeg( ta, tb, caps[c].a, caps[c].b, st, tt );
+			vec3_t tcp, tca, tab, nt;
+			mcSub( tb, ta, tab ); mcMA( ta, st, tab, tcp );
+			mcMA( caps[c].a, tt, cab, tca );
+			mcSub( tcp, tca, nt );
+			const float dt = mcLen( nt );
+			if ( dt < minD || dt < 1e-4f ) continue;
+			mcScale( nt, 1.0f / dt, nt );
+			// distance of the cloth's closest point from the limb axis, measured towards its own side
+			// (negative = it has gone through to the other side)
+			const float side = mcDot( n, nt );
+			float depth = minD - side;
+			if ( depth <= 0.0f ) continue;
+			if ( depth > 3.0f ) depth = 3.0f;			// a little per substep: no tearing
+			mcCopy( nt, n );
+			const float ka = wa * ( 1.0f - s ), kb = wb * s, den = ka * ka + kb * kb;
+			if ( den < 1e-6f ) continue;
+			const float lam = depth / den;
+			mcMA( pa, lam * ka, n, pa );
+			mcMA( pb, lam * kb, n, pb );
+			if ( wa > 0.0f ) { in->contact[a] = 1; mcCopy( n, &in->contactN[a * 3] ); }
+			if ( wb > 0.0f ) { in->contact[b] = 1; mcCopy( n, &in->contactN[b * 3] ); }
 		}
 	}
 }
