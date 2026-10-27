@@ -33,3 +33,21 @@ surprise squint` (add more in face_poses.py).
 A bare file name is looked up in `sound/cine/` (e.g. `cineaudio play dooku.mp3` plays
 `sound/cine/dooku.mp3` on the player). Make its lipsync with `tools/face/make_lipsync.bat`
 (Rhubarb Lip Sync) and put `dooku.lip` beside it; without one the mouth follows the volume.
+
+## Face life (idle behaviour)
+
+Every character with a face rig now has an idle layer on top of lipsync and expressions:
+irregular blinks (some double or half), small eye saccades and brief glances, slow drift between
+moods, brow/lid micro motion, and combat tension that builds while fighting and fades afterwards.
+Each character's timing is randomised and staggered, so actors never blink or shift together.
+
+- Profiles: `ext_data/faces/profiles.txt`, one per model folder (plus `default`). Keys: `mood <pose> <freq>`,
+  `moodStrength`, `moodHold`, `blink`, `doubleBlink`, `halfBlink`, `saccade <min> <max> <deg>`,
+  `glance <chance> <deg>`, `micro`, `combat <pose> <max> [rise fall]`, `talkEmphasis`.
+- Priorities: lipsync owns the mouth while talking (idle mouth movement drops to 15%); a deliberate
+  look target (`facelook`, scripts) keeps the eyes on it, with only tiny saccades; a manual
+  `faceexpr` fades the idle moods out (blinks and gaze keep going).
+- `faceidle <who> on|off|<profile>` turns it off/on or forces a profile.
+- Dialogue: stressed syllables (mouth opening wide after a closed shape, or a volume jump) lift the brows.
+  A `.lip` file may also carry expression cues, one per line: `e <seconds> <pose> [weight] [blend ms]`
+  (`e 2.4 none` clears). They play with the line and relax shortly after it ends.

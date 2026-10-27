@@ -2077,6 +2077,7 @@ with a quick saccade-like smoothing. Models without these bones are untouched.
 -------------------------
 */
 extern void CG_FaceUpdate(const centity_t* cent);
+void CG_FaceEyeOffset(int entityNum, float out[2]);
 static void CG_G2EyeAngles(const centity_t* cent)
 {
 	gentity_t* gent = cent->gent;
@@ -2152,7 +2153,9 @@ static void CG_G2EyeAngles(const centity_t* cent)
 	st[0] += (want[PITCH] - st[0]) * k;
 	st[1] += (want[YAW] - st[1]) * k;
 
-	const vec3_t eye_angles = { st[0], st[1], 0 };
+	float idle[2];
+	CG_FaceEyeOffset(gent->s.number, idle);
+	const vec3_t eye_angles = { Com_Clamp(-20.0f, 20.0f, st[0] + idle[0]), Com_Clamp(-32.0f, 32.0f, st[1] + idle[1]), 0 };
 	BG_G2SetBoneAngles(cent, h_l, eye_angles, BONE_ANGLES_POSTMULT, POSITIVE_X, NEGATIVE_Y, NEGATIVE_Z, cgs.model_draw);
 	if (h_r != -1)
 	{

@@ -137,3 +137,19 @@ BF2.update({
 BF2['doublethefall'] = (jaw(6) + corners(0.20, 0.16) + [('move', UPPER, (0, 0, 0.12)), ('move', LOWER[:3], (0, 0, -0.04))]
                         + side('CheekLower', (0.03, 0, 0.12), (0.03, 0, 0.12)) + side('NasolabialBulge', (0.03, -0.02, 0.08), (0.03, -0.02, 0.08))
                         + side('EyesackLower', (0, 0, 0.08), (0, 0, 0.08)) + lids(14, -6) + brows(-0.04, 0.02, 0.04, 0.03))
+
+# --- idle / "face life" layer (subtle; used at low weight by profiles, cg_face.cpp)
+BF2.update({
+    'thoughtful': brows(0.06, 0.02, -0.02, 0.04, 1.0, 0.6) + lids(8, -2) + corners(-0.01, -0.03)
+                  + [('move', LOWER[:3], (0, -0.01, 0.02))],
+    'suspicious': brows(-0.08, -0.02, 0.04, 0.05, 1.0, 0.4) + lids(14, -6) + corners(0.0, -0.02)
+                  + side('Nostril', (0.01, 0, 0.02), (0.01, 0, 0.02)),
+    'displeased': brows(-0.10, -0.04, 0, 0.05) + corners(-0.02, -0.08) + side('ChinSide', (0, 0, 0.05), (0, 0, 0.05))
+                  + [('move', LOWER[:3], (0, -0.01, 0.04))],
+    'scrutiny':   brows(-0.06, 0.0, 0.06, 0.04) + lids(16, -8) + [('move', UPPER + LOWER[:3], (0, 0.005, 0))],
+    'faintsmirk': side('LipCorner', (0.05, -0.01, 0.06), (0.01, 0, 0.01)) + side('CheekLower', (0.01, 0, 0.03), (0, 0, 0)),
+    # micro movements (weights 0..1, mixed in small amounts)
+    'brow_up':    brows(0.12, 0.12, 0.08),
+    'brow_in':    brows(-0.06, 0, 0, 0.05),
+    'lid_soft':   lids(10, -3),
+})

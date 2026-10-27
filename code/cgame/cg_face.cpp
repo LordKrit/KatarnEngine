@@ -82,7 +82,53 @@ namespace
 		std::string glm;
 		std::vector<int> boneIndex;
 		int boneModel = -1;
+
+		// --- face life (idle behaviour)
+		bool lifeInit = false;
+		bool idleOff = false;
+		std::string profileName;			// forced profile ("faceidle <who> <profile>"), else by model
+		unsigned rng = 1;
+		int blinkLen = 150;
+		int secondBlink = 0;				// time of a queued double blink
+		float blinkDepth = 1.0f;
+		std::string mood, moodPrev;
+		float moodW = 0, moodPrevW = 0, moodTarget = 0;
+		int moodUntil = 0;
+		float phase[4] = { 0, 0, 0, 0 };	// micro-motion noise phases
+		float tension = 0;
+		float eyeOff[2] = { 0, 0 };			// idle eye offset (pitch, yaw), degrees
+		float eyeGoal[2] = { 0, 0 };
+		int nextSaccade = 0, glanceUntil = 0;
+		// emphasis while talking
+		float emphasis = 0;
+		int lastViseme = 8;
+		int lastVol = 0;
+		// expression cues inside the .lip file ("e <sec> <pose> [weight] [blend ms]")
+		struct Cue { int ms; std::string pose; float w; int blend; };
+		std::vector<Cue> cues;
+		size_t nextCue = 0;
 	};
+
+	struct FaceProfile
+	{
+		std::vector<std::pair<std::string, float>> moods;	// pose, relative frequency ("neutral" = none)
+		float moodStrength = 0.35f;
+		float moodHold[2] = { 4, 10 };
+		float blinkGap[2] = { 2.0f, 6.0f };
+		float doubleBlink = 0.12f;
+		float halfBlink = 0.10f;
+		float saccadeGap[2] = { 0.6f, 2.5f };
+		float saccadeSize = 3.0f;		// degrees, small idle eye drift
+		float glance = 0.12f;			// chance a saccade is a bigger glance
+		float glanceSize = 14.0f;
+		float micro = 0.12f;			// brow / lid noise amount
+		std::string combatPose = "focus";
+		float combatMax = 0.6f;
+		float combatRise = 0.6f, combatFall = 0.12f;	// per second
+		float talkEmphasis = 0.5f;		// brow lift on stressed syllables
+	};
+	std::unordered_map<std::string, FaceProfile> g_profiles;
+	bool g_profilesLoaded = false;
 
 	std::unordered_map<std::string, FaceDef> g_faceDefs;
 	std::unordered_map<int, std::string> g_soundNames;
@@ -217,7 +263,7 @@ namespace
 		return NUM_VISEMES - 1;
 	}
 
-	bool LoadLip(const std::string& soundPath, std::vector<LipKey>& out, int& lengthMs)
+	bool LoadLip(const std::string& soundPath, std::vector<LipKey>& out, int& lengthMs, std::vector<FaceState::Cue>* cues = nullptr)
 	{
 		std::string base = soundPath;
 		const size_t dot = base.find_last_of('.');
@@ -226,11 +272,23 @@ namespace
 		char* buf = nullptr;
 		if (gi.FS_ReadFile((base + ".lip").c_str(), reinterpret_cast<void**>(&buf)) <= 0 || !buf) return false;
 		out.clear();
+		if (cues) cues->clear();
 		const char* p = buf;
 		while (*p)
 		{
 			const char* t = NextToken(p);
-			if (t[0] && t[0] != '#')
+			if (t[0] == 'e' && t[1] == 0 && cues)
+			{
+				FaceState::Cue c;
+				c.ms = static_cast<int>(atof(NextToken(p)) * 1000.0f);
+				c.pose = NextToken(p);
+				const char* w = NextToken(p);
+				c.w = w[0] ? static_cast<float>(atof(w)) : 1.0f;
+				const char* b = NextToken(p);
+				c.blend = b[0] ? atoi(b) : 300;
+				cues->push_back(c);
+			}
+			else if (t[0] && t[0] != '#')
 			{
 				const float sec = static_cast<float>(atof(t));
 				const char* s = NextToken(p);
@@ -279,6 +337,113 @@ namespace
 	}
 }
 
+namespace
+{
+	float Rand01(unsigned& s)
+	{
+		s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+		return (s & 0xffffff) / 16777216.0f;
+	}
+	float RandRange(unsigned& s, const float* r) { return r[0] + (r[1] - r[0]) * Rand01(s); }
+
+	// ext_data/faces/profiles.txt:
+	//   profile <name>            (name = model folder, e.g. dooku_bf2, or "default")
+	//   mood <pose|neutral> <relative frequency>
+	//   moodStrength <0..1>   moodHold <min s> <max s>
+	//   blink <min s> <max s>   doubleBlink <chance>   halfBlink <chance>
+	//   saccade <min s> <max s> <degrees>   glance <chance> <degrees>
+	//   micro <amount>   combat <pose> <max weight> [rise/s fall/s]   talkEmphasis <amount>
+	//   end
+	void LoadProfiles()
+	{
+		if (g_profilesLoaded) return;
+		g_profilesLoaded = true;
+		g_profiles["default"].moods = { { "neutral", 4 }, { "thoughtful", 1 }, { "lid_soft", 1 } };
+		char* buf = nullptr;
+		if (gi.FS_ReadFile("ext_data/faces/profiles.txt", reinterpret_cast<void**>(&buf)) <= 0 || !buf) return;
+		FaceProfile* pr = nullptr;
+		bool clearedMoods = false;
+		const char* p = buf;
+		while (*p)
+		{
+			const std::string w = NextToken(p);
+			if (w.empty() || w[0] == '#' || w.rfind("//", 0) == 0) { NextLine(p); continue; }
+			auto f = [&]() { return static_cast<float>(atof(NextToken(p))); };
+			if (w == "profile") { pr = &g_profiles[NextToken(p)]; clearedMoods = false; }
+			else if (w == "end") pr = nullptr;
+			else if (pr)
+			{
+				if (w == "mood")
+				{
+					if (!clearedMoods) { pr->moods.clear(); clearedMoods = true; }
+					std::string pose = NextToken(p);
+					pr->moods.emplace_back(pose, f());
+				}
+				else if (w == "moodStrength") pr->moodStrength = f();
+				else if (w == "moodHold") { pr->moodHold[0] = f(); pr->moodHold[1] = f(); }
+				else if (w == "blink") { pr->blinkGap[0] = f(); pr->blinkGap[1] = f(); }
+				else if (w == "doubleBlink") pr->doubleBlink = f();
+				else if (w == "halfBlink") pr->halfBlink = f();
+				else if (w == "saccade") { pr->saccadeGap[0] = f(); pr->saccadeGap[1] = f(); pr->saccadeSize = f(); }
+				else if (w == "glance") { pr->glance = f(); pr->glanceSize = f(); }
+				else if (w == "micro") pr->micro = f();
+				else if (w == "combat")
+				{
+					pr->combatPose = NextToken(p); pr->combatMax = f();
+					const char* t = NextToken(p);
+					if (t[0]) { pr->combatRise = static_cast<float>(atof(t)); pr->combatFall = f(); }
+				}
+				else if (w == "talkEmphasis") pr->talkEmphasis = f();
+			}
+			NextLine(p);
+		}
+		gi.FS_FreeFile(buf);
+		Com_Printf("face: %d profiles\n", static_cast<int>(g_profiles.size()));
+	}
+
+	const FaceProfile& ProfileFor(const FaceState& st)
+	{
+		LoadProfiles();
+		auto it = g_profiles.find(st.profileName.empty() ? st.model : st.profileName);
+		if (it == g_profiles.end()) it = g_profiles.find("default");
+		return it->second;
+	}
+
+	bool InCombat(const gentity_t* g)
+	{
+		if (!g->client) return false;
+		const playerState_t& ps = g->client->ps;
+		if (ps.weaponTime > 0 || ps.saberMove > 1 || ps.saberBlocked) return true;
+		if (g->painDebounceTime > level.time - 1500) return true;
+		if (g->enemy && g->enemy->health > 0 && g->enemy->client)
+		{
+			vec3_t d;
+			VectorSubtract(g->enemy->currentOrigin, g->currentOrigin, d);
+			if (VectorLengthSquared(d) < 300.0f * 300.0f) return true;
+		}
+		return false;
+	}
+
+	bool MouthBone(const std::string& n)
+	{
+		static const char* const keys[] = { "Lip", "Jaw", "Chin", "Tongue", "Mouth", "Teeth" };
+		for (const char* k : keys)
+			if (n.find(k) != std::string::npos) return true;
+		return false;
+	}
+}
+
+// eye offset from the idle behaviour, added in CG_G2EyeAngles (degrees: pitch, yaw)
+void CG_FaceEyeOffset(const int entityNum, float out[2])
+{
+	out[0] = out[1] = 0;
+	if (entityNum < 0 || entityNum >= MAX_GENTITIES) return;
+	const FaceState& st = g_face[entityNum];
+	if (!st.lifeInit || st.idleOff) return;
+	out[0] = st.eyeOff[0];
+	out[1] = st.eyeOff[1];
+}
+
 // called for every sound registration so voice lines can be matched to their lipsync file
 void CG_FaceRememberSound(const int handle, const char* name)
 {
@@ -297,7 +462,8 @@ void CG_FaceOnVoice(const int entityNum, const int sfx)
 	}
 	FaceState& st = g_face[entityNum];
 	int len = 0;
-	const bool have = LoadLip(it->second, st.lip, len);
+	const bool have = LoadLip(it->second, st.lip, len, &st.cues);
+	st.nextCue = 0;
 	if (cg_developer.integer) Com_Printf("face: voice %s on %d, lipsync %s\n", it->second.c_str(), entityNum, have ? "yes" : "no (volume)");
 	if (have)
 	{
@@ -377,18 +543,145 @@ void CG_FaceUpdate(const centity_t* cent)
 	if (st.exprW < st.exprTarget) st.exprW = st.exprW + step > st.exprTarget ? st.exprTarget : st.exprW + step;
 	else if (st.exprW > st.exprTarget) st.exprW = st.exprW - step < st.exprTarget ? st.exprTarget : st.exprW - step;
 
-	// --- blink every 2-6 s, 160 ms
+	// --- face life: blinks, gaze, moods, micro motion, combat tension, talk emphasis
+	const FaceProfile& pr = ProfileFor(st);
+	if (!st.lifeInit)
+	{
+		st.lifeInit = true;
+		st.rng = 0x9E3779B9u ^ (gent->s.number * 2654435761u) ^ static_cast<unsigned>(now);
+		if (!st.rng) st.rng = 1;
+		// staggered start so actors don't blink or change expression together
+		st.nextBlink = now + static_cast<int>(Rand01(st.rng) * pr.blinkGap[1] * 1000.0f);
+		st.moodUntil = now + static_cast<int>(Rand01(st.rng) * pr.moodHold[1] * 1000.0f);
+		st.nextSaccade = now + static_cast<int>(Rand01(st.rng) * 1500.0f);
+		for (float& ph : st.phase) ph = Rand01(st.rng) * 100.0f;
+	}
+	const bool speaking = (!st.lip.empty() && now < st.lipEnd) || gi.VoiceVolume[gent->s.number] > 0;
+	const bool life = !st.idleOff && gent->health > 0;
+	// a manual expression (faceexpr / cue) overrides the idle moods
+	const float idleScale = life ? 1.0f - (st.exprW > 1 ? 1 : st.exprW) : 0.0f;
+
+	// combat tension builds while fighting and fades afterwards
+	if (life && InCombat(gent)) st.tension += pr.combatRise * dt;
+	else st.tension -= pr.combatFall * dt;
+	st.tension = st.tension < 0 ? 0 : (st.tension > 1 ? 1 : st.tension);
+
+	// blinks: irregular, sometimes double or half; fewer while focused in a fight
 	if (now >= st.nextBlink)
 	{
 		st.blinkStart = now;
-		st.nextBlink = now + 2000 + rand() % 4000;
+		st.blinkLen = 120 + static_cast<int>(Rand01(st.rng) * 70);
+		st.blinkDepth = Rand01(st.rng) < pr.halfBlink ? 0.55f + 0.2f * Rand01(st.rng) : 1.0f;
+		float gap = RandRange(st.rng, pr.blinkGap) * (1.0f + st.tension * 0.8f);
+		if (Rand01(st.rng) < 0.15f) gap *= 0.4f;					// clusters
+		st.nextBlink = now + static_cast<int>(gap * 1000.0f);
+		st.secondBlink = Rand01(st.rng) < pr.doubleBlink ? now + st.blinkLen + 70 + static_cast<int>(Rand01(st.rng) * 80) : 0;
+	}
+	if (st.secondBlink && now >= st.secondBlink)
+	{
+		st.blinkStart = now;
+		st.blinkDepth = 1.0f;
+		st.secondBlink = 0;
 	}
 	float blink = 0;
 	{
-		const float b = (now - st.blinkStart) / 160.0f;
-		if (b >= 0 && b < 1) blink = 1.0f - std::fabs(b * 2 - 1);
+		// fast close, slower open
+		const float b = (now - st.blinkStart) / static_cast<float>(st.blinkLen);
+		if (b >= 0 && b < 1) blink = st.blinkDepth * (b < 0.35f ? b / 0.35f : 1.0f - (b - 0.35f) / 0.65f);
 	}
 	if (gent->health <= 0) blink = 1.0f;
+
+	// gaze: small idle saccades and brief glances; tiny ones only when looking at someone on purpose
+	if (now >= st.nextSaccade)
+	{
+		const bool deliberate = gent->client->renderInfo.lookTarget >= 0 && gent->client->renderInfo.lookTarget < ENTITYNUM_WORLD;
+		float size = pr.saccadeSize * (deliberate ? 0.35f : 1.0f) * (1.0f - st.tension * 0.6f);
+		const bool glance = !deliberate && st.tension < 0.3f && Rand01(st.rng) < pr.glance;
+		if (glance)
+		{
+			size = pr.glanceSize;
+			st.glanceUntil = now + 400 + static_cast<int>(Rand01(st.rng) * 900);
+		}
+		st.eyeGoal[0] = (Rand01(st.rng) * 2 - 1) * size * 0.5f;
+		st.eyeGoal[1] = (Rand01(st.rng) * 2 - 1) * size;
+		st.nextSaccade = now + static_cast<int>(RandRange(st.rng, pr.saccadeGap) * 1000.0f);
+		if (glance) st.nextSaccade = st.glanceUntil;
+		if (glance && Rand01(st.rng) < 0.5f && !st.secondBlink) st.nextBlink = now + 60;	// people often blink on a big eye move
+	}
+	else if (st.glanceUntil && now >= st.glanceUntil)
+	{
+		st.glanceUntil = 0;
+		st.eyeGoal[0] *= 0.15f;
+		st.eyeGoal[1] *= 0.15f;
+	}
+	if (life)
+	{
+		// saccades are near-instant; CG_G2EyeAngles adds its own short smoothing
+		const float ke = 1.0f - std::exp(-dt / 0.025f);
+		for (int i = 0; i < 2; i++) st.eyeOff[i] += (st.eyeGoal[i] - st.eyeOff[i]) * ke;
+	}
+
+	// moods: drift between the profile's expressions, crossfading slowly
+	if (life && now >= st.moodUntil && !pr.moods.empty())
+	{
+		float total = 0;
+		for (const auto& m : pr.moods) total += m.second;
+		float r = Rand01(st.rng) * total;
+		std::string pick = pr.moods.back().first;
+		for (const auto& m : pr.moods)
+		{
+			if (r < m.second) { pick = m.first; break; }
+			r -= m.second;
+		}
+		if (pick == "neutral") pick.clear();
+		if (pick != st.mood)
+		{
+			st.moodPrev = st.mood;
+			st.moodPrevW = st.moodW;
+			st.mood = pick;
+			st.moodW = 0;
+		}
+		st.moodTarget = pr.moodStrength * (0.6f + 0.4f * Rand01(st.rng));
+		st.moodUntil = now + static_cast<int>(RandRange(st.rng, pr.moodHold) * 1000.0f);
+	}
+	{
+		const float km = 1.0f - std::exp(-dt / 1.2f);				// ~1 s crossfade
+		st.moodW += (st.moodTarget - st.moodW) * km;
+		st.moodPrevW += (0.0f - st.moodPrevW) * km;
+	}
+
+	// talking: brows lift on stressed syllables (a wide-open mouth after a closed one, or a volume jump)
+	if (speaking && life)
+	{
+		int vis = 8;
+		for (int i = 0; i < NUM_VISEMES; i++) if (target[i] > 0.5f) vis = i;
+		const int vol = gi.VoiceVolume[gent->s.number];
+		const bool stress = ((vis == 3 || vis == 2) && (st.lastViseme == 0 || st.lastViseme == 8 || st.lastViseme == 1))
+			|| vol - st.lastVol > 4;
+		if (stress && Rand01(st.rng) < 0.6f) st.emphasis = 0.6f + 0.4f * Rand01(st.rng);
+		st.lastViseme = vis;
+		st.lastVol = vol;
+	}
+	st.emphasis *= std::exp(-dt / 0.35f);
+
+	// expression cues from the line's .lip file drive the manual expression
+	if (!st.cues.empty() && now < st.lipEnd)
+	{
+		const int t = now - st.lipStart;
+		while (st.nextCue < st.cues.size() && st.cues[st.nextCue].ms <= t)
+		{
+			const FaceState::Cue& c = st.cues[st.nextCue++];
+			st.exprRate = 1000.0f / (c.blend > 1 ? c.blend : 1);
+			if (c.pose == "none") { st.exprTarget = 0; }
+			else
+			{
+				if (st.expr != c.pose) st.exprW = 0;
+				st.expr = c.pose;
+				st.exprTarget = c.w;
+			}
+			st.exprUntil = st.lipEnd + 600;		// relax after the line
+		}
+	}
 
 	// --- blend poses into per-bone local rotation / translation
 	const size_t nb = def.bones.size();
@@ -408,6 +701,37 @@ void CG_FaceUpdate(const centity_t* cent)
 	for (int i = 0; i < NUM_VISEMES; i++) add(k_visemes[i], st.vis[i]);
 	if (!st.expr.empty()) add(st.expr.c_str(), st.exprW);
 	add("blink", blink);
+
+	// idle layer: lipsync owns the mouth while talking
+	auto addIdle = [&](const char* name, const float w)
+		{
+			if (w <= 0.001f || !name[0]) return;
+			const auto it = def.poses.find(name);
+			if (it == def.poses.end()) return;
+			for (const FacePoseKey& k : it->second)
+			{
+				const float m = speaking && MouthBone(def.bones[k.bone].name) ? 0.15f : 1.0f;
+				for (int j = 0; j < 3; j++)
+				{
+					acc[k.bone * 6 + j] += w * m * k.r[j];
+					acc[k.bone * 6 + 3 + j] += w * m * k.t[j];
+				}
+			}
+		};
+	if (idleScale > 0)
+	{
+		const float calm = 1.0f - st.tension;
+		addIdle(st.mood.c_str(), st.moodW * idleScale * calm);
+		addIdle(st.moodPrev.c_str(), st.moodPrevW * idleScale * calm);
+		addIdle(pr.combatPose.c_str(), st.tension * pr.combatMax * idleScale);
+		// micro motion: slow, incommensurate drift so the face is never frozen
+		const float tt = now * 0.001f;
+		const float n1 = 0.5f + 0.5f * std::sin(tt * 0.37f + st.phase[0]) * std::sin(tt * 0.91f + st.phase[1]);
+		const float n2 = 0.5f + 0.5f * std::sin(tt * 0.53f + st.phase[2]) * std::sin(tt * 1.27f + st.phase[3]);
+		addIdle("brow_up", (n1 * pr.micro + st.emphasis * pr.talkEmphasis) * idleScale);
+		addIdle("brow_in", n2 * pr.micro * 0.7f * idleScale);
+		addIdle("lid_soft", (1.0f - n1) * pr.micro * idleScale);
+	}
 
 	for (size_t i = 0; i < nb; i++)
 	{
@@ -562,4 +886,32 @@ void CG_CineAudio_f()
 		return;
 	}
 	cgi_S_StartSound(nullptr, e->s.number, CHAN_VOICE_GLOBAL, h);
+}
+
+// faceidle <who> on|off|<profile>   idle behaviour (blinks, gaze, moods) per character
+void CG_FaceIdle_f()
+{
+	if (cgi_Argc() < 3)
+	{
+		Com_Printf("usage: faceidle <who> on|off|<profile>\n");
+		return;
+	}
+	const gentity_t* e = FindWho(CG_Argv(1));
+	if (!e)
+	{
+		Com_Printf("faceidle: nobody called %s\n", CG_Argv(1));
+		return;
+	}
+	FaceState& st = g_face[e->s.number];
+	const char* a = CG_Argv(2);
+	if (!Q_stricmp(a, "off")) st.idleOff = true;
+	else if (!Q_stricmp(a, "on")) st.idleOff = false;
+	else
+	{
+		LoadProfiles();
+		st.profileName = a;
+		st.idleOff = false;
+		st.moodUntil = 0;
+		if (!g_profiles.count(a)) Com_Printf("faceidle: no profile '%s' (using default)\n", a);
+	}
 }
