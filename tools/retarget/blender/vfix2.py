@@ -22,6 +22,11 @@ if len(big)==2:
     bmesh.ops.delete(bm,geom=inner,context='VERTS')
     bm.to_mesh(cmo.data); print('CAPE lining removed',len(inner))
 bm.free()
+# ---- roll / bend bones: superseded - the retarget now sends roll joints to Movie Duels' twist bones ----
+if False:
+  pass
+# (old weight spreading kept below for reference, disabled)
+SPREAD_ROLLS = False
 # ---- roll / bend bones: spread their weight between the joints they sit between, so twist and bend blend smoothly ----
 R_=[x for x in bpy.data.objects if x.type=='ARMATURE'][0]
 mwR=R_.matrix_world
@@ -29,7 +34,7 @@ def J(n): return mwR@R_.data.bones[n].head_local
 for o in bpy.data.objects:
     if o.type!='MESH': continue
     gi={g.name:g.index for g in o.vertex_groups}
-    rolls=[n for n in gi if re.search(r'(Roll|Bend)',n) and re.match(r'(Left|Right)',n)]
+    rolls=[n for n in gi if re.search(r'(Roll|Bend)',n) and re.match(r'(Left|Right)',n)] if SPREAD_ROLLS else []
     if not rolls: continue
     mw=o.matrix_world; cnt=0
     for v in o.data.vertices:
