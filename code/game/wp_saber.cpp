@@ -175,7 +175,7 @@ extern int PM_PowerLevelForSaberAnim(const playerState_t* ps, int saberNum = 0);
 extern void PM_VelocityForSaberMove(const playerState_t* ps, vec3_t throw_dir);
 extern qboolean PM_VelocityForBlockedMove(const playerState_t* ps, vec3_t throw_dir);
 extern qboolean PM_SaberCanInterruptMove(int move, int anim);
-extern int jedi_re_calc_parry_time(const gentity_t* self, evasionType_t evasion_type);
+extern int Jedi_ReCalcParryTime(const gentity_t* self, evasionType_t evasion_type);
 extern qboolean jedi_dodge_evasion(gentity_t* self, gentity_t* shooter, trace_t* tr, int hit_loc);
 extern void jedi_play_deflect_sound(const gentity_t* self);
 extern void jedi_play_blocked_push_sound(const gentity_t* self);
@@ -299,6 +299,7 @@ extern cvar_t* g_SerenityJediEngineMode;
 extern cvar_t* g_IsSaberDoingAttackDamage;
 extern cvar_t* g_DebugSaberCombat;
 extern cvar_t* g_saberscanstickinenemy;
+extern cvar_t* g_saberscanstickinwall;
 extern cvar_t* g_lightningdamage;
 extern cvar_t* com_outcast;
 extern cvar_t* g_SaberBounceOnWalls;
@@ -13552,6 +13553,7 @@ static void WP_SaberImpact(gentity_t* owner, gentity_t* saber, trace_t* trace)
 	//===========================
 	if (g_SerenityJediEngineMode &&
 		g_SerenityJediEngineMode->integer &&
+		g_saberscanstickinwall->integer &&
 		g_SaberMustReturn &&
 		g_SaberMustReturn->integer < 1 &&
 		owner &&
@@ -13561,7 +13563,7 @@ static void WP_SaberImpact(gentity_t* owner, gentity_t* saber, trace_t* trace)
 			owner->client &&
 			owner->client->ps.saberEntityState == SES_LEAVING &&
 			other->s.number == ENTITYNUM_WORLD && // hit solid world
-			owner->client->ps.forcePowerLevel[FP_SABERTHROW] >= FORCE_LEVEL_3)
+			owner->client->ps.forcePowerLevel[FP_SABERTHROW] >= FORCE_LEVEL_2)
 		{
 			// Reject floors and ceilings
 			if (trace->plane.normal[2] >= 0.8f || trace->plane.normal[2] <= -0.8f)
@@ -18282,7 +18284,7 @@ qboolean wp_saber_block_check_random(gentity_t* self, vec3_t hitloc)
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parry_re_calc_time)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parry_re_calc_time;
@@ -18642,7 +18644,7 @@ qboolean WP_SaberBlockNonRandom(gentity_t* self, vec3_t hitloc, const qboolean m
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parry_re_calc_time)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parry_re_calc_time;
@@ -18977,7 +18979,7 @@ qboolean WP_SaberMBlockDirection(gentity_t* self, vec3_t hitloc, const qboolean 
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parry_re_calc_time)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parry_re_calc_time;
@@ -19338,7 +19340,7 @@ qboolean WP_SaberMBlockDirectionNPC(gentity_t* self, vec3_t hitloc, const qboole
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parry_re_calc_time)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parry_re_calc_time;
@@ -19608,7 +19610,7 @@ qboolean WP_SaberFatigueDirection(gentity_t* self, vec3_t hitloc, const qboolean
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parry_re_calc_time)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parry_re_calc_time;
@@ -19878,7 +19880,7 @@ qboolean WP_SaberBounceDirection(gentity_t* self, vec3_t hitloc, const qboolean 
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parryReCalcTime = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parryReCalcTime = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parryReCalcTime)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parryReCalcTime;
@@ -20421,7 +20423,7 @@ qboolean WP_SaberBlockNonRandom_MD(gentity_t* self, vec3_t hitloc, const qboolea
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parry_re_calc_time)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parry_re_calc_time;
@@ -20775,7 +20777,7 @@ qboolean WP_SaberBlockBolt_MD(gentity_t* self, vec3_t hitloc, const qboolean mis
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parry_re_calc_time)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parry_re_calc_time;
@@ -21045,7 +21047,7 @@ qboolean WP_SaberFatiguedParryDirection(gentity_t* self, vec3_t hitloc, const qb
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parry_re_calc_time)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parry_re_calc_time;
@@ -22356,7 +22358,7 @@ qboolean WP_SaberBlockBolt_AMD(gentity_t* self, vec3_t hitloc, const qboolean mi
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self) && self->client->ps.saberBlocked != BLOCKED_NONE)
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] < level.time + parry_re_calc_time)
 		{
 			self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] = level.time + parry_re_calc_time;
@@ -33176,7 +33178,7 @@ int IsPressingDashButton(const gentity_t* self)
 		&& self->client->ps.Dash_Count < 3
 		&& (!(self->client->buttons & BUTTON_KICK))
 		&& (!(self->client->buttons & BUTTON_USE))
-		&& (self->client->ps.forcePowerLevel[FP_SABER_OFFENSE] > FORCE_LEVEL_0 || char_is_force_user_attacker(self)) // ground dash: any saber user (Saber Offense 1+); gunners with no saber skill cannot
+		/*&& (self->client->ps.forcePowerLevel[FP_SABER_OFFENSE] > FORCE_LEVEL_0 || char_is_force_user_attacker(self))*/ // ground dash: any saber user (Saber Offense 1+); gunners with no saber skill cannot
 		&& (self->client->buttons & BUTTON_DASH))
 	{
 		return qtrue;
@@ -33418,6 +33420,134 @@ static void ForceSpeedDash(gentity_t* self)
 		ForceDashAnimDash(self);
 
 		G_Sound(self, G_SoundIndex("sound/weapons/force/dash.mp3"));
+	}
+	else if (self->client->ps.groundEntityNum == ENTITYNUM_NONE)
+	{
+		NPC_SetAnim(self, SETANIM_BOTH, BOTH_FORCEINAIR1, SETANIM_AFLAG_PACE);
+	}
+}
+
+static void ForceSpeedHop(gentity_t* self)
+{
+	// Must be alive
+	if (self->health <= 0)
+	{
+		return;
+	}
+
+	if (self->watertype == CONTENTS_WATER)
+	{
+		return;
+	}
+
+	// Must be on the ground
+	if (self->client->ps.groundEntityNum == ENTITYNUM_NONE)
+	{
+		return;
+	}
+
+	// Cannot dash during ledge moves
+	if (PM_InLedgeMove(self->client->ps.legsAnim) == qtrue)
+	{
+		return;
+	}
+
+	// Cannot dash during saber attacks
+	if (PM_SaberInAttack(self->client->ps.saberMove) == qtrue)
+	{
+		return;
+	}
+
+	// Cannot dash during kicks
+	if (PM_KickMove(self->client->ps.saberMove) == qtrue)
+	{
+		return;
+	}
+
+	// Cannot dash during slope animations
+	if (PM_InSlopeAnim(self->client->ps.legsAnim) == qtrue)
+	{
+		return;
+	}
+
+	// Speed debounce (saved absolute time can block dash after load)
+	if (self->client->ps.forcePowerDebounce[FP_SPEED] > level.time)
+	{
+		return;
+	}
+
+	// Speed recovery (same issue)
+	if (self->client->ps.forceSpeedRecoveryTime >= level.time)
+	{
+		return;
+	}
+
+	// Cannot dash while knocked down
+	if (BG_InKnockDown(self->client->ps.legsAnim) == qtrue ||
+		PM_InKnockDown(&self->client->ps) == qtrue)
+	{
+		return;
+	}
+
+	// Class restrictions
+	if (self->client->NPC_class == CLASS_DROIDEKA ||
+		self->client->NPC_class == CLASS_VEHICLE ||
+		self->client->NPC_class == CLASS_SBD ||
+		self->client->NPC_class == CLASS_OBJECT ||
+		self->client->NPC_class == CLASS_ASSASSIN_DROID)
+	{
+		return;
+	}
+
+	if ((self->client->ps.forceAllowDeactivateTime < level.time) &&
+		(self->client->ps.forcePowersActive & (1 << FP_SPEED)))
+	{// stop using it
+		WP_ForcePowerStop(self, FP_SPEED);
+		return;
+	}
+
+	if (self->client->ps.forcePowersActive & (1 << FP_SPEED))
+	{
+		if (PM_RunningAnim(self->client->ps.legsAnim) == qtrue)
+		{
+			ForceHopAnim(self);
+			WP_ForcePowerStop(self, FP_SPEED);
+		}
+		else
+		{
+			return;
+		}
+	}
+
+	// Cannot dash during saberlock
+	if (self->client->ps.saberLockTime > level.time)
+	{
+		return;
+	}
+	// Note that the above check , so you can still hold the button during a saber lock
+	// and have the dash start immediately after the lock ends, which is nice.
+	if (!(self->client->ps.communicatingflags & 1 << CF_DASHING))
+	{// not actually dashing, so don't start the anim or sound
+		return;
+	}
+
+	// this is causing problems with the dash anim and sound not playing after loading a save, so I moved it down
+	if (!IsPressingDashButton(self))
+	{// not actually pressing the button, so don't start the anim or sound
+		return;
+	}
+
+	if (self->client->ps.groundEntityNum != ENTITYNUM_NONE)
+	{// animate and give the speed boost
+		vec3_t dir;
+
+		AngleVectors(self->client->ps.viewangles, dir, nullptr, nullptr);
+		self->client->ps.velocity[0] = self->client->ps.velocity[0] * 2;
+		self->client->ps.velocity[1] = self->client->ps.velocity[1] * 2;
+
+		ForceHopAnim(self);
+
+		G_Sound(self, G_SoundIndex("sound/player/gravel_land.mp3"));
 	}
 	else if (self->client->ps.groundEntityNum == ENTITYNUM_NONE)
 	{
@@ -46707,7 +46837,14 @@ void WP_ForcePowersUpdate(gentity_t* self, usercmd_t* ucmd)
 
 	if ((IsPressingDashButton(self) == qtrue))
 	{// Dash is also a power with its own button,so just check if the button is being held and call the function if it is.
-		ForceSpeedDash(self);
+		if (self->client->ps.forcePowerLevel[FP_SABER_OFFENSE] > FORCE_LEVEL_0 || char_is_force_user_attacker(self))
+		{
+			ForceSpeedDash(self);
+		}
+		else
+		{
+			ForceSpeedHop(self);
+		}
 	}
 
 	// Boba/Jango wrist rocket logic
@@ -47924,7 +48061,7 @@ qboolean wp_saber_Off_Dash_Evasion(gentity_t* self, vec3_t hitloc)
 
 	if (self->s.number >= MAX_CLIENTS && !G_ControlledByPlayer(self))
 	{
-		const int parry_re_calc_time = jedi_re_calc_parry_time(self, EVASION_PARRY);
+		const int parry_re_calc_time = Jedi_ReCalcParryTime(self, EVASION_PARRY);
 		if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE] <
 			level.time + parry_re_calc_time)
 		{

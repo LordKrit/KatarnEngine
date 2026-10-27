@@ -137,7 +137,7 @@ extern qboolean IsSurrendering(const gentity_t* self);
 extern qboolean IsRESPECTING(const gentity_t* self);
 extern qboolean IsCowering(const gentity_t* self);
 extern qboolean is_anim_requires_responce(const gentity_t* self);
-extern qboolean WP_AbsorbKick(gentity_t* hitEnt, const gentity_t* pusher, const vec3_t push_dir);
+extern qboolean WP_AbsorbKick(gentity_t* hitEnt, gentity_t* pusher, const vec3_t push_dir);
 extern qboolean BG_InKnockDown(int anim);
 extern void ForceGrasp(gentity_t* ent);
 extern qboolean WP_SaberAttacking(const gentity_t* self);
@@ -513,6 +513,12 @@ static qboolean npc_is_staff_style(const gentity_t* self)
 
 static qboolean npc_is_dual_style(const gentity_t* self)
 {
+	// holding two sabers (an NPC file's saber2, or a script's SET_SABER2 - e.g. Barriss in the Clone Wars
+	// mission): dual, whatever the NPC type. The names below are only the NPCs that start with two.
+	if (self->client && self->client->ps.dualSabers)
+	{
+		return qtrue;
+	}
 	if (!Q_stricmp("md_grievous", self->NPC_type)
 		|| !Q_stricmp("md_grievous4", self->NPC_type)
 		|| !Q_stricmp("md_grievous_robed", self->NPC_type)
@@ -2148,13 +2154,15 @@ static void Jedi_AdjustSaberAnimLevel(const gentity_t* self, const int new_level
 		}
 		else if (npc_is_dual_style(self))
 		{
-			//dual only
+			//dual only (and stay: the random style picked below used to replace it)
 			self->client->ps.saberAnimLevel = SS_DUAL;
+			return;
 		}
 		else if (npc_is_staff_style(self))
 		{
-			//staff only
+			//staff only (and stay: the random style picked below used to replace it)
 			self->client->ps.saberAnimLevel = SS_STAFF;
+			return;
 		}
 		else
 		{
@@ -2190,13 +2198,15 @@ static void Jedi_AdjustSaberAnimLevel(const gentity_t* self, const int new_level
 		}
 		else if (npc_is_dual_style(self))
 		{
-			//dual only
+			//dual only (and stay: the random style picked below used to replace it)
 			self->client->ps.saberAnimLevel = SS_DUAL;
+			return;
 		}
 		else if (npc_is_staff_style(self))
 		{
-			//staff only
+			//staff only (and stay: the random style picked below used to replace it)
 			self->client->ps.saberAnimLevel = SS_STAFF;
+			return;
 		}
 		else
 		{
@@ -4853,7 +4863,7 @@ static evasionType_t jedi_check_flip_evasions(gentity_t* self, const float right
 	return EVASION_NONE;
 }
 
-int jedi_re_calc_parry_time(const gentity_t* self, const evasionType_t evasion_type)
+int Jedi_ReCalcParryTime(const gentity_t* self, const evasionType_t evasion_type)
 {
 	if (!self->client)
 	{
@@ -5962,7 +5972,7 @@ evasionType_t jedi_saber_block_go(gentity_t* self, usercmd_t* cmd, vec3_t p_hitl
 	// ======================================================================
 	// recalc parry timing
 	// ======================================================================
-	const int parry_re_calc_time = jedi_re_calc_parry_time(self, evasion_type);
+	const int parry_re_calc_time = Jedi_ReCalcParryTime(self, evasion_type);
 
 	if (self->client->ps.forcePowerDebounce[FP_SABER_DEFENSE]
 		< level.time + parry_re_calc_time)
@@ -6039,8 +6049,10 @@ static evasionType_t jedi_check_evade_special_attacks()
 		//check some other attacks?
 		//check roll-stab
 		if (NPC->enemy->client->ps.torsoAnim == BOTH_ROLL_STAB
-			|| NPC->enemy->client->ps.torsoAnim == BOTH_ROLL_F && (NPC->enemy->client->pers.lastCommand.buttons &
-				BUTTON_ATTACK || NPC->enemy->client->ps.pm_flags & PMF_ATTACK_HELD))
+			|| (NPC->enemy->client->ps.torsoAnim == BOTH_ROLL_F
+				|| NPC->enemy->client->ps.torsoAnim == BOTH_ROLL_F1 ||
+				NPC->enemy->client->ps.torsoAnim == BOTH_ROLL_F2) && (NPC->enemy->client->pers.lastCommand.buttons &
+					BUTTON_ATTACK || NPC->enemy->client->ps.pm_flags & PMF_ATTACK_HELD))
 		{
 			//either already in a roll-stab or may go into one
 			if (NPCInfo->aiFlags & NPCAI_BOSS_CHARACTER || NPCInfo->aiFlags & NPCAI_BOSS_SERENITYJEDIENGINE
@@ -6362,7 +6374,7 @@ static qboolean jedi_saber_block()
 				}
 
 				//debounce our parry recalc time
-				const int parry_re_calc_time = jedi_re_calc_parry_time(NPC, evasion_type);
+				const int parry_re_calc_time = Jedi_ReCalcParryTime(NPC, evasion_type);
 
 				TIMER_Set(NPC, "parryReCalcTime", Q_irand(0, parry_re_calc_time));
 

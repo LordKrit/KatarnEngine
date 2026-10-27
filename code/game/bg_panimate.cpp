@@ -7216,6 +7216,7 @@ static bool TorsoAgainstWindTest(gentity_t* ent)
 {
 	if (ent && //valid ent
 		ent->client && //a client
+		!in_camera && //not in a cutscene: the script's anim (sitting, talking) stays
 		ent->client->ps.groundEntityNum != ENTITYNUM_NONE &&
 		(ent->s.number < MAX_CLIENTS || G_ControlledByPlayer(ent)) &&
 		gi.WE_GetWindGusting(ent->currentOrigin) &&
@@ -14675,6 +14676,12 @@ qboolean PM_KickingAnim(const int anim)
 	case BOTH_GETUP_BROLL_F:
 	case BOTH_GETUP_FROLL_B:
 	case BOTH_GETUP_FROLL_F:
+	case MELEE_STANCE_HOLD_LT:
+	case MELEE_STANCE_HOLD_RT:
+	case MELEE_STANCE_HOLD_BL:
+	case MELEE_STANCE_HOLD_BR:
+	case MELEE_STANCE_HOLD_B:
+	case MELEE_STANCE_HOLD_T:
 	case BOTH_TUSKENLUNGE1:
 	case BOTH_TUSKENATTACK1:
 	case BOTH_TUSKENATTACK2:

@@ -1213,11 +1213,26 @@ void RB_AddDrawItem(Pass* pass, uint32_t sortKey, const DrawItem& drawItem)
 	{
 		if (pass->numDrawItems >= pass->maxDrawItems)
 		{
-			// Replaces assert(!"Ran out of space for pass");
+			// The pass is sized from the number of draw surfaces (x 4 stages), but one surface can add more items
+			// than that: the weather surface adds one per weather type per 3x3 chunk (up to 45). In views with few
+			// surfaces (t3_byss with weather) the rest were dropped - weather chunks missing (and the debug spam
+			// "Ran out of space for pass"). Grow the pass instead: new arrays twice the size from the same per-frame
+			// memory (freed with the pass after it is drawn).
+			const int newMax = pass->maxDrawItems * 2 + 64;
+			DrawItem* newItems = ojkAllocArray<DrawItem>(*backEndData->perFrameMemory, newMax);
+			uint32_t* newKeys = newItems ? ojkAllocArray<uint32_t>(*backEndData->perFrameMemory, newMax) : nullptr;
+			if (!newItems || !newKeys)
+			{
 #ifdef _DEBUG
-			Com_Printf(S_COLOR_RED"RB_AddDrawItem: Ran out of space for pass (max=%d)\n" S_COLOR_WHITE, pass->maxDrawItems);
+				Com_Printf(S_COLOR_RED"RB_AddDrawItem: Ran out of space for pass (max=%d)\n" S_COLOR_WHITE, pass->maxDrawItems);
 #endif
-			return;
+				return;
+			}
+			memcpy(newItems, pass->drawItems, sizeof(DrawItem) * pass->numDrawItems);
+			memcpy(newKeys, pass->sortKeys, sizeof(uint32_t) * pass->numDrawItems);
+			pass->drawItems = newItems;
+			pass->sortKeys = newKeys;
+			pass->maxDrawItems = newMax;
 		}
 
 		pass->sortKeys[pass->numDrawItems] = sortKey;
@@ -1509,7 +1524,7 @@ static void RB_RenderDrawSurfList(drawSurf_t* drawSurfs, int numDrawSurfs)
 	void* allocMark = backEndData->perFrameMemory->Mark();
 	assert(backEndData->currentPass == nullptr);
 	backEndData->currentPass = RB_CreatePass(
-		*backEndData->perFrameMemory, numDrawSurfs * estimatedNumShaderStages);
+		*backEndData->perFrameMemory, numDrawSurfs * estimatedNumShaderStages + 64);	// + room for the weather surface's items
 
 	// save original time for entity shader offsets
 	float originalTime = backEnd.refdef.floatTime;
@@ -1757,6 +1772,13 @@ static const void* RB_SetColor(const void* data) {
 	backEnd.color2D[1] = cmd->color[1];
 	backEnd.color2D[2] = cmd->color[2];
 	backEnd.color2D[3] = cmd->color[3];
+	// the dynamic HUD fade is applied when a 2D batch is drawn (RB_HudFadeStage), so quads with a different fade
+	// must not share a batch (it only changes when cgame starts and ends the HUD, so this flushes twice a frame at most)
+	if (cmd->hudFade != backEnd.hudFade2D && tess.numIndexes)
+	{
+		RB_EndSurface();
+	}
+	backEnd.hudFade2D = cmd->hudFade;
 
 	return (const void*)(cmd + 1);
 }

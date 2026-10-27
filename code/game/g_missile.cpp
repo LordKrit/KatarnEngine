@@ -114,6 +114,7 @@ extern qboolean PM_InKataAnim(int anim);
 extern qboolean PM_InCartwheel(int anim);
 extern int G_PickPainAnim(const gentity_t* self, const vec3_t point, int hit_loc);
 extern qboolean PM_SaberInMassiveBounce(int move);
+extern cvar_t* in_joystick;
 //-------------------------------------------------------------------------
 static void G_MissileBounceEffect(const gentity_t* ent, vec3_t org, vec3_t dir, const qboolean hit_world)
 {
@@ -990,11 +991,17 @@ static void G_BoltBlockMissile(gentity_t* ent, gentity_t* missile, vec3_t forwar
 		return;
 	}
 
-	const qboolean manual_blocking =
-		(blocker->client->ps.forcePowerLevel[FP_SABER_DEFENSE] > FORCE_LEVEL_0) ? qtrue : qfalse;
+	const qboolean manual_blocking =(blocker->client->ps.forcePowerLevel[FP_SABER_DEFENSE] > FORCE_LEVEL_0) ? qtrue : qfalse;
 	const qboolean manual_proj_blocking = WalkCheck(blocker) ? qtrue : qfalse;
-	const qboolean npc_is_blocking =
-		(blocker->client->ps.ManualBlockingFlags & (1 << MBF_JKAMODENPCBLOCKING)) ? qtrue : qfalse;
+	const qboolean npc_is_blocking =(blocker->client->ps.ManualBlockingFlags & (1 << MBF_JKAMODENPCBLOCKING)) ? qtrue : qfalse;
+
+	// JKA mode works like base JKA: a bolt that hits the blade during a swing is deflected, but the swing
+	// carries on (no parry / bounce / fatigue pose). A player holding attack keeps swinging too.
+	const qboolean keep_swing = (PM_SaberInAttack(blocker->client->ps.saberMove)
+		|| PM_SaberInTransitionAny(blocker->client->ps.saberMove)
+		|| PM_SaberInSpecialAttack(blocker->client->ps.torsoAnim)
+		|| ((blocker->s.number < MAX_CLIENTS || G_ControlledByPlayer(blocker))
+			&& blocker->client->pers.cmd.buttons & BUTTON_ATTACK)) ? qtrue : qfalse;
 
 	float slop_factor =
 		(FATIGUE_AUTOBOLTBLOCK - 6) *
@@ -1074,18 +1081,27 @@ static void G_BoltBlockMissile(gentity_t* ent, gentity_t* missile, vec3_t forwar
 			// Very low points = bad blocks
 			if (blocker->client->ps.forcePower < BLOCKPOINTS_FIFTEEN)
 			{
-				WP_BoltBlockVictimFatigued(blocker);
+				if (!keep_swing)
+				{
+					WP_BoltBlockVictimFatigued(blocker);
+				}
 				blocker->client->ps.saberBlocked = BLOCKED_NONE;
 				blocker->client->ps.saberBounceMove = LS_NONE;
 			}
 			else
 			{
-				WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+				if (!keep_swing)
+				{
+					WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+				}
 			}
 		}
 		else
 		{
-			WP_SaberBlockNonRandom(blocker, missile->currentOrigin, qfalse);
+			if (!keep_swing)
+			{
+				WP_SaberBlockNonRandom(blocker, missile->currentOrigin, qfalse);
+			}
 		}
 
 		const int force_points_used = WP_SaberBlockCost(blocker, missile, missile->currentOrigin);
@@ -1154,18 +1170,27 @@ static void G_BoltBlockMissile(gentity_t* ent, gentity_t* missile, vec3_t forwar
 			{
 				if (blocker->client->ps.forcePower < BLOCKPOINTS_FIFTEEN)
 				{
-					WP_BoltBlockVictimFatigued(blocker);
+					if (!keep_swing)
+					{
+						WP_BoltBlockVictimFatigued(blocker);
+					}
 					blocker->client->ps.saberBlocked = BLOCKED_NONE;
 					blocker->client->ps.saberBounceMove = LS_NONE;
 				}
 				else
 				{
-					WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					if (!keep_swing)
+					{
+						WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					}
 				}
 			}
 			else
 			{
-				WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				if (!keep_swing)
+				{
+					WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				}
 			}
 
 			const int force_points_used = WP_SaberBlockCost(blocker, missile, missile->currentOrigin);
@@ -1238,18 +1263,27 @@ static void G_BoltBlockMissile(gentity_t* ent, gentity_t* missile, vec3_t forwar
 			{
 				if (blocker->client->ps.forcePower < BLOCKPOINTS_FIFTEEN)
 				{
-					WP_BoltBlockVictimFatigued(blocker);
+					if (!keep_swing)
+					{
+						WP_BoltBlockVictimFatigued(blocker);
+					}
 					blocker->client->ps.saberBlocked = BLOCKED_NONE;
 					blocker->client->ps.saberBounceMove = LS_NONE;
 				}
 				else
 				{
-					WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					if (!keep_swing)
+					{
+						WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					}
 				}
 			}
 			else
 			{
-				WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				if (!keep_swing)
+				{
+					WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				}
 			}
 
 			const int force_points_used = WP_SaberBlockCost(blocker, missile, missile->currentOrigin);
@@ -1508,7 +1542,7 @@ void G_StasisMissileThink(gentity_t* missile)
 		return;
 	}
 
-	vec3_t mins, maxs;
+	vec3_t mins = { 0 }, maxs = { 0 };
 	// static: too big for the stack (C6262); filled by EntitiesInBox before it is read
 	static gentity_t* touch[MAX_GENTITIES];
 	for (int i = 0; i < 3; i++)
@@ -3837,6 +3871,13 @@ static void wp_handle_bolt_block_sje_blockpoints(gentity_t* ent, gentity_t* miss
 
 	float slop_factor = (FATIGUE_AUTOBOLTBLOCK - 6) * ((float)FORCE_LEVEL_3 - G_GetDefenseLevel(blocker)) / FORCE_LEVEL_3;
 
+	// a bolt that hits the blade during a swing is deflected, but the swing
+	// carries on (no parry / bounce / fatigue pose). A player holding attack keeps swinging too.
+	const qboolean keep_swing = (PM_SaberInAttack(blocker->client->ps.saberMove)
+		|| PM_SaberInTransitionAny(blocker->client->ps.saberMove)
+		|| PM_SaberInSpecialAttack(blocker->client->ps.torsoAnim)
+		|| ((blocker->s.number < MAX_CLIENTS || G_ControlledByPlayer(blocker))
+			&& blocker->client->pers.cmd.buttons & BUTTON_ATTACK)) ? qtrue : qfalse;
 	// Save original speed
 	const float speed = VectorNormalize(missile->s.pos.trDelta);
 
@@ -3858,10 +3899,18 @@ static void wp_handle_bolt_block_sje_blockpoints(gentity_t* ent, gentity_t* miss
 		npc_reflection = qfalse;
 	}
 
-	if (accurate_missile_blocking)
+	if (in_joystick->integer && accurate_missile_blocking)
 	{
-		saber_block_reflection = qtrue;
-		bolt_block_reflection = qfalse;
+		if (level.time - blocker->client->ps.ManualblockStartTime < 500)
+		{
+			saber_block_reflection = qfalse;
+			bolt_block_reflection = qtrue;
+		}
+		else
+		{
+			saber_block_reflection = qtrue;
+			bolt_block_reflection = qfalse;
+		}
 		npc_reflection = qfalse;
 	}
 
@@ -3886,7 +3935,7 @@ static void wp_handle_bolt_block_sje_blockpoints(gentity_t* ent, gentity_t* miss
 	{
 		vec3_t angs;
 
-		if (level.time - blocker->client->ps.ManualBlockingTime < 6000)
+		if (level.time - blocker->client->ps.ManualBlockingTime < 3000)
 		{
 			// Good block
 			vectoangles(forward, angs);
@@ -3932,16 +3981,22 @@ static void wp_handle_bolt_block_sje_blockpoints(gentity_t* ent, gentity_t* miss
 			}
 			else
 			{
-				WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+				if (!keep_swing)
+				{
+					WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+				}
 			}
 		}
 		else
 		{
-			WP_SaberBlockBolt_AMD(blocker, missile->currentOrigin, qfalse);
+			if (!keep_swing)
+			{
+				WP_SaberBlockBolt_AMD(blocker, missile->currentOrigin, qfalse);
+			}
 		}
 
 		// Block point cost
-		int cost = accurate_missile_blocking ? 2 : WP_SaberBlockCost(blocker, missile, missile->currentOrigin);
+		int cost = (in_joystick->integer && accurate_missile_blocking) ? 2 : WP_SaberBlockCost(blocker, missile, missile->currentOrigin);
 
 		if (G_GetBlockPoints(blocker) < cost)
 		{
@@ -3998,12 +4053,18 @@ static void wp_handle_bolt_block_sje_blockpoints(gentity_t* ent, gentity_t* miss
 				}
 				else
 				{
-					WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					if (!keep_swing)
+					{
+						WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					}
 				}
 			}
 			else
 			{
-				WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				if (!keep_swing)
+				{
+					WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				}
 			}
 
 			// Block point cost
@@ -4072,16 +4133,22 @@ static void wp_handle_bolt_block_sje_blockpoints(gentity_t* ent, gentity_t* miss
 				}
 				else
 				{
-					WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					if (!keep_swing)
+					{
+						WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					}
 				}
 			}
 			else
 			{
-				WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				if (!keep_swing)
+				{
+					WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				}
 			}
 
 			// Block point cost
-			int cost = accurate_missile_blocking ? 2 : WP_SaberBlockCost(blocker, missile, missile->currentOrigin);
+			int cost = (in_joystick->integer && accurate_missile_blocking) ? 2 : WP_SaberBlockCost(blocker, missile, missile->currentOrigin);
 
 			if (G_GetBlockPoints(blocker) < cost)
 			{
@@ -4210,7 +4277,6 @@ static void wp_handle_bolt_block_sje_blockpoints(gentity_t* ent, gentity_t* miss
 		missile->e_ThinkFunc = thinkF_NULL;
 	}
 }
-
 // Handles missile reflection when using FORCE POINTS (MD mode logic)
 static void wp_handle_bolt_block_sje_forcepoints(gentity_t* ent, gentity_t* missile, vec3_t forward)
 {
@@ -4262,6 +4328,14 @@ static void wp_handle_bolt_block_sje_forcepoints(gentity_t* ent, gentity_t* miss
 
 	float slop_factor = (FATIGUE_AUTOBOLTBLOCK - 6) * (static_cast<float>(FORCE_LEVEL_3) - blocker->client->ps.forcePowerLevel[FP_SABER_DEFENSE]) / FORCE_LEVEL_3;
 
+	// a bolt that hits the blade during a swing is deflected, but the swing
+	// carries on (no parry / bounce / fatigue pose). A player holding attack keeps swinging too.
+	const qboolean keep_swing = (PM_SaberInAttack(blocker->client->ps.saberMove)
+		|| PM_SaberInTransitionAny(blocker->client->ps.saberMove)
+		|| PM_SaberInSpecialAttack(blocker->client->ps.torsoAnim)
+		|| ((blocker->s.number < MAX_CLIENTS || G_ControlledByPlayer(blocker))
+			&& blocker->client->pers.cmd.buttons & BUTTON_ATTACK)) ? qtrue : qfalse;
+
 	// Save original speed
 	const float speed = VectorNormalize(missile->s.pos.trDelta);
 
@@ -4283,10 +4357,18 @@ static void wp_handle_bolt_block_sje_forcepoints(gentity_t* ent, gentity_t* miss
 		npc_reflection = qfalse;
 	}
 
-	if (accurate_missile_blocking)
+	if (in_joystick->integer && accurate_missile_blocking)
 	{
-		saber_block_reflection = qtrue;
-		bolt_block_reflection = qfalse;
+		if (level.time - blocker->client->ps.ManualblockStartTime < 500)
+		{
+			saber_block_reflection = qfalse;
+			bolt_block_reflection = qtrue;
+		}
+		else
+		{
+			saber_block_reflection = qtrue;
+			bolt_block_reflection = qfalse;
+		}
 		npc_reflection = qfalse;
 	}
 
@@ -4361,18 +4443,24 @@ static void wp_handle_bolt_block_sje_forcepoints(gentity_t* ent, gentity_t* miss
 			}
 			else
 			{
-				WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+				if (!keep_swing)
+				{
+					WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+				}
 			}
 		}
 		else
 		{
-			WP_SaberBlockBolt_AMD(blocker, missile->currentOrigin, qfalse);
+			if (!keep_swing)
+			{
+				WP_SaberBlockBolt_AMD(blocker, missile->currentOrigin, qfalse);
+			}
 		}
 
 		// Force point cost
 		int force_points_used_used = 0;
 
-		if (accurate_missile_blocking)
+		if (in_joystick->integer && accurate_missile_blocking)
 		{
 			force_points_used_used = 2;
 		}
@@ -4455,18 +4543,24 @@ static void wp_handle_bolt_block_sje_forcepoints(gentity_t* ent, gentity_t* miss
 				}
 				else
 				{
-					WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					if (!keep_swing)
+					{
+						WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					}
 				}
 			}
 			else
 			{
-				WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				if (!keep_swing)
+				{
+					WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				}
 			}
 
 			// Force point cost
 			int force_points_used_used = 0;
 
-			if (accurate_missile_blocking)
+			if (in_joystick->integer && accurate_missile_blocking)
 			{
 				force_points_used_used = 2;
 			}
@@ -4554,12 +4648,18 @@ static void wp_handle_bolt_block_sje_forcepoints(gentity_t* ent, gentity_t* miss
 				}
 				else
 				{
-					WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					if (!keep_swing)
+					{
+						WP_SaberBounceDirection(blocker, missile->currentOrigin, qfalse);
+					}
 				}
 			}
 			else
 			{
-				WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				if (!keep_swing)
+				{
+					WP_SaberBlockBolt_MD(blocker, missile->currentOrigin, qfalse);
+				}
 
 				if ((d_blockinfo->integer || g_DebugSaberCombat->integer) &&
 					(blocker->NPC && !G_ControlledByPlayer(blocker)))
@@ -4570,14 +4670,7 @@ static void wp_handle_bolt_block_sje_forcepoints(gentity_t* ent, gentity_t* miss
 
 			int force_points_used_used = 0;
 
-			if (accurate_missile_blocking)
-			{
-				force_points_used_used = 2;
-			}
-			else
-			{
-				force_points_used_used = WP_SaberBlockCost(blocker, missile, missile->currentOrigin);
-			}
+			force_points_used_used = WP_SaberBlockCost(blocker, missile, missile->currentOrigin);
 
 			if (blocker->client->ps.forcePower < force_points_used_used)
 			{

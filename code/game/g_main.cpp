@@ -205,6 +205,7 @@ cvar_t* g_fighterArcade; // (2026-10-13) fighters: 1 = responsive flight, 0 = th
 cvar_t* g_fighterTurnScale; // (2026-10-13) fighters, g_fighterArcade 1: top turn rate = turningSpeed x this x 12 deg/s
 
 cvar_t* g_char_model;
+cvar_t* g_transitionSaberFix;
 cvar_t* g_char_skin_head;
 cvar_t* g_char_skin_torso;
 cvar_t* g_char_skin_legs;
@@ -268,7 +269,7 @@ cvar_t* g_VaderBreath;
 cvar_t* com_outcast;
 
 cvar_t* g_gundismemberment;
-cvar_t* g_update7firststartup;
+cvar_t* g_update8firststartup;
 
 cvar_t* g_totgfirststartup;
 
@@ -277,6 +278,7 @@ cvar_t* g_allowgunnerbash;
 cvar_t* g_noAutoFollow;
 
 cvar_t* g_AllowLedgeGrab;
+cvar_t* g_saberscanstickinwall;
 cvar_t* g_saberscanstickinenemy; // 0 = thrown sabers never stick in an enemy's body
 cvar_t* g_candojumpdash;         // 0 = no air (jump) dash
 cvar_t* g_candodoublejump;       // 0 = no double jump
@@ -820,6 +822,7 @@ static void G_InitCvars()
 	g_fighterTurnScale = gi.cvar("g_fighterTurnScale", "1.6", CVAR_ARCHIVE); // (2026-10-13)
 
 	g_char_model = gi.cvar("g_char_model", "jedi_hm", CVAR_ARCHIVE | CVAR_SAVEGAME | CVAR_NORESTART);
+	g_transitionSaberFix = gi.cvar("g_transitionSaberFix", "1", CVAR_ARCHIVE); // no empty second saber after a level change (T-pose)
 	g_char_skin_head = gi.cvar("g_char_skin_head", "head_a1", CVAR_ARCHIVE | CVAR_SAVEGAME | CVAR_NORESTART);
 	g_char_skin_torso = gi.cvar("g_char_skin_torso", "torso_a1", CVAR_ARCHIVE | CVAR_SAVEGAME | CVAR_NORESTART);
 	g_char_skin_legs = gi.cvar("g_char_skin_legs", "lower_a1", CVAR_ARCHIVE | CVAR_SAVEGAME | CVAR_NORESTART);
@@ -890,7 +893,7 @@ static void G_InitCvars()
 
 	g_gundismemberment = gi.cvar("g_gundismemberment", "0", CVAR_ARCHIVE | CVAR_SAVEGAME | CVAR_NORESTART);
 
-	g_update7firststartup = gi.cvar("g_update7firststartup", "1", CVAR_ARCHIVE);
+	g_update8firststartup = gi.cvar("g_update8firststartup", "1", CVAR_ARCHIVE);
 
 	g_totgfirststartup = gi.cvar("g_totgfirststartup", "1", 0);
 
@@ -900,7 +903,8 @@ static void G_InitCvars()
 
 	g_AllowLedgeGrab = gi.cvar("g_allowledgegrab", "0", CVAR_ARCHIVE);
 	// internal move locks (no menu entries): 1 = allowed, 0 = turned off
-	g_saberscanstickinenemy = gi.cvar("g_saberscanstickinenemy", "1", CVAR_ARCHIVE);
+	g_saberscanstickinenemy = gi.cvar("g_saberscanstickinenemy", "0", CVAR_ARCHIVE);
+	g_saberscanstickinwall = gi.cvar("g_saberscanstickinwall", "0", CVAR_ARCHIVE);
 	g_candojumpdash = gi.cvar("g_candojumpdash", "1", CVAR_ARCHIVE);
 	g_candodoublejump = gi.cvar("g_candodoublejump", "1", CVAR_ARCHIVE);
 
@@ -998,7 +1002,7 @@ static void G_InitCvars()
 
 	g_AllowSmashDown = gi.cvar("g_allowsmashdown", "0", CVAR_ARCHIVE);
 
-	g_NPCAnimationStyle = gi.cvar("g_npcanimationstyle", "0", CVAR_ARCHIVE);
+	g_NPCAnimationStyle = gi.cvar("g_npcanimationstyle", "0", CVAR_ROM);
 }
 
 /*

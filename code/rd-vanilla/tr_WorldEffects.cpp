@@ -690,6 +690,28 @@ public:
 
 		// all this piece of code does really is fill in the bool "SWeatherZone::mMarkedOutside", plus the mPointCache[] for each zone,
 		//	so we can diskload those. Maybe.
+		// No brush in this map has inside/outside contents (no shader of the map carries those flags):
+		// the scan below would test every 32-unit cell of the weather zones (with no zones, the whole
+		// map: millions of point checks - the game froze for seconds, sound looping, the first time
+		// weather was switched on) and mark nothing. Same result, at once.
+		{
+			bool anyInsideOutside = false;
+			for (int i = 0; i < tr.world->numShaders; i++)
+			{
+				if (tr.world->shaders[i].contentFlags & (CONTENTS_INSIDE | CONTENTS_OUTSIDE))
+				{
+					anyInsideOutside = true;
+					break;
+				}
+			}
+			if (!anyInsideOutside)
+			{
+				mCacheInit = true;
+				SWeatherZone::mMarkedOutside = false;		// Assume All Is Outside, Except Solid
+				return;
+			}
+		}
+
 		fileHandle_t f = ReadCachedWeatherFile();
 		if (f)
 		{
@@ -1660,6 +1682,36 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 		return;
 	}
 
+	// The bare "r_weather" command (the menu's: "weather clear; wait 100; r_weather") or a number:
+	// the r_weather cvar picks the preset. 5 and 6 are the named fog commands below (they had no
+	// preset of their own here, so heavy rain fog and fog did nothing), and -1 is the menu's "Off":
+	// the menu has already cleared the weather, so there is nothing to add (it printed the list of
+	// valid commands, as if the value were wrong).
+	//
+	// The preset: a number given with the command is used as it is - a map's Weather/<mapname>.cfg ("r_weather 6",
+	// exec'd at map start). It used to read the r_weather cvar instead, but "r_weather 6" runs the r_weather command,
+	// which does not set the cvar, and SV_Map_ sets the cvar to 0 for every new map: every map file became "clear".
+	// The bare command uses the cvar. Named commands (a map's "rain", "fog" ...) have no preset (-1): before, the
+	// cvar turned them into its own preset, or into "clear" with r_weather 0.
+	int spPreset = -1;
+	if (!token[0] || (token[0] >= '0' && token[0] <= '9') || token[0] == '-')
+	{
+		if (g_Weather->integer < 0 || token[0] == '-')
+		{
+			COM_EndParseSession();
+			return;
+		}
+		spPreset = token[0] ? atoi(token) : g_Weather->integer;
+		if (spPreset == 5)
+		{
+			token = "heavyrainfog";
+		}
+		else if (spPreset == 6)
+		{
+			token = "fog";
+		}
+	}
+
 	// Clear - Removes All Particle Clouds And Wind Zones
 	//----------------------------------------------------
 	if (Q_stricmp(token, "clear") == 0)
@@ -2108,14 +2160,14 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 		// preset below and wiped the lava, fog and wind the map had already set up. Ignore them; the
 		// presets stay for the console/menu path ("r_weather", "weather <number>").
 		//----------------------------------------------------
-		if (g_Weather->integer == 0 && token[0] && !(token[0] >= '0' && token[0] <= '9') && token[0] != '-')
+		if (spPreset < 0)
 		{
 			ri.Printf(PRINT_DEVELOPER, "RE_WorldEffectCommand: unknown command '%s' ignored\n", token);
 		}
 
 		// Clear - Removes All Particle Clouds And Wind Zones
 		//----------------------------------------------------
-		else if (g_Weather->integer == 0)
+		else if (spPreset == 0)
 		{
 			for (int p = 0; p < mParticleClouds.size(); p++)
 			{
@@ -2129,7 +2181,7 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 
 		// Basic Wind
 		//------------
-		else if (g_Weather->integer == 8)
+		else if (spPreset == 8)
 		{
 			if (mWindZones.full())
 			{
@@ -2142,7 +2194,7 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 
 		// Create A Rain Storm
 		//---------------------
-		else if (g_Weather->integer == 2)
+		else if (spPreset == 2)
 		{
 			if (mParticleClouds.full())
 			{
@@ -2164,7 +2216,7 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 
 		// Create A Rain Storm
 		//---------------------
-		else if (g_Weather->integer == 7)
+		else if (spPreset == 7)
 		{
 			if (mParticleClouds.full())
 			{
@@ -2193,7 +2245,7 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 
 		// Create A Snow Storm
 		//---------------------
-		else if (g_Weather->integer == 1)
+		else if (spPreset == 1)
 		{
 			if (mParticleClouds.full())
 			{
@@ -2210,7 +2262,7 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 
 		// Create A lava Storm
 		//---------------------
-		else if (g_Weather->integer == 3)
+		else if (spPreset == 3)
 		{
 			if (mParticleClouds.full())
 			{
@@ -2227,7 +2279,7 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 
 		// Create A Some stuff
 		//---------------------
-		else if (g_Weather->integer == 9)
+		else if (spPreset == 9)
 		{
 			if (mParticleClouds.full())
 			{
@@ -2256,7 +2308,7 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 
 		// Create A Sand Storm
 		//---------------------
-		else if (g_Weather->integer == 4)
+		else if (spPreset == 4)
 		{
 			if (mParticleClouds.full())
 			{
@@ -2284,7 +2336,7 @@ void RE_WorldEffectCommand(const char* command) // vanilla sp
 
 		// Create A Sand Storm
 		//---------------------
-		else if (g_Weather->integer == 4)
+		else if (spPreset == 4)
 		{
 			if (mParticleClouds.full())
 			{
