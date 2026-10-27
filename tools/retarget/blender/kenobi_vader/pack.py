@@ -10,6 +10,7 @@ NPC = '\n'.join(NPC_SRC[a:b + 1])
 PARTS = {  # shader name -> (texture prefix, size)
     'body': ('Body', 2048), 'gloves': ('Gloves', 1024), 'helmet': ('Helmet', 2048), 'cape': ('Cape', 1024),
     'innercape': ('Duster', 1024), 'head': ('Head', 2048), 'eyes': ('Eyes', 512)}
+ROUGH = {'body': 0.7, 'gloves': 0.72, 'helmet': 0.55, 'innercape': 0.9, 'cape': 0.95}
 GLOW = {  # shader name -> (emissive file, glow gain): emissive maps get their own additive glow stage
     'default': {'body': ('Default/Body_Emissive.png', 1.0)},
     'broken': {'body': ('Default/Body_Emissive.png', 1.0), 'helmet': ('Damaged/Helmet_Emissive.png', 2.2),
@@ -37,11 +38,14 @@ def build(name, variant, glb_dir):
         nrm = src + pre + '_Normal_OpenGL.png'
         Image.open(nrm).convert('RGB').resize((sz, sz), Image.LANCZOS).save(os.path.join(od, k + '_n.png'), optimize=True)
         r = load(src + pre + '_Roughness.png', sz, 'L')
+        # glossier, BF2-style look: leather suit and gloves with a sheen, mirror-like helmet and plates
+        r = np.clip(r * ROUGH.get(k, 1.0), 0.08, 1.0)
         m = load(src + pre + '_Metallic.png', sz, 'L') if os.path.exists(src + pre + '_Metallic.png') else np.zeros_like(r)
         ao = load(src + pre + '_Mixed_AO.png', sz, 'L') if os.path.exists(src + pre + '_Mixed_AO.png') else np.ones_like(r)
         ao = 0.5 + 0.5 * ao                 # softened, as on the other BF2 Vaders
         Image.fromarray((np.dstack([r, m, ao]) * 255).astype(np.uint8)).save(os.path.join(od, k + '_rmo.png'), optimize=True)
-        cull = '\tcull disable\n' if k in ('cape', 'innercape') else ''
+        # capes are single sheets; the broken helmet is open, so its inside must draw too
+        cull = '\tcull disable\n' if k in ('cape', 'innercape') or (k == 'helmet' and variant == 'broken') else ''
         skin = '\t\tskin 1.0 0.45 0.3 0.6\n' if k == 'head' else ''
         glow = ''
         g = GLOW[variant].get(k)

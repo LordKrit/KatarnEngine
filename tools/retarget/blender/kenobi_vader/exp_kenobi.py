@@ -49,14 +49,16 @@ for c in isl:
     if mn[2] >= 1.32 and mx[2] <= 1.56 and ax <= 0.31 and ax > 0.11: armor.extend(c.tolist())
 armor = set(armor)
 print('ARMOR verts', len(armor))
+KEEP_SOURCE_ARMOUR = True     # Kenobi: BF2's own armour weights (pads hang at the sides of the shoulders)
+HID_X = 0.13 if KEEP_SOURCE_ARMOUR else 0.32   # undersuit removal: only behind the chest plate
 sp = bo.vertex_groups.get('Spine2') or bo.vertex_groups.new(name='Spine2')
-for i in armor:
+for i in ([] if KEEP_SOURCE_ARMOUR else armor):
     for ge in list(bo.data.vertices[i].groups): bo.vertex_groups[ge.group].add([i], 0.0, 'REPLACE')
     sp.add([i], 1.0, 'REPLACE')
 def _sm(a, b, x):
     t = min(1, max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t)
 pads = 0
-for i in armor:
+for i in ([] if KEEP_SOURCE_ARMOUR else armor):
     x = P[i][0]; t = _sm(0.14, 0.22, abs(x))
     if t <= 0: continue
     side = 'Left' if x > 0 else 'Right'
@@ -67,7 +69,7 @@ for i in armor:
     bo.data.vertices[i].co = bo.matrix_world.inverted() @ (Vector(P[i]) + nrm.normalized() * 0.006 * t)
 print('PAD verts', pads)
 mwR = R.matrix_world; mi = bo.matrix_world.inverted(); moved = 0
-for side in ('Left', 'Right'):
+for side in (() if KEEP_SOURCE_ARMOUR else ('Left', 'Right')):
     a = mwR @ R.data.bones[side + 'Arm'].head_local; b = mwR @ R.data.bones[side + 'ForeArm'].head_local
     d = (b - a); d.normalize()
     for i, v in enumerate(bo.data.vertices):

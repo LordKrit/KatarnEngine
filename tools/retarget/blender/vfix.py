@@ -12,7 +12,7 @@ hidden=set()
 for v in bm.verts:
     if v.index in armor: continue
     p=mwb@v.co
-    if p.z<1.30 or abs(p.x)>0.32: continue
+    if p.z<1.30 or abs(p.x)>globals().get('HID_X',0.32): continue
     gs=bo.data.vertices[v.index].groups
     if gs:
         top=max(gs,key=lambda g:g.weight)
