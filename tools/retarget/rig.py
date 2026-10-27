@@ -454,11 +454,26 @@ class NewSkeleton:
             while st:
                 j = st.pop(); out.append(j); st.extend(kids.get(j, []))
             return out
+        # Hands apart, each arm keeps the animation's own extension (shoulder-to-hand distance as a share
+        # of the arm's length), so elbows bend exactly as animated whatever the model's arm length.
+        # (Taking the hand offset in absolute units straightened short-armed models' elbows to ~0 deg:
+        # stiff arms at idle.) Hands together (two-handed grips), both go to the same point measured
+        # from between the shoulders, scaled by arm length, so the grip still meets.
+        def reach(Pm, sd):
+            return (np.linalg.norm(Pm[:, bi[sd + 'radius']] - Pm[:, bi[sd + 'humerus']], axis=1) +
+                    np.linalg.norm(Pm[:, bi[sd + 'hand']] - Pm[:, bi[sd + 'radius']], axis=1))
+        k_arm = 0.5 * (reach(P, 'l') / reach(Pmd, 'l') + reach(P, 'r') / reach(Pmd, 'r'))
+        dh = np.linalg.norm(Pmd[:, bi['lhand']] - Pmd[:, bi['rhand']], axis=1)
+        together = np.clip((14.0 - dh) / 6.0, 0, 1)[:, None]
         for side in 'lr':
             h, r, w = bi[side + 'humerus'], bi[side + 'radius'], bi[side + 'hand']
-            T = mid_m + (Pmd[:, w] - mid_a)
             S = P[:, h]; E = P[:, r]; W = P[:, w]
             a = np.linalg.norm(E - S, axis=1); b = np.linalg.norm(W - E, axis=1)
+            vmd = Pmd[:, w] - Pmd[:, h]; lmd = np.linalg.norm(vmd, axis=1)
+            frac = lmd / np.maximum(reach(Pmd, side), 1e-6)
+            T_one = S + vmd / np.maximum(lmd, 1e-9)[:, None] * ((a + b) * frac)[:, None]
+            T_two = mid_m + (Pmd[:, w] - mid_a) * k_arm[:, None]
+            T = T_one + (T_two - T_one) * together
             d = T - S; dl = np.linalg.norm(d, axis=1)
             dl2 = np.clip(dl, np.abs(a - b) + 1e-3, a + b - 1e-3)
             dn = d / np.maximum(dl, 1e-9)[:, None]
