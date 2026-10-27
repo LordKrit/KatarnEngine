@@ -140,6 +140,11 @@ cvar_t* r_meshClothHilt;
 cvar_t* r_meshClothHiltLen;
 cvar_t* r_meshClothHiltBack;
 cvar_t* r_meshClothHiltRadius;
+cvar_t* r_meshClothLodDist;
+cvar_t* r_meshClothCullDist;
+cvar_t* r_meshClothSleep;
+cvar_t* r_meshClothStats;
+cvar_t* r_meshClothWalls;
 cvar_t* r_shadowRange;
 cvar_t* r_flares;
 cvar_t* r_nobind;
@@ -1625,6 +1630,7 @@ static consoleCommand_t	commands[] = {
 	{ "imagecacheinfo",		RE_RegisterImages_Info_f },
 	{ "modellist",			R_Modellist_f },
 	{ "meshcloth_blast",	R_MeshClothBlast_f },
+	{ "meshcloth_reload",	R_MeshClothLoadConfig },
 	{ "modelcacheinfo",		RE_RegisterModels_Info_f },
 	{ "r_fogDistance",		R_FogDistance_f },
 	{ "r_fogColor",			R_FogColor_f },
@@ -1797,6 +1803,11 @@ static void R_Register()
 	r_meshClothHiltLen = ri.Cvar_Get("r_meshClothHiltLen", "10", CVAR_ARCHIVE);
 	r_meshClothHiltBack = ri.Cvar_Get("r_meshClothHiltBack", "4", CVAR_ARCHIVE);
 	r_meshClothHiltRadius = ri.Cvar_Get("r_meshClothHiltRadius", "1.8", CVAR_ARCHIVE);
+	r_meshClothLodDist = ri.Cvar_Get("r_meshClothLodDist", "800", CVAR_ARCHIVE);
+	r_meshClothCullDist = ri.Cvar_Get("r_meshClothCullDist", "3000", CVAR_ARCHIVE);
+	r_meshClothSleep = ri.Cvar_Get("r_meshClothSleep", "1", CVAR_ARCHIVE);
+	r_meshClothStats = ri.Cvar_Get("r_meshClothStats", "0", CVAR_ARCHIVE);
+	r_meshClothWalls = ri.Cvar_Get("r_meshClothWalls", "1", CVAR_ARCHIVE);
 	r_shadowRange = ri.Cvar_Get("r_shadowRange", "1000", CVAR_ARCHIVE_ND);
 	/*
 	Ghoul2 Insert Start

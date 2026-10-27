@@ -92,7 +92,28 @@ struct mcParams_t {
 	int		floor;			// 1: floorPt / floorN hold the floor plane under the character (world)
 	float	floorPt[3];
 	float	floorN[3];
+	int		numWalls;		// walls near the character (world planes the cloth stays in front of)
+	float	wallPt[8][3];
+	float	wallN[8][3];
+	float	viewDist;		// distance from the camera (units), for LOD
+	float	lodDist;		// beyond this: half the substeps, no self-collision (0 = off)
+	float	cullDist;		// beyond this: no simulation, the animated pose is drawn (0 = off)
+	int		sleep;			// 1: cloth at rest on a still character stops simulating until something moves
+	int		lite;			// internal (set by the LOD)
 };
+
+// Counters since the last MC_TakeStats call (r_meshClothStats).
+struct mcStats_t {
+	int		instances = 0;		// characters with cloth state
+	int		simulated = 0;		// cloth simulations run (one per character per frame)
+	int		steps = 0;			// 16 ms steps taken
+	int		sleepingSteps = 0;	// steps skipped because the cloth was asleep
+	int		sleeping = 0;		// simulations of sleeping cloth
+	int		lod = 0;			// simulations at reduced detail
+	int		culled = 0;			// frames a character's cloth was too far to simulate
+	int		usec = 0;			// time spent simulating
+};
+void MC_TakeStats( mcStats_t *out );
 
 // Returns the 3x4 skinning matrix (model space) for a skeleton bone index.
 typedef const float ( *( *mcBoneFn_t )( void *ctx, int boneIndex ) )[4];

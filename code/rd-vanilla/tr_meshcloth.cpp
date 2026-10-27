@@ -29,6 +29,7 @@ Per character instance:
 #include <cstring>
 #include <cstdlib>
 #include <algorithm>
+#include <chrono>
 
 #ifdef MC_DEBUG
 #include <cstdlib>
@@ -52,6 +53,9 @@ const float	MC_TWIST_FREE	= 540.0f;	// deg/s of attachment turn about up the clo
 const float	MC_FLOOR_GAP	= 0.8f;		// units cloth keeps above the floor
 const float	MC_WELD			= 0.01f;
 const int	MC_SETTLE_STEPS	= 40;
+const int	MC_SLEEP_STEPS	= 30;		// ~0.5 s of stillness before a cloth sleeps
+const float	MC_SLEEP_MOVE	= 0.05f;	// units per step that counts as still (breathing idles stay under it)
+const float	MC_SLEEP_WAKE	= 0.4f;		// units the pose may drift from where the cloth fell asleep before it wakes
 const float	MC_DEFAULT_SPIN	= 0.0f;		// degrees/s, 0 = no spin limit unless the config sets one		// 0.64 s of settling when a character appears	// bind-pose distance that counts as the same point
 
 enum mcRuleType_t { MC_RULE_ABOVE, MC_RULE_NEAR, MC_RULE_SEGMENT };
@@ -163,7 +167,12 @@ struct mcInstance_t {
 	std::vector<float>	offPrev, offCur;	// cloth offset from the animation after the last two steps (for drawing between steps)
 	std::vector<float>	pPrevStep, pCurStep;	// world positions after the last two steps
 	vec3_t				oPrevStep, oCurStep;	// character origin at those two steps
+	std::vector<mcCapsule_t>	capsPrev;	// last frame's body capsules (world): swept through the substeps
+	int					stillSteps = 0;	// steps in a row with nothing moving (sleep after MC_SLEEP_STEPS)
+	std::vector<float>	sleepPose;		// the animated pose when the cloth fell asleep
 };
+
+mcStats_t g_stats;
 
 std::vector<mcDef_t>										g_defs;
 std::unordered_map<const mdxmSurface_t *, mcSurfEntry_t>	g_surfs;
@@ -1038,6 +1047,8 @@ static void EdgeCollide( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t
 }
 
 void Reset( mcInstance_t *in, int time ) {
+	in->stillSteps = 0;
+	in->sleepPose.clear();
 #ifdef MC_DEBUG
 	fprintf( stderr, "MC RESET at %d\n", time );
 #endif
@@ -1220,26 +1231,32 @@ static void RotateFree( const mcGroup_t *g, mcInstance_t *in, const vec3_t c, co
 }
 
 // keep free cloth above the floor under the character (plane from a trace by the renderer)
-static void FloorCollide( const mcGroup_t *g, mcInstance_t *in, const mcParams_t *prm ) {
-	if ( !prm->floor ) return;
+// one world plane (floor or wall): free cloth stays in front of it, with friction
+static void PlaneCollide( const mcGroup_t *g, mcInstance_t *in, const mcParams_t *prm, const float *pt, const float *pn ) {
 	for ( int p = 0; p < g->numParticles; p++ ) {
 		if ( g->freedom[p] <= 0.0f ) continue;
 		float *pp = &in->p[p * 3], *pv = &in->prev[p * 3];
 		vec3_t r;
-		mcSub( pp, prm->floorPt, r );
-		const float d = mcDot( r, prm->floorN ) - MC_FLOOR_GAP;
+		mcSub( pp, pt, r );
+		const float d = mcDot( r, pn ) - MC_FLOOR_GAP;
 		if ( d >= 0.0f ) continue;
-		mcMA( pp, -d, prm->floorN, pp );
-		// friction: lose most of the sliding along the floor
+		mcMA( pp, -d, pn, pp );
+		// friction: lose most of the sliding along the surface
 		vec3_t v, vn;
 		mcSub( pp, pv, v );
-		mcScale( prm->floorN, mcDot( v, prm->floorN ), vn );
+		mcScale( pn, mcDot( v, pn ), vn );
 		vec3_t vt;
 		mcSub( v, vn, vt );
-		const float fk = Clamp01( 0.3f + g->fricK[p] * prm->frictionScale );	// floors grip a little more than bodies
+		const float fk = Clamp01( 0.3f + g->fricK[p] * prm->frictionScale );	// floors and walls grip a little more than bodies
 		mcMA( pv, fk, vt, pv );
-		if ( mcDot( v, prm->floorN ) < 0.0f ) mcAdd( pv, vn, pv );
+		if ( mcDot( v, pn ) < 0.0f ) mcAdd( pv, vn, pv );
 	}
+}
+
+static void FloorCollide( const mcGroup_t *g, mcInstance_t *in, const mcParams_t *prm ) {
+	if ( prm->floor ) PlaneCollide( g, in, prm, prm->floorPt, prm->floorN );
+	const int nw = prm->numWalls < 0 ? 0 : ( prm->numWalls > 8 ? 8 : prm->numWalls );
+	for ( int w = 0; w < nw; w++ ) PlaneCollide( g, in, prm, prm->wallPt[w], prm->wallN[w] );
 }
 
 void SpinLimit( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &target, int timeMs, float defSpin ) {
@@ -1393,7 +1410,12 @@ void SpinLimit( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &
 // constraint pass each keep the fabric from stretching or wobbling far
 // better than one long step with many passes.
 void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFrom, const std::vector<float> &tgtTo,
-		   const mcCapsule_t *caps, int ncaps, const mcParams_t *prm ) {
+		   const mcCapsule_t *caps, int ncaps, const mcParams_t *prm, const mcCapsule_t *capsFrom = nullptr ) {
+	// body capsules swept through the substeps (from where they were at the start of this step to
+	// where they are at its end): a fast saber arm moves several units per 16 ms step, and checking
+	// only its end position lets it jump clean through the cape
+	mcCapsule_t capsSub[40];
+	if ( ncaps > 40 ) ncaps = 40;
 	g_mcLiftOverride = prm->liftLimit < -1.5f ? -2.0f : prm->liftLimit;
 	const int sub = prm->iterations < 1 ? 1 : ( prm->iterations > 16 ? 16 : prm->iterations );
 	const float h = MC_DT / sub;
@@ -1489,12 +1511,23 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 				mcMA( pp, k, d, pp );
 			}
 		}
-		SolveConstraints( g, in, caps, ncaps, bendScale, h, prm->xpbd, prm->xpbdIters );
+		const mcCapsule_t *cs = caps;
+		if ( capsFrom ) {
+			for ( int c = 0; c < ncaps; c++ ) {
+				capsSub[c] = caps[c];
+				for ( int k = 0; k < 3; k++ ) {
+					capsSub[c].a[k] = capsFrom[c].a[k] + ( caps[c].a[k] - capsFrom[c].a[k] ) * t1;
+					capsSub[c].b[k] = capsFrom[c].b[k] + ( caps[c].b[k] - capsFrom[c].b[k] ) * t1;
+				}
+			}
+			cs = capsSub;
+		}
+		SolveConstraints( g, in, cs, ncaps, bendScale, h, prm->xpbd, prm->xpbdIters );
 		FloorCollide( g, in, prm );
 		ContactVelocity( g, in, prm->frictionScale );
 	}
 	in->impulse.clear();
-	SelfCollide( g, in );
+	if ( !prm->lite ) SelfCollide( g, in );
 }
 
 void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t origin, const vec3_t axis[3],
@@ -1525,7 +1558,7 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		mcSub( &target[0], &in->targetPrev[0], d );
 		if ( dt < 0 || dt > MC_STALE_MS || mcLen( d ) > MC_TELEPORT ) in->active = false;
 	}
-	mcCapsule_t nearCaps[32];
+	mcCapsule_t nearCaps[32], nearPrev[32], stepFrom[32], stepTo[32];
 	mcCapsule_t useCaps[40];
 	int nuse = 0;
 	for ( int c = 0; c < ncaps && nuse < 40; c++ ) {
@@ -1533,7 +1566,28 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		useCaps[nuse] = caps[c];
 		nuse++;
 	}
-	const int nnear = CullCapsules( g, target, useCaps, nuse, nearCaps, 32 );
+	// last frame's capsules, if they line up with this frame's (same set of bones)
+	const bool sweep = in->active && (int)in->capsPrev.size() == nuse && !MCDBG_OFF( "NOSWEEP" );
+	int nnear = 0;
+	for ( int c = 0; c < nuse && nnear < 32; c++ ) {
+		// keep a capsule if the cloth is near where it is now or where it was last frame
+		bool keep = CullCapsules( g, target, &useCaps[c], 1, &nearCaps[nnear], 1 ) == 1;
+		if ( !keep && sweep ) keep = CullCapsules( g, target, &in->capsPrev[c], 1, &nearCaps[nnear], 1 ) == 1;
+		if ( !keep ) continue;
+		nearCaps[nnear] = useCaps[c];
+		nearPrev[nnear] = sweep ? in->capsPrev[c] : useCaps[c];
+		nnear++;
+	}
+	in->capsPrev.assign( useCaps, useCaps + nuse );
+	auto capsAt = [&]( float t, mcCapsule_t *o ) {
+		for ( int c = 0; c < nnear; c++ ) {
+			o[c] = nearCaps[c];
+			for ( int k = 0; k < 3; k++ ) {
+				o[c].a[k] = nearPrev[c].a[k] + ( nearCaps[c].a[k] - nearPrev[c].a[k] ) * t;
+				o[c].b[k] = nearPrev[c].b[k] + ( nearCaps[c].b[k] - nearPrev[c].b[k] ) * t;
+			}
+		}
+	};
 	if ( !in->active ) {
 		in->target.assign( target.begin(), target.end() );
 		Reset( in, timeMs );
@@ -1633,6 +1687,7 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 			std::vector<float> &from = in->scratchFrom, &to = in->scratchTo;
 			if ( in->simTarget.size() != target.size() ) in->simTarget.assign( in->targetPrev.begin(), in->targetPrev.end() );
 			to.assign( in->simTarget.begin(), in->simTarget.end() );
+			float tPrev = 0.0f;
 			for ( int s = 0; s < steps; s++ ) {
 				// each step ends at a fixed 16 ms tick of the simulation clock;
 				// the animated pose is sampled at that exact time, so the cloth
@@ -1642,7 +1697,32 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 				from.swap( to );
 				to.resize( target.size() );
 				for ( size_t i = 0; i < target.size(); i++ ) to[i] = in->targetPrev[i] + ( target[i] - in->targetPrev[i] ) * t1;
-				Step( g, in, from, to, nearCaps, nnear, prm );
+				// asleep: nothing moves (still pose, no wind, no blast, cloth at rest), so skip the work
+				bool still = in->stillSteps >= MC_SLEEP_STEPS && prm->sleep && in->impulse.empty()
+					&& mcDot( prm->wind, prm->wind ) == 0.0f;
+				if ( still ) {
+					if ( in->sleepPose.size() != to.size() ) in->sleepPose.assign( to.begin(), to.end() );
+					for ( size_t i = 0; i < to.size() && still; i++ ) if ( fabsf( to[i] - in->sleepPose[i] ) > MC_SLEEP_WAKE ) still = false;
+					if ( !still ) { in->stillSteps = 0; in->sleepPose.clear(); }
+				}
+				if ( still ) {
+					g_stats.sleepingSteps++;
+				} else {
+					capsAt( tPrev, stepFrom );
+					capsAt( t1, stepTo );
+					Step( g, in, from, to, stepTo, nnear, prm, sweep ? stepFrom : nullptr );
+					g_stats.steps++;
+					// how far the cloth moved this step, and the pose: counts toward sleep
+					float mv = 0.0f;
+					if ( in->pCurStep.size() == in->p.size() )
+						for ( size_t i = 0; i < in->p.size(); i++ ) { const float d = fabsf( in->p[i] - in->pCurStep[i] ); if ( d > mv ) mv = d; }
+					for ( size_t i = 0; i < to.size() && mv <= MC_SLEEP_MOVE; i++ ) { const float d = fabsf( to[i] - from[i] ); if ( d > mv ) mv = d; }
+					in->stillSteps = mv <= MC_SLEEP_MOVE ? in->stillSteps + 1 : 0;
+#ifdef MC_DEBUG
+					if ( getenv( "MC_SLEEPDBG" ) ) printf( "sleepdbg t=%d mv %.3f still %d\n", timeMs, mv, in->stillSteps );
+#endif
+				}
+				tPrev = t1;
 				in->offPrev.swap( in->offCur );
 				in->offCur.resize( to.size() );
 				for ( size_t i = 0; i < to.size(); i++ ) in->offCur[i] = in->p[i] - to[i];
@@ -1827,6 +1907,30 @@ void Simulate( const mcGroup_t *g, mcInstance_t *in, int timeMs, const vec3_t or
 		in->active = false;
 	}
 
+	// the drawn surface is blended from the simulation and the animation, so it can still reach past
+	// a wall or the floor between grid points: keep the drawn free points in front of them too
+	{
+		const int nw = prm->numWalls < 0 ? 0 : ( prm->numWalls > 8 ? 8 : prm->numWalls );
+		for ( int k = -1; k < nw; k++ ) {
+			if ( k < 0 && !prm->floor ) continue;
+			const float *pt = k < 0 ? prm->floorPt : prm->wallPt[k], *pn = k < 0 ? prm->floorN : prm->wallN[k];
+			for ( int d = 0; d < g->numDraw; d++ ) {
+				if ( g->drawFree[d] <= 0.0f ) continue;
+				vec3_t r;
+				mcSub( &out[d * 3], pt, r );
+				const float dist = mcDot( r, pn ) - MC_FLOOR_GAP * 0.5f;
+				if ( dist < 0.0f ) mcMA( &out[d * 3], -dist * Clamp01( g->drawFree[d] * 4.0f ), pn, &out[d * 3] );
+			}
+		}
+	}
+#ifdef MC_DEBUG
+	if ( getenv( "MC_WALLDBG" ) ) {
+		float my = -1e9f, md = -1e9f;
+		for ( int p = 0; p < g->numParticles; p++ ) if ( in->p[p * 3 + 2] < 30.0f && g->freedom[p] > 0.0f ) my = std::max( my, in->p[p * 3 + 1] );
+		for ( int d = 0; d < g->numDraw; d++ ) if ( out[d * 3 + 2] < 30.0f ) md = std::max( md, out[d * 3 + 1] );
+		printf( "walldbg t=%d particles y max %.1f drawn %.1f walls %d\n", timeMs, my, md, prm->numWalls );
+	}
+#endif
 	// results back into model space, with normals from the moving triangles
 	std::vector<float> &nw = in->scratchN;
 	DrawNormals( g, out, nw );
@@ -1990,10 +2094,27 @@ void MC_Apply( const void *surfacePtr, const void *instanceKey, int timeMs,
 
 	// the first cloth surface drawn this frame simulates the whole model;
 	// the others (and shadow/mirror passes) reuse the result
+	// far away: nothing worth simulating can be seen. Leave the surface in its animated pose and let
+	// the cloth settle afresh (hidden by the distance) when the character comes back into range.
+	if ( prm->cullDist > 0.0f && prm->viewDist > prm->cullDist ) {
+		if ( in->outTime != timeMs ) { g_stats.culled++; in->outTime = timeMs; }
+		in->active = false;
+		return;
+	}
 	if ( in->outTime != timeMs || !in->active ) {
 		mcParams_t pt = *prm;
 		pt.timeSec = timeMs * 0.001f;
+		// level of detail: in the distance half the substeps and no self-collision
+		if ( prm->lodDist > 0.0f && prm->viewDist > prm->lodDist ) {
+			pt.iterations = prm->iterations / 2 < 2 ? 2 : prm->iterations / 2;
+			pt.lite = 1;
+			g_stats.lod++;
+		}
+		const auto t0 = std::chrono::steady_clock::now();
 		Simulate( g, in, timeMs, origin, axis, caps, ncaps, &pt, boneFn, boneCtx );
+		g_stats.usec += (int)std::chrono::duration_cast<std::chrono::microseconds>( std::chrono::steady_clock::now() - t0 ).count();
+		g_stats.simulated++;
+		if ( in->stillSteps >= MC_SLEEP_STEPS ) g_stats.sleeping++;
 	}
 
 	const int base = g->vertBase[si];
@@ -2010,6 +2131,12 @@ void MC_Apply( const void *surfacePtr, const void *instanceKey, int timeMs,
 		for ( int k = 0; k < 3; k++ ) normal[i][k] = normal[i][k] * ( 1.0f - b ) + cn[k] * sgn * b;
 		mcNorm( normal[i] );
 	}
+}
+
+void MC_TakeStats( mcStats_t *out ) {
+	g_stats.instances = (int)g_instances.size();
+	*out = g_stats;
+	g_stats = mcStats_t();
 }
 
 void MC_Blast( const float center[3], float strength, float radius ) {

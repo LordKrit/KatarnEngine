@@ -270,6 +270,11 @@ cvar_t* r_meshClothHilt;
 cvar_t* r_meshClothHiltLen;
 cvar_t* r_meshClothHiltBack;
 cvar_t* r_meshClothHiltRadius;
+cvar_t* r_meshClothLodDist;
+cvar_t* r_meshClothCullDist;
+cvar_t* r_meshClothSleep;
+cvar_t* r_meshClothStats;
+cvar_t* r_meshClothWalls;
 cvar_t* r_Ghoul2AnimSmooth = 0;
 cvar_t* r_Ghoul2UnSqashAfterSmooth = 0;
 //cvar_t	*r_Ghoul2UnSqash;
@@ -1535,6 +1540,7 @@ static consoleCommand_t	commands[] = {
 	{ "r_we",				R_WorldEffect_f },
 	{ "modellist",			R_Modellist_f },
 	{ "meshcloth_blast",	R_MeshClothBlast_f },
+	{ "meshcloth_reload",	R_MeshClothLoadConfig },
 	{ "vbolist",			R_VBOList_f },
 	{ "capframes",			R_CaptureFrameData_f },
 	{ "r_weather",			R_WeatherEffect_f },
@@ -1808,6 +1814,11 @@ static void R_Register(void)
 	r_meshClothHiltLen = ri.Cvar_Get("r_meshClothHiltLen", "10", CVAR_ARCHIVE);
 	r_meshClothHiltBack = ri.Cvar_Get("r_meshClothHiltBack", "4", CVAR_ARCHIVE);
 	r_meshClothHiltRadius = ri.Cvar_Get("r_meshClothHiltRadius", "1.8", CVAR_ARCHIVE);
+	r_meshClothLodDist = ri.Cvar_Get("r_meshClothLodDist", "800", CVAR_ARCHIVE);
+	r_meshClothCullDist = ri.Cvar_Get("r_meshClothCullDist", "3000", CVAR_ARCHIVE);
+	r_meshClothSleep = ri.Cvar_Get("r_meshClothSleep", "1", CVAR_ARCHIVE);
+	r_meshClothStats = ri.Cvar_Get("r_meshClothStats", "0", CVAR_ARCHIVE);
+	r_meshClothWalls = ri.Cvar_Get("r_meshClothWalls", "1", CVAR_ARCHIVE);
 	r_Ghoul2AnimSmooth = ri_Cvar_Get_NoComm("r_ghoul2animsmooth", "0.3", CVAR_TEMP, "");
 	r_Ghoul2UnSqashAfterSmooth = ri_Cvar_Get_NoComm("r_ghoul2unsqashaftersmooth", "1", CVAR_TEMP, "");
 	broadsword = ri_Cvar_Get_NoComm("broadsword", "0", CVAR_ARCHIVE, "");

@@ -3018,7 +3018,7 @@ void G2_ConstructGhoulSkeleton(CGhoul2Info_v& ghoul2, const int frameNum, const 
 // the floor under a character, for its cloth: one trace per character per frame
 static void MC_FloorUnder(const trRefEntity_t* ent, int timeMs, mcParams_t& prm)
 {
-	struct floorCache_t { int time; int ok; float pt[3]; float n[3]; };
+	struct floorCache_t { int time; int ok; float pt[3]; float n[3]; int wallTime; int numWalls; float wallPt[8][3]; float wallN[8][3]; };
 	static std::unordered_map<const void*, floorCache_t> cache;
 	floorCache_t& c = cache[ent];
 	if (c.time != timeMs)
@@ -3042,7 +3042,44 @@ static void MC_FloorUnder(const trRefEntity_t* ent, int timeMs, mcParams_t& prm)
 	}
 	prm.floor = c.ok;
 	VectorCopy(c.pt, prm.floorPt);
-	VectorCopy(c.n, prm.floorN);
+	VectorCopy(c.n, prm.floorN);	// walls round the character at chest height, so a cape doesn't swing through them (r_meshClothWalls)
+	if (c.time == timeMs && c.wallTime != timeMs)
+	{
+		c.wallTime = timeMs;
+		c.numWalls = 0;
+		if (r_meshClothWalls->integer)
+		{
+			vec3_t start;
+			VectorCopy(ent->e.origin, start);
+			start[2] += 30.0f;
+			for (int k = 0; k < 8 && c.numWalls < 8; k++)
+			{
+				const float a = k * (M_PI / 4.0f);
+				vec3_t end = { start[0] + cosf(a) * 48.0f, start[1] + sinf(a) * 48.0f, start[2] };
+				trace_t tr;
+				ri.SV_Trace(&tr, start, nullptr, nullptr, end, ENTITYNUM_NONE, CONTENTS_SOLID, G2_NOCOLLIDE, 0);
+				if (tr.fraction >= 1.0f || tr.startsolid || tr.allsolid || fabsf(tr.plane.normal[2]) > 0.7f) continue;
+				// one plane per wall: neighbouring rays often hit the same one
+				bool dup = false;
+				for (int w = 0; w < c.numWalls && !dup; w++)
+				{
+					vec3_t d;
+					VectorSubtract(tr.endpos, c.wallPt[w], d);
+					dup = DotProduct(tr.plane.normal, c.wallN[w]) > 0.98f && fabsf(DotProduct(d, c.wallN[w])) < 1.0f;
+				}
+				if (dup) continue;
+				VectorCopy(tr.endpos, c.wallPt[c.numWalls]);
+				VectorCopy(tr.plane.normal, c.wallN[c.numWalls]);
+				c.numWalls++;
+			}
+		}
+	}
+	prm.numWalls = c.numWalls;
+	for (int w = 0; w < c.numWalls; w++)
+	{
+		VectorCopy(c.wallPt[w], prm.wallPt[w]);
+		VectorCopy(c.wallN[w], prm.wallN[w]);
+	}
 }
 
 /*
@@ -3274,10 +3311,28 @@ static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* sur
 	prm.liftLimit = r_meshClothLift->value;
 	prm.timeSec = 0.0f;
 	MC_FloorUnder(ent, backEnd.refdef.time, prm);
+	prm.viewDist = Distance(backEnd.viewParms.ori.origin, ent->e.origin);
+	prm.lodDist = r_meshClothLodDist->value;
+	prm.cullDist = r_meshClothCullDist->value;
+	prm.sleep = r_meshClothSleep->integer;
+	prm.lite = 0;
 
 	MC_Apply(surface, bones, backEnd.refdef.time, ent->e.origin, axis, caps, ncaps, &prm,
 		MC_BoneFn, bones, &tess.xyz[tess.numVertexes], &tess.normal[tess.numVertexes]);
 	MC_Prune(backEnd.refdef.time);
+	if (r_meshClothStats->integer)
+	{
+		static int lastStats = 0;
+		const int now = backEnd.refdef.time;
+		if (now - lastStats >= 1000 || now < lastStats)
+		{
+			mcStats_t st;
+			MC_TakeStats(&st);
+			if (lastStats) ri.Printf(PRINT_ALL, "meshcloth: %d chars, %d sims (%d lod, %d asleep), %d culled, %d steps (+%d slept), %.2f ms/s\n",
+				st.instances, st.simulated, st.lod, st.sleeping, st.culled, st.steps, st.sleepingSteps, st.usec * 0.001f);
+			lastStats = now;
+		}
+	}
 }
 
 /*

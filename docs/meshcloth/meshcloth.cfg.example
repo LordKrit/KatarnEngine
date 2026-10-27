@@ -1,0 +1,75 @@
+// ext_data/meshcloth.cfg  -  robe surfaces simulated as cloth on the model itself
+//
+// model  surface  rule...  [tether T]  [shape S]
+//
+// rules use the model's bind pose (as in Blender/ModView: z up, feet at 0):
+//   above   Zpin Zfree                       attached above Zpin, free below Zfree
+//   near    x y z  Rpin Rfree                 attached near a point
+//   segment x0 y0 z0  x1 y1 z1  Rpin Rfree    attached near a line
+// tether  max distance (units) a fully free vertex may stray from its animated spot
+// shape   0..1 pull back toward the modelled shape each step (default 0.03)
+//
+// reach K   a point may stray from its animated spot by at most K x its distance along the cloth
+//           from the attached edge (on top of tether): tight at the shoulders, free at the hem
+// turn F    0..1 of the attached edge's turning (body, legs re-facing, torso aiming) that carries the
+//           free cloth along directly; the cloth feels the rest as inertia (angular inertia scale)
+// bend    0..1 bending stiffness (0 limp silk, 1 stiff leather), default 0.3
+// Turn off with /r_meshCloth 0. Reload after editing with /vid_restart.
+
+// Palpatine (zz_palpatine.pk3, model folder "zzpalpatine"). Points are from his _humanoid_pal skeleton:
+//   pelvis z35.6, lhumerus (5.9 1.1 54.5), lhand (19.0 0.3 39.9), cranium z59.6
+zzpalpatine  hips_robe   above 40 28                                tether 30 bend 0.5 inertia 1 maxaccel 790 weight 1.2
+zzpalpatine  l_leg_robe  above 37 24                                tether 30 bend 0.5 inertia 1 maxaccel 790 weight 1.2
+zzpalpatine  r_leg_robe  above 37 24                                tether 30 bend 0.5 inertia 1 maxaccel 790 weight 1.2
+zzpalpatine  l_arm_robe  segment  5.9 1.1 54.5   19.0 0.3 39.9  2.5 6  tether 24 bend 0.4 inertia 1 maxaccel 790 weight 1.2
+zzpalpatine  r_arm_robe  segment -5.9 1.1 54.5  -19.0 0.3 39.9  2.5 6  tether 24 bend 0.4 inertia 1 maxaccel 790 weight 1.2
+zzpalpatine  head_robe   near 0 0.4 64.5  6.5 11   tether 6 bend 0.7 inertia 1 maxaccel 790 weight 1.2
+// Star Wars Battlefront II (2005) cloth: MaxAcceleration 20 m/s^2 (maxaccel 790 units/s^2),
+// with console r_meshClothGravity 386 (real gravity) and r_meshClothDrag 2 (its Drag)
+// Count Dooku (MD_Models_PT.pk3, model folder "dooku"): cape attached across the
+// shoulders (z 52 and up), fully free from the waist down (z 40)
+
+// Darth Vader (MD_Models_OT-ST.pk3, model folder "darthvader"): heavy flowing cape.
+// torso_cape and hips_cape share a seam and move as one cape; the front skirt hangs from the belt.
+darthvader   torso_cape  above 52.5 49                                tether 45 bend 0.8 inertia 1 self maxaccel 790 weight 1.5 thickness 2.5
+darthvader   hips_cape   above 52.5 49                                tether 45 bend 0.8 inertia 1 self maxaccel 790 weight 1.5 thickness 2.5
+darthvader   hips_skirt  above 39 30                                tether 25 bend 0.7 inertia 1 maxaccel 790 weight 1.5
+
+// Everest Vader (ev_vader_sp = SP model, ev_vader = MP model)
+ev_vader_sp  cape_00               above 52.5 49  tether 45 bend 0.8 inertia 1 maxaccel 790 weight 1.5
+ev_vader_sp  cape_01               above 52.5 49  tether 45 bend 0.8 inertia 1 maxaccel 790 weight 1.5
+ev_vader_sp  cape_00_split01       above 52.5 49  tether 45 bend 0.8 inertia 1 maxaccel 790 weight 1.5
+ev_vader_sp  cape_00_split02       above 52.5 49  tether 45 bend 0.8 inertia 1 maxaccel 790 weight 1.5
+ev_vader_sp  innercape_01          above 52.5 49  tether 45 bend 0.8 inertia 1 maxaccel 790 weight 1.5
+ev_vader_sp  innercape_00          above 39 30  tether 25 bend 0.7 inertia 1 maxaccel 790 weight 1.5
+ev_vader     cape_00               above 52.5 49  tether 45 bend 0.8 inertia 1 maxaccel 790 weight 1.5
+ev_vader     cape_01               above 52.5 49  tether 45 bend 0.8 inertia 1 maxaccel 790 weight 1.5
+ev_vader     innercape_00          above 39 30  tether 25 bend 0.7 inertia 1 maxaccel 790 weight 1.5
+ev_vader     innercape_01          above 39 30  tether 25 bend 0.7 inertia 1 maxaccel 790 weight 1.5
+dooku cape above 52.5 49 tether 40 bend 0.7 inertia 1 self maxaccel 790 thickness 2
+dooku torso_cape above 52.5 49 tether 40 bend 0.7 inertia 1 self maxaccel 790 thickness 2
+dooku_hd cape above 48.5 45 tether 40 bend 0.7 inertia 1 self maxaccel 790 thickness 2
+dooku_hd cape2 above 48.5 45 tether 40 bend 0.7 inertia 1 self maxaccel 790 thickness 2
+// Darth Vader VM 2.2 (VaderVM.pk3, the .glm names itself "model.glm", so that is its folder name here): cape and kilt
+model.glm    torso_cape  above 52.5 49  tether 45 bend 0.8 inertia 1 self maxaccel 790 weight 1.5 thickness 2.5
+model.glm    hips_kilt   above 39 30  tether 25 bend 0.7 inertia 1 maxaccel 790 weight 1.5
+// Capes hung from the shoulders stay fully attached down to ~2 units below the shoulder joints and
+// turn to cloth over a short band below that (a half-skinned, half-cloth band across the shoulders slips
+// through the torso). Shoulder joints: MD _humanoid ~54.5, dooku_hd ~51, BF2 Dooku ~52.5.
+// Count Dooku, Battlefront II model (dooku4.blend -> folder "dooku_bf2")
+// same settings as the stock Dooku cape, simulated on a 400-point grid for speed
+dooku_bf2 cape above 50 46.5 tether 40 bend 0.7 inertia 1 self maxaccel 790 thickness 2 proxy 400
+dooku_bf2 cape2 above 50 46.5 tether 40 bend 0.7 inertia 1 self maxaccel 790 thickness 2 proxy 400
+dooku_bf2 torso_cape_2 above 50 46.5 tether 40 bend 0.7 inertia 1 self maxaccel 790 thickness 2 proxy 400
+vader_bf2 cape above 44 39 tether 45 bend 0.8 inertia 1 self maxaccel 790 weight 1.5 thickness 2.5 proxy 400
+palpatine_bf2 hips_robe above 44 33 tether 12 shape 0.045 bend 0.65 inertia 0.65 weight 1.3 maxaccel 500 reach 0.65 turn 0.8 thickness 1.2 proxy 1000
+palpatine_bf2 hips_robe_2 above 44 33 tether 12 shape 0.045 bend 0.65 inertia 0.65 weight 1.3 maxaccel 500 reach 0.65 turn 0.8 thickness 1.2 proxy 1000
+palpatine_bf2 torso_robe_3 near 0 1 51 8 13 tether 1.4 shape 0.16 bend 0.85 inertia 0.2 weight 1.2 maxaccel 220 reach 0.18 turn 0.8 thickness 0.8 proxy 1000
+palpatine_bf2 torso_robe_4 near 0 1 51 8 13 tether 1.4 shape 0.16 bend 0.85 inertia 0.2 weight 1.2 maxaccel 220 reach 0.18 turn 0.8 thickness 0.8 proxy 1000
+palpatine_bf2 head_robe_13 near 0 1.5 61 4.8 8 tether 0.65 shape 0.22 bend 0.9 inertia 0.15 weight 1 maxaccel 180 reach 0.12 turn 0.8 thickness 0.6 proxy 1000
+palpatine_bf2 l_arm_robe_2 segment 5.320 2.161 52.151 16.474 -5.737 42.067 3 7 tether 5 shape 0.075 bend 0.6 inertia 0.4 weight 1.1 maxaccel 350 reach 0.45 turn 0.8 thickness 0.8 proxy 1000
+palpatine_bf2 r_arm_robe_2 segment -5.320 2.161 52.151 -16.474 -5.737 42.067 3 7 tether 5 shape 0.075 bend 0.6 inertia 0.4 weight 1.1 maxaccel 350 reach 0.45 turn 0.8 thickness 0.8 proxy 1000
+palpatine_bf2 r_arm_robe_3 segment -5.320 2.161 52.151 -16.474 -5.737 42.067 3 7 tether 5 shape 0.075 bend 0.6 inertia 0.4 weight 1.1 maxaccel 350 reach 0.45 turn 0.8 thickness 0.8 proxy 1000
+palpatine_bf2 l_leg_robe_2 above 44 33 tether 12 shape 0.045 bend 0.65 inertia 0.65 weight 1.3 maxaccel 500 reach 0.65 turn 0.8 thickness 1.2 proxy 1000
+palpatine_bf2 r_leg_robe_2 above 44 33 tether 12 shape 0.045 bend 0.65 inertia 0.65 weight 1.3 maxaccel 500 reach 0.65 turn 0.8 thickness 1.2 proxy 1000
+vader_bf2_rots cape above 44 39 tether 45 bend 0.8 inertia 1 self maxaccel 790 weight 1.5 thickness 2.5 proxy 400
