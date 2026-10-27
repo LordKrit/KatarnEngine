@@ -2774,7 +2774,23 @@ static void FS_Startup(const char* gameName)
 	fs_debug = Cvar_Get("fs_debug", "0", 0);
 	fs_copyfiles = Cvar_Get("fs_copyfiles", "0", CVAR_INIT);
 	fs_cdpath = Cvar_Get("fs_cdpath", "", CVAR_INIT | CVAR_PROTECTED);
-	fs_basepath = Cvar_Get("fs_basepath", Sys_DefaultInstallPath(), CVAR_INIT | CVAR_PROTECTED);
+	// A build in a subfolder of GameData (e.g. GameData\MD-cinematic studio\Phase1-test) finds the game
+	// data by looking up the folder tree for base\assets0.pk3, unless fs_basepath is set on the command line.
+	{
+		static char installPath[MAX_OSPATH];
+		Q_strncpyz(installPath, Sys_DefaultInstallPath(), sizeof installPath);
+		char probe[MAX_OSPATH];
+		for (int up = 0; up < 4; up++)
+		{
+			Com_sprintf(probe, sizeof probe, "%s%cbase%cassets0.pk3", installPath, PATH_SEP, PATH_SEP);
+			if (FS_FileInPathExists(probe)) break;
+			char* sep = strrchr(installPath, PATH_SEP);
+			if (!sep || sep == installPath) { Q_strncpyz(installPath, Sys_DefaultInstallPath(), sizeof installPath); break; }
+			*sep = '\0';
+			if (up == 3) Q_strncpyz(installPath, Sys_DefaultInstallPath(), sizeof installPath);
+		}
+		fs_basepath = Cvar_Get("fs_basepath", installPath, CVAR_INIT | CVAR_PROTECTED);
+	}
 	fs_basegame = Cvar_Get("fs_basegame", "", CVAR_INIT);
 	const char* homePath = Sys_DefaultHomePath();
 	if (!homePath || !homePath[0]) {

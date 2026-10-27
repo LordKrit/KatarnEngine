@@ -573,6 +573,14 @@ void* Sys_LoadSPGameDll(const char* name, GetGameAPIProc** GetGameAPI)
 	libHandle = Sys_LoadMachOBundle(filename);
 #endif
 
+	// a game DLL right next to the executable belongs to it (test and side-by-side builds)
+	if (!libHandle)
+	{
+		const char* fn = va("%s%c%s", Sys_BinaryPath(), PATH_SEP, filename);
+		libHandle = Sys_LoadLibrary(fn);
+		if (libHandle) Com_Printf("Loaded game library %s (next to the executable)\n", fn);
+	}
+
 	if (!libHandle)
 	{
 		char* basepath = Cvar_VariableString("fs_basepath");
