@@ -4263,6 +4263,7 @@ static mcR2Inst_t* RB_MeshClothUpdate(CRenderableSurface* surf, const mdxmSurfac
 	prm.xpbd = r_meshClothXPBD->integer;
 	prm.xpbdIters = r_meshClothXPBDIter->integer;
 	prm.frictionScale = r_meshClothFriction->value < 0.0f ? 0.0f : r_meshClothFriction->value;
+	prm.liftLimit = r_meshClothLift->value;
 	prm.timeSec = 0.0f;
 	MC_FloorUnder(ent, timeMs, prm);
 	MC_Apply(surface, bones, timeMs, ent->e.origin, axis, caps, ncaps, &prm,

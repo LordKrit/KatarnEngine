@@ -265,6 +265,7 @@ cvar_t* r_meshClothGust;
 cvar_t* r_meshClothXPBD;
 cvar_t* r_meshClothXPBDIter;
 cvar_t* r_meshClothFriction;
+cvar_t* r_meshClothLift;
 cvar_t* r_meshClothHilt;
 cvar_t* r_meshClothHiltLen;
 cvar_t* r_meshClothHiltBack;
@@ -1802,6 +1803,7 @@ static void R_Register(void)
 	r_meshClothXPBD = ri.Cvar_Get("r_meshClothXPBD", "1", CVAR_ARCHIVE);
 	r_meshClothXPBDIter = ri.Cvar_Get("r_meshClothXPBDIter", "2", CVAR_ARCHIVE);
 	r_meshClothFriction = ri.Cvar_Get("r_meshClothFriction", "1", CVAR_ARCHIVE);
+	r_meshClothLift = ri.Cvar_Get("r_meshClothLift", "-2", CVAR_ARCHIVE);
 	r_meshClothHilt = ri.Cvar_Get("r_meshClothHilt", "1", CVAR_ARCHIVE);
 	r_meshClothHiltLen = ri.Cvar_Get("r_meshClothHiltLen", "10", CVAR_ARCHIVE);
 	r_meshClothHiltBack = ri.Cvar_Get("r_meshClothHiltBack", "4", CVAR_ARCHIVE);

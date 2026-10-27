@@ -314,6 +314,7 @@ extern cvar_t* r_meshClothGust;
 extern cvar_t* r_meshClothXPBD;
 extern cvar_t* r_meshClothXPBDIter;
 extern cvar_t* r_meshClothFriction;
+extern cvar_t* r_meshClothLift;
 extern cvar_t* r_meshClothHilt;
 extern cvar_t* r_meshClothHiltLen;
 extern cvar_t* r_meshClothHiltBack;

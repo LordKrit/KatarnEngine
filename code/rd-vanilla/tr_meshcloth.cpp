@@ -38,6 +38,7 @@ int g_mcDbgTether = 0;
 #define MCDBG_OFF( n ) false
 #endif
 namespace {
+float g_mcLiftOverride = -2.0f;	// set per call from mcParams_t::liftLimit (-2 = per surface)
 
 const int	MC_STEP_MS		= 16;
 const float	MC_DT			= 0.016f;
@@ -77,6 +78,7 @@ struct mcDef_t {
 	float			stretch;	// 0..1 XPBD stretch give: 0 = rigid (default), 0.2 = a little elastic
 	float			friction;	// 0..1 kinetic friction against the body and floor (default 0.3)
 	float			sfriction;	// static friction: contacts sliding slower than this x the push stick (default 0.5)
+	float			lift;		// units a free point may rise above the attached edge it hangs from (default 2); <0 = no limit
 	int				proxy;		// simulation grid: 0 or -1 = none (every point simulated), N = a coarse grid of about N points
 };
 
@@ -95,7 +97,7 @@ struct mcGroup_t {
 	std::vector<float>					maxSpin;		// per particle
 	std::vector<float>					spread;			// per particle
 	std::vector<float>					weight;			// per particle
-	std::vector<float>					stretchG, fricK, fricS;	// per particle: XPBD stretch give, kinetic / static friction
+	std::vector<float>					stretchG, fricK, fricS, lift;	// per particle: XPBD stretch give, kinetic / static friction
 	std::vector<float>					thick;			// per particle: cloth thickness
 	float								selfThick = 1.2f;	// self-collision distance (largest thickness of the self-colliding surfaces)
 	std::vector<char>					hangs;			// per particle: hanging cloth ("above" rule: capes, robes, skirts)
@@ -424,7 +426,7 @@ mcGroup_t *MakeProxy( mcGroup_t *r, int want ) {
 		g->smooth.push_back( r->smooth[s] ); g->maxAccel.push_back( r->maxAccel[s] );
 		g->maxSpin.push_back( r->maxSpin[s] ); g->spread.push_back( r->spread[s] );
 		g->weight.push_back( r->weight[s] ); g->thick.push_back( r->thick[s] );
-		g->stretchG.push_back( r->stretchG[s] ); g->fricK.push_back( r->fricK[s] ); g->fricS.push_back( r->fricS[s] );
+		g->lift.push_back( r->lift[s] ); g->stretchG.push_back( r->stretchG[s] ); g->fricK.push_back( r->fricK[s] ); g->fricS.push_back( r->fricS[s] );
 		g->hangs.push_back( r->hangs[s] ); g->hardCol.push_back( r->hardCol[s] );
 		mcCopy( &r->bindPos[s * 3], &g->bindPos[i * 3] );
 	}
@@ -603,6 +605,7 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->maxSpin.push_back( g->defs[si]->maxSpin );
 				g->spread.push_back( g->defs[si]->spread );
 				g->weight.push_back( g->defs[si]->weight );
+				g->lift.push_back( g->defs[si]->lift );
 				g->stretchG.push_back( g->defs[si]->stretch );
 				g->fricK.push_back( g->defs[si]->friction );
 				g->fricS.push_back( g->defs[si]->sfriction );
@@ -921,9 +924,10 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 		// never higher than both the attached edge it hangs from and its
 		// animated spot: stops a fast turn or a spawn from flipping a cape
 		// up over the shoulders
-		if ( an >= 0 && !MCDBG_OFF( "NOHEIGHT" ) ) {
+		const float liftL = g_mcLiftOverride > -1.5f ? g_mcLiftOverride : g->lift[p];
+		if ( an >= 0 && liftL >= 0.0f && !MCDBG_OFF( "NOHEIGHT" ) ) {
 			const float hp = mcDot( pp, in->up ), ha = mcDot( &in->p[an * 3], in->up ), ht = mcDot( t, in->up );
-			const float lim = ( ha > ht ? ha : ht ) + 2.0f * in->linkScale;
+			const float lim = ( ha > ht ? ha : ht ) + liftL * in->linkScale;
 			if ( hp > lim ) mcMA( pp, lim - hp, in->up, pp );
 		}
 		vec3_t before;
@@ -1318,6 +1322,7 @@ void SpinLimit( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &
 // better than one long step with many passes.
 void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFrom, const std::vector<float> &tgtTo,
 		   const mcCapsule_t *caps, int ncaps, const mcParams_t *prm ) {
+	g_mcLiftOverride = prm->liftLimit < -1.5f ? -2.0f : prm->liftLimit;
 	const int sub = prm->iterations < 1 ? 1 : ( prm->iterations > 16 ? 16 : prm->iterations );
 	const float h = MC_DT / sub;
 	const float damp = powf( 0.99f, 1.0f / sub );			// 1% velocity loss per 16 ms
@@ -1805,6 +1810,7 @@ int MC_LoadConfig( const char *text ) {
 		d.thickness = 1.2f;
 		d.proxy = -1;
 		d.stretch = 0.0f;
+		d.lift = 2.0f;
 		d.friction = 0.3f;
 		d.sfriction = 0.5f;
 		while ( 1 ) {
@@ -1823,6 +1829,7 @@ int MC_LoadConfig( const char *text ) {
 			else if ( !Q_stricmp( tok, "maxaccel" ) ) { d.maxAccel = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxAccel < 0.0f ) d.maxAccel = 0.0f; }
 			else if ( !Q_stricmp( tok, "smooth" ) ) d.smooth = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "inertia" ) ) d.inertia = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
+			else if ( !Q_stricmp( tok, "lift" ) ) { tok = COM_ParseExt( &p, qfalse ); d.lift = !Q_stricmp( tok, "off" ) ? -1.0f : (float)atof( tok ); }
 			else if ( !Q_stricmp( tok, "stretch" ) ) { d.stretch = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) ); if ( d.stretch > 0.95f ) d.stretch = 0.95f; }
 			else if ( !Q_stricmp( tok, "friction" ) ) d.friction = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "sfriction" ) ) { d.sfriction = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.sfriction < 0.0f ) d.sfriction = 0.0f; if ( d.sfriction > 4.0f ) d.sfriction = 4.0f; }

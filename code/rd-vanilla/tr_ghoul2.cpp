@@ -3271,6 +3271,7 @@ static void RB_MeshClothApply(CRenderableSurface* surf, const mdxmSurface_t* sur
 	prm.xpbd = r_meshClothXPBD->integer;
 	prm.xpbdIters = r_meshClothXPBDIter->integer;
 	prm.frictionScale = r_meshClothFriction->value < 0.0f ? 0.0f : r_meshClothFriction->value;
+	prm.liftLimit = r_meshClothLift->value;
 	prm.timeSec = 0.0f;
 	MC_FloorUnder(ent, backEnd.refdef.time, prm);
 

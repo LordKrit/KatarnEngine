@@ -51,6 +51,10 @@ from a config text (ext_data/meshcloth.cfg), one line per surface:
   sfriction static friction: a contact sliding slower than sfriction x how
            hard it is pressed in sticks (cloth rests on shoulders instead of
            buzzing). Default 0.5. 0 = off.
+  lift     units a free point may rise above the attached edge it hangs
+           from (stops capes flipping over the head on spawns and fast
+           turns). Default 2. 'lift off' = no limit: capes can blow up and
+           over the head (also needs a long enough tether).
   shape    0..1 optional pull back toward the modelled shape. Default 0
            (real cloth: only the attached part follows the animation).
 
@@ -83,7 +87,8 @@ struct mcParams_t {
 	float	timeSec;		// current time for gusts (filled in by MC_Apply)
 	int		xpbd;			// 1: XPBD constraints (compliance, substep independent); 0: old projection
 	int		xpbdIters;		// XPBD solver iterations per substep
-	float	frictionScale;	// multiplies every surface's friction (0 = frictionless)
+	float	frictionScale;
+	float	liftLimit;		// overrides every surface's 'lift': -2 = use the config, -1 = no limit, N = units	// multiplies every surface's friction (0 = frictionless)
 	int		floor;			// 1: floorPt / floorN hold the floor plane under the character (world)
 	float	floorPt[3];
 	float	floorN[3];
