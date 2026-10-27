@@ -321,6 +321,36 @@ struct SBoneCalc
 	float blendLerp;
 };
 
+
+// Face rigs (bones named FACIAL_* / eyeball_*) sit tightly inside the head: smoothing each of their
+// matrices on its own (a component-wise lerp, then re-normalised about the bone's own pivot) pulls
+// them apart from the head during fast moves - the jaw pokes out and the head warps on strikes. Keep
+// them rigid with their parent instead: smoothed = smoothed(parent) * final(parent)^-1 * final(bone).
+static bool G2_IsRigidFaceBone(const char* name)
+{
+	return !Q_stricmpn(name, "FACIAL_", 7) || !Q_stricmpn(name, "eyeball_", 8);
+}
+
+static void G2_Invert3x4(const mdxaBone_t& m, mdxaBone_t& out)
+{
+	const float a = m.matrix[0][0], b = m.matrix[0][1], c = m.matrix[0][2];
+	const float d = m.matrix[1][0], e = m.matrix[1][1], f = m.matrix[1][2];
+	const float g = m.matrix[2][0], h = m.matrix[2][1], i = m.matrix[2][2];
+	const float A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+	float det = a * A + b * B + c * C;
+	if (fabsf(det) < 1e-12f) det = 1e-12f;
+	const float id = 1.0f / det;
+	const float r[3][3] = {
+		{ A * id, -(b * i - c * h) * id, (b * f - c * e) * id },
+		{ B * id, (a * i - c * g) * id, -(a * f - c * d) * id },
+		{ C * id, -(a * h - b * g) * id, (a * e - b * d) * id } };
+	for (int y = 0; y < 3; y++)
+	{
+		for (int x = 0; x < 3; x++) out.matrix[y][x] = r[y][x];
+		out.matrix[y][3] = -(r[y][0] * m.matrix[0][3] + r[y][1] * m.matrix[1][3] + r[y][2] * m.matrix[2][3]);
+	}
+}
+
 class CBoneCache;
 static void G2_TransformBone(int index, CBoneCache& CB);
 
@@ -360,6 +390,20 @@ class CBoneCache
 
 	void SmoothLow(int index)
 	{
+		{
+			const mdxaSkelOffsets_t* offs = (mdxaSkelOffsets_t*)((byte*)header + sizeof(mdxaHeader_t));
+			const mdxaSkel_t* sk = (mdxaSkel_t*)((byte*)offs + offs->offsets[index]);
+			const int parent = mFinalBones[index].parent;
+			if (parent >= 0 && G2_IsRigidFaceBone(sk->name))
+			{
+				if (mSmoothBones[parent].touch != mCurrentTouch) SmoothLow(parent);
+				mdxaBone_t inv;
+				G2_Invert3x4(mFinalBones[parent].boneMatrix, inv);
+				mSmoothBones[index].boneMatrix = mSmoothBones[parent].boneMatrix * (inv * mFinalBones[index].boneMatrix);
+				mSmoothBones[index].touch = mCurrentTouch;
+				return;
+			}
+		}
 		if (mSmoothBones[index].touch == mLastTouch)
 		{
 			const mdxaBone_t& newM = mFinalBones[index].boneMatrix;
