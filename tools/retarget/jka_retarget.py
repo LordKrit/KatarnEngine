@@ -456,6 +456,39 @@ def collect_rig(args, src, fit, gla, newbone_of, owner_of, mats):
     return groups
 
 
+TWIST_RE = re.compile(r'(roll|twist)', re.I)
+TWIST_SKIP = re.compile(r'(elbow|knee|bend)', re.I)      # joint-volume helpers: stay on their limb bone
+TWIST_BONE = {'lhumerus': 'lhumerusX', 'rhumerus': 'rhumerusX', 'lradius': 'lradiusX', 'rradius': 'rradiusX',
+              'lfemurYZ': 'lfemurX', 'rfemurYZ': 'rfemurX'}
+
+
+def twist_targets(src, m, mp, gla):
+    """source twist/roll joints -> the Movie Duels twist bone of the limb segment they sit on.
+    A roll joint on the upper arm near the elbow (BF2 'ElbowRoll', Mixamo 'ForeArmRoll' parented to
+    the upper arm) belongs to the forearm's twist, so the segment is picked by position along the limb."""
+    inv = {n: b for b, n in m.items()}
+    have = {b['name'].lower() for b in gla.bones}
+    out = {}
+    for n in src.joints:
+        if n in inv or not TWIST_RE.search(src.names[n]) or TWIST_SKIP.search(src.names[n]): continue
+        k = mp.par[n]
+        while k is not None and k not in inv: k = mp.par[k]
+        if k is None: continue
+        b = inv[k]
+        if b not in TWIST_BONE: continue
+        # which segment: compare the roll joint's position along the upper limb
+        child = {'lhumerus': 'lradius', 'rhumerus': 'rradius', 'lfemurYZ': 'ltibia', 'rfemurYZ': 'rtibia',
+                 'lradius': 'lhand', 'rradius': 'rhand'}.get(b)
+        tb = TWIST_BONE[b]
+        if child in m and b in ('lhumerus', 'rhumerus'):
+            jp = lambda x: src.rest_world[x][:3, 3]
+            p0, p1, pn = jp(m[b]), jp(m[child]), jp(n)
+            d = p1 - p0; t = float(np.dot(pn - p0, d) / max(np.dot(d, d), 1e-9))
+            if t > 0.85: tb = TWIST_BONE[child]        # sits at the elbow: forearm twist
+        if tb.lower() in have: out[n] = tb
+    return out
+
+
 def cmd_rig(args):
     from rig import NewSkeleton
     src, gla, m, mp, fit = load(args)
@@ -477,6 +510,10 @@ def cmd_rig(args):
         for nm, (a0, n) in anims.items():
             if 'LIGHTNING' in nm and n > 0: lf[a0:a0 + n] = True
         sk.lightning_frames = lf
+        hf = np.zeros(gla.numFrames, bool)
+        for nm, (a0, n) in anims.items():
+            if ('DUAL' in nm or 'STAFF' in nm) and n > 0: hf[a0:a0 + n] = True
+        sk.hold_frames = hf
     grip_frame = anims.get('BOTH_STAND1', (0, 1))[0]
     if getattr(args, 'fingers', False): sk.fit_thumbs(grip_frame)
     if getattr(args, 'wrap_grip', None):
@@ -490,14 +527,22 @@ def cmd_rig(args):
           (skel, len(sk.names), sk.nmd, len(sk.names) - sk.nmd, sk.hip_k))
     byname = {src.names[n]: n for n in src.joints}
     unbound = re.compile(args.unbound_bones) if getattr(args, 'unbound_bones', None) else None
+    # twist (roll) joints: skin on them goes to Movie Duels' own twist bones (lhumerusX, lradiusX,
+    # lfemurX ...), which the animations turn part of the way between the joints. Without this the
+    # roll joints' skin rides the parent bone rigidly, every wrist turn happens at the wrist and the
+    # arms look stiff (and wrap like a sweet wrapper on big turns).
+    twist_to = {} if getattr(args, 'no_twist', False) else twist_targets(src, m, mp, gla)
+    if twist_to:
+        print('twist joints -> Movie Duels twist bones: ' + ', '.join('%s->%s' % (src.names[n], b) for n, b in sorted(twist_to.items(), key=lambda kv: src.names[kv[0]])))
     def newbone_of(jn):
         n = byname.get(jn)
         if n is None: return gla.byName['pelvis']
+        if n in twist_to: return gla.byName[twist_to[n].lower()]
         if unbound is not None and unbound.search(jn):
             return gla.byName[fit.owner[n].lower()]      # bone kept in the skeleton, skin stays on the head
         return sk.index[n] if n in sk.index else gla.byName[fit.owner[n].lower()]
     def owner_of(jn):
-        n = byname.get(jn)
+        n = byname.get(jn)       # (the bind transform still comes from the main limb bone)
         return fit.owner[n] if n is not None else 'pelvis'
     mats = {}
     lod_groups = [collect_rig(args, src, fit, gla, newbone_of, owner_of, mats)]
@@ -630,6 +675,7 @@ def main():
             p.add_argument('--ground-drop', type=float, default=0.0); p.add_argument('--wrap-grip'); p.add_argument('--stock-hand-tags', action='store_true')
             p.add_argument('--relax-left', action='store_true')
             p.add_argument('--arm-ik', action='store_true', help='reach each hand to where Movie Duels puts it relative to the shoulders')
+            p.add_argument('--no-twist', action='store_true', help='leave twist/roll joints on their parent limb bone (old behaviour: stiff forearms)')
             p.add_argument('--fingers', action='store_true', help='keep the model\'s finger bones and curl them with Movie Duels\' finger animation')
             p.add_argument('--lod', action='append', help='lower detail versions of the same model (same skeleton), in order: LOD1, LOD2, ...')
             p.add_argument('--unbound-bones', help='regex of extra bones that carry no skin (kept for later use; their vertices stay on the nearest Movie Duels bone)')

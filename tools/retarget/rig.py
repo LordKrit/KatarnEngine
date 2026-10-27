@@ -375,6 +375,16 @@ class NewSkeleton:
                 j = md.byName.get(side + '_d2_j1')
                 if j is None or j not in fang: continue
                 lw[side] = inl * np.clip((self.fang0[j] - fang[j]) / np.radians(20), 0, 1)
+        # the free (left) hand holds a hilt too in two-handed grips (hands together, e.g. the strong
+        # style), and in dual / staff animations: there it closes all the way like the saber hand
+        lgrip = None
+        if self.curl and 'l' in getattr(self, 'relax', {}):
+            bi_ = md.byName
+            d = np.linalg.norm(Pmd[:, bi_['lhand']] - Pmd[:, bi_['rhand']], axis=1)
+            together = np.clip((14.0 - d) / 6.0, 0, 1)            # hands within ~8 units: one grip
+            hf = getattr(self, 'hold_frames', None)
+            held = hf[f0:f1].astype(float) if hf is not None else 0.0
+            lgrip = np.maximum(together, held)
         pel = md.byName['pelvis']; root = md.byName['model_root']
         for i in self.order:
             par = self.parents[i]
@@ -386,8 +396,14 @@ class NewSkeleton:
                     mdb, gain, ax, rest, grip, light, sax, spread, side = self.curl[i]
                     # the free (left) hand rests half open, as Movie Duels' own hands are modelled; it closes
                     # into a fist as the animation curls its fingers (melee, two-handed grips)
-                    gr = grip * getattr(self, 'relax', {}).get(side, 1.0)
-                    th = np.clip(gr + gain * (1.6 if side == 'l' and side in getattr(self, 'relax', {}) else 1.0) * (fang[mdb] - self.fang0[mdb]), np.radians(-15), np.radians(105))
+                    rx = getattr(self, 'relax', {})
+                    gr = grip * rx.get(side, 1.0)
+                    gk = 1.6 if side == 'l' and side in rx else 1.0
+                    if side == 'l' and lgrip is not None:
+                        # holding: the saber hand's grip and gain, blended in as the hands come together
+                        gr = gr + (grip * rx.get('r', 1.0) - gr) * lgrip
+                        gk = gk + (1.0 - gk) * lgrip
+                    th = np.clip(gr + gain * gk * (fang[mdb] - self.fang0[mdb]), np.radians(-15), np.radians(105))
                     w = lw.get(side)
                     if w is not None:
                         th = (1 - w) * th + w * light

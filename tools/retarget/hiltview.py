@@ -47,8 +47,9 @@ def crop(posed, centre, yaw, r=float(__import__("os").environ.get("R","26")), si
     return render(out, yaw, size, None, title)
 jobs = [l.split('|') for l in sys.argv[2:]]
 ims = []
-for glm, gla, f, label in jobs:
-    posed, c = scene(glm, gla, int(f))
+for job in jobs:
+    glm, gla, f, label = job[:4]; side = job[4] if len(job) > 4 else 'r'
+    posed, c = scene(glm, gla, int(f), side)
     for yaw in (0, 90, -60):
         ims.append(crop(posed, c, yaw, title='%s f%s yaw%d' % (label, f, yaw)))
 cols = 3; W = Image.new('RGB', (380 * cols, 380 * ((len(ims) + cols - 1) // cols)), 'white')
