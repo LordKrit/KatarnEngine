@@ -13,7 +13,7 @@ static int g_fail = 0, g_pass = 0;
 class FakeHost : public Host
 {
 public:
-	struct Ent { std::string npc, name; float o[3], a[3]; bool ai = false; bool alive = true; };
+	struct Ent { std::string npc, name; float o[3], a[3]; bool ai = false; bool alive = true; std::string profile; };
 	std::map<int, Ent> ents;
 	std::map<std::string, std::string> files;
 	std::string map = "md_test";
@@ -42,6 +42,12 @@ public:
 		for (int i = 0; i < 3; i++) { ents[ent].o[i] = o[i]; ents[ent].a[i] = a[i]; }
 	}
 	void SetActorAI(int ent, bool on) override { ents[ent].ai = on; }
+	bool SetActorProfile(int ent, const std::string& p, std::string& why) override
+	{
+		if (p == "_humanoid_alien") { why = "different bones"; return false; }
+		ents[ent].profile = p;
+		return true;
+	}
 	std::string MapName() override { return map; }
 	bool WriteFile(const std::string& p, const std::string& d) override { files[p] = d; return true; }
 	bool ReadFile(const std::string& p, std::string& out) override
@@ -141,7 +147,7 @@ static void TestUndo()
 	CHECK(s.AddActor("missing", o, a) == 0);
 
 	// adopted level NPCs are released, not deleted, when removed from the scene
-	h.ents[99] = FakeHost::Ent{ "stormtrooper", "st", { 1, 2, 3 }, { 0, 0, 0 }, true, true };
+	h.ents[99] = FakeHost::Ent{ "stormtrooper", "st", { 1, 2, 3 }, { 0, 0, 0 }, true, true, "" };
 	const int st = s.AdoptActor(99, "stormtrooper", "");
 	CHECK(st && s.Find(st)->adopted && s.Find(st)->origin[2] == 3);
 	CHECK(s.Remove(st) && h.ents.count(99));
@@ -210,8 +216,72 @@ static void TestProject()
 	CHECK(!w.Load("Future", true, false, warn));
 }
 
+static void TestPhase2()
+{
+	FakeHost h;
+	Scene s(&h);
+	const float o[3] = { 0, 0, 24 }, a[3] = { 0, 0, 0 };
+	const int v = s.AddActor("md_vader", o, a);
+	const int ent = s.Find(v)->entNum;
+
+	// profiles: validated by the host, undoable
+	CHECK(s.SetProfile(v, "_humanoid_vader") && h.ents[ent].profile == "_humanoid_vader");
+	CHECK(!s.SetProfile(v, "_humanoid_alien") && s.Find(v)->profile == "_humanoid_vader");	// refused, unchanged
+	CHECK(s.Undo() && h.ents[ent].profile.empty() && s.Find(v)->profile.empty());
+	CHECK(s.Redo() && h.ents[ent].profile == "_humanoid_vader");
+
+	// clips stay sorted, select the edited clip, undo
+	AnimClip c; c.anim = "BOTH_STAND1"; c.startUs = 2'000'000; c.lengthUs = 1'000'000;
+	CHECK(s.AddClip(v, c) == 0);
+	c.anim = "BOTH_WALK1"; c.startUs = 500'000;
+	CHECK(s.AddClip(v, c) == 0 && s.Find(v)->clips[1].anim == "BOTH_STAND1");
+	AnimClip moved = s.Find(v)->clips[0];
+	moved.startUs = 3'000'000;
+	h.now = 5000;
+	CHECK(s.SetClip(v, 0, moved, true) && s.selectedClip == 1 && s.Find(v)->clips[1].anim == "BOTH_WALK1");
+	moved.startUs = 3'500'000; h.now = 5200;
+	CHECK(s.SetClip(v, 1, moved, true));							// merged drag
+	CHECK(s.Undo() && s.Find(v)->clips[0].anim == "BOTH_WALK1" && s.Find(v)->clips[0].startUs == 500'000);
+	CHECK(s.RemoveClip(v, 0) && s.Find(v)->clips.size() == 1);
+	CHECK(s.Undo() && s.Find(v)->clips.size() == 2);
+
+	// which clip drives the actor
+	int64_t local = 0; bool hold = false;
+	const Object& ob = *s.Find(v);
+	CHECK(Scene::ActiveClip(ob, 100'000, local, hold) == nullptr);				// before the first clip: game animates
+	const AnimClip* ac = Scene::ActiveClip(ob, 1'000'000, local, hold);
+	CHECK(ac && ac->anim == "BOTH_WALK1" && local == 500'000 && !hold);
+	ac = Scene::ActiveClip(ob, 1'800'000, local, hold);
+	CHECK(ac && ac->anim == "BOTH_WALK1" && hold && local == 1'000'000);		// held on its last frame
+	ac = Scene::ActiveClip(ob, 2'100'000, local, hold);
+	CHECK(ac && ac->anim == "BOTH_STAND1" && local == 100'000);
+
+	// NPC type change respawns and undoes
+	const int before = s.Find(v)->entNum;
+	CHECK(s.SetNpcType(v, "md_obiwan") && h.ents[s.Find(v)->entNum].npc == "md_obiwan" && !h.ents.count(before));
+	CHECK(h.ents[s.Find(v)->entNum].profile == "_humanoid_vader");				// profile carried over
+	CHECK(!s.SetNpcType(v, "missing") && h.ents[s.Find(v)->entNum].npc == "md_obiwan");
+	CHECK(s.Undo() && h.ents[s.Find(v)->entNum].npc == "md_vader");
+
+	// duplicate copies profile and clips, beside the original
+	const int d = s.Duplicate(v);
+	CHECK(d && s.Find(d)->clips.size() == 2 && s.Find(d)->profile == "_humanoid_vader" && s.Find(d)->origin[1] == 40);
+	CHECK(s.Find(d)->name == "md_vader 02" && h.ents[s.Find(d)->entNum].profile == "_humanoid_vader");
+	CHECK(s.Undo() && !s.Find(d));
+
+	// saved and loaded
+	CHECK(s.Save("P2"));
+	Scene t(&h);
+	std::vector<std::string> warn;
+	CHECK(t.Load("P2", false, false, warn));
+	const Object* lo = t.Find(v);
+	CHECK(lo && lo->profile == "_humanoid_vader" && lo->clips.size() == 2 && lo->clips[0] == s.Find(v)->clips[0]);
+	CHECK(h.ents[lo->entNum].profile == "_humanoid_vader");
+}
+
 int main()
 {
+	TestPhase2();
 	TestJson();
 	TestClock();
 	TestUndo();

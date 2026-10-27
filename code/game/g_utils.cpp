@@ -1165,6 +1165,7 @@ Marks the entity as free
 */
 void G_FreeEntity(gentity_t* ent)
 {
+	CS_ClearEntity(ent->s.number);	// JK BUILD Cinematic Studio: a new entity in this slot starts clean
 	gi.unlinkentity(ent); // unlink from world
 
 	// Free the Game Element (the entity) and delete the Icarus ID.

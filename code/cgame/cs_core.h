@@ -19,6 +19,27 @@ namespace cs
 	constexpr const char* kProjectRoot = "CinematicStudio/Projects";
 
 	enum class ObjType { Actor, Camera };
+
+	enum AnimParts { PARTS_LEGS = 1, PARTS_TORSO = 2, PARTS_BOTH = 3 };
+
+	// An animation placed on an actor's timeline. The animation is named (BOTH_STAND1...), so a clip
+	// survives a change of animation profile as long as the new skeleton has that animation.
+	struct AnimClip
+	{
+		int64_t startUs = 0;		// scene time the clip starts
+		int64_t lengthUs = 1'000'000;
+		std::string anim;
+		int parts = PARTS_BOTH;
+		float speed = 1.0f;
+		bool loop = false;			// loops until the next clip (else holds its last frame)
+		int startFrame = 0;			// range inside the animation (relative frames)
+		int endFrame = -1;			// -1 = last frame
+		bool operator==(const AnimClip& o) const
+		{
+			return startUs == o.startUs && lengthUs == o.lengthUs && anim == o.anim && parts == o.parts &&
+				speed == o.speed && loop == o.loop && startFrame == o.startFrame && endFrame == o.endFrame;
+		}
+	};
 	const char* ObjTypeName(ObjType t);
 
 	struct Object
@@ -35,6 +56,8 @@ namespace cs
 		int entNum = -1;		// live entity, -1 = not in the world
 		bool ai = false;		// false = cinematic (stands still), true = normal NPC AI
 		bool adopted = false;	// an NPC that was already in the level (not spawned by the studio)
+		std::string profile;	// animation profile (_humanoid_X); "" = the model's own
+		std::vector<AnimClip> clips;	// sorted by startUs
 
 		// camera
 		float fov = 80.0f;
@@ -52,6 +75,8 @@ namespace cs
 		virtual bool GetActorTransform(int ent, float origin[3], float angles[3]) = 0;
 		virtual void SetActorTransform(int ent, const float origin[3], const float angles[3]) = 0;
 		virtual void SetActorAI(int ent, bool on) = 0;
+		// animation profile ("" = the model's own); false + why if the skeletons don't match
+		virtual bool SetActorProfile(int ent, const std::string& profile, std::string& why) = 0;
 		virtual std::string MapName() = 0;
 		// files, relative to the game's write directory
 		virtual bool WriteFile(const std::string& path, const std::string& data) = 0;
@@ -114,6 +139,19 @@ namespace cs
 		bool SetTransform(int id, const float origin[3], const float angles[3], bool coalesce);
 		bool SetAI(int id, bool on);
 		bool Rename(int id, const std::string& name);
+		bool SetProfile(int id, const std::string& profile);	// validated by the host; refused = no change
+		bool SetNpcType(int id, const std::string& npcType);	// respawns the actor as another NPC
+		int Duplicate(int id);									// copy beside it (actors and cameras)
+
+		// animation clips (undoable); index into Object::clips, which stays sorted by start
+		int AddClip(int id, const AnimClip& clip);
+		bool SetClip(int id, int index, const AnimClip& clip, bool coalesce);	// returns the clip's new index via selectedClip
+		bool RemoveClip(int id, int index);
+		int selectedClip = -1;	// in the selected object
+
+		// The clip that drives an actor at scene time t: the latest one that started at or before t.
+		// local = time into the clip; holding = past the end of a non-looping clip (show its last frame).
+		static const AnimClip* ActiveClip(const Object& o, int64_t t, int64_t& localUs, bool& holding);
 		void Clear();				// empties the scene (removes spawned actors), not undoable
 		void Forget();				// empties the scene without touching the world (the level is gone)
 

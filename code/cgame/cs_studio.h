@@ -17,6 +17,7 @@ namespace cs
 		bool GetActorTransform(int ent, float origin[3], float angles[3]) override;
 		void SetActorTransform(int ent, const float origin[3], const float angles[3]) override;
 		void SetActorAI(int ent, bool on) override;
+		bool SetActorProfile(int ent, const std::string& profile, std::string& why) override;
 		std::string MapName() override;
 		bool WriteFile(const std::string& path, const std::string& data) override;
 		bool ReadFile(const std::string& path, std::string& out) override;
@@ -40,6 +41,30 @@ namespace cs
 	bool TraceFromView(const float start[3], const float dir[3], float dist, float hit[3]);
 
 	void UI_Message(int level, const std::string& msg);	// status line
+
+	// ---- Actor Manager (cs_actor.cpp) ----
+	struct AnimInfo
+	{
+		int anim = -1;			// animNumber_t
+		std::string name;		// BOTH_STAND1...
+		int numFrames = 0;
+		int frameLerp = 50;		// ms per frame
+		bool loops = false;
+	};
+	int ListAnims(int ent, std::vector<AnimInfo>& out);	// animations the actor's skeleton has
+	int AnimByName(const std::string& name);
+	bool AnimInfoFor(int ent, int anim, AnimInfo& out);
+	// Play (speed > 0) or pose (speed 0, at `frame`) an animation; frame < 0 = from the start of the range.
+	// The studio holds the actor until ReleaseAnim.
+	bool PoseAnim(int ent, int anim, int parts, float frame, float speed, bool loop, int startFrame, int endFrame, int blendMs);
+	void ReleaseAnim(int ent);
+	bool CurrentFrame(int ent, int& anim, float& relFrame);	// legs animation and its frame
+	std::vector<std::string> ListProfiles();				// _humanoid* folders with a .gla and animation.cfg
+	std::string DefaultProfile(int ent);
+	std::string CurrentProfile(int ent);
+	bool CheckProfile(int ent, const std::string& profile, std::string& why);
+	bool SetProfile(int ent, const std::string& profile, std::string& why);
+	bool ViewRay(float sx, float sy, float dir[3]);			// virtual screen point -> world direction
 }
 
 // called from the cgame

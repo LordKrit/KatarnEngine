@@ -106,6 +106,15 @@ namespace cs
 			return false;
 		}
 		host_->SetActorAI(o.entNum, o.ai);
+		if (!o.profile.empty())
+		{
+			std::string why;
+			if (!host_->SetActorProfile(o.entNum, o.profile, why))
+			{
+				host_->Log(1, o.name + ": animation profile " + o.profile + " not applied (" + why + ")");
+				o.profile.clear();
+			}
+		}
 		return true;
 	}
 
@@ -229,6 +238,146 @@ namespace cs
 		return true;
 	}
 
+	bool Scene::SetProfile(const int id, const std::string& profile)
+	{
+		Object* o = Find(id);
+		if (!o || o->type != ObjType::Actor) return false;
+		if (o->profile == profile) return true;
+		if (o->entNum >= 0)
+		{
+			std::string why;
+			if (!host_->SetActorProfile(o->entNum, profile, why))
+			{
+				host_->Log(2, "Can't use " + (profile.empty() ? std::string("the model's own profile") : profile) + " on " + o->name + ": " + why);
+				return false;
+			}
+		}
+		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = host_->NowMs();
+		o->profile = profile;
+		op.after = *o;
+		Push(op);
+		return true;
+	}
+
+	bool Scene::SetNpcType(const int id, const std::string& npcType)
+	{
+		Object* o = Find(id);
+		if (!o || o->type != ObjType::Actor || npcType.empty() || o->npcType == npcType) return false;
+		if (o->adopted)
+		{
+			host_->Log(1, o->name + " is a level character: duplicate it to make a studio actor of another type");
+			return false;
+		}
+		Object after = *o;
+		after.npcType = npcType;
+		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = host_->NowMs();
+		Apply(after, true);
+		o = Find(id);
+		if (!o || o->entNum < 0)
+		{
+			// couldn't spawn the new type: go back to the old one
+			if (o) Apply(op.before, true);
+			return false;
+		}
+		op.after = *o;
+		op.after.entNum = -1;
+		Push(op);
+		return true;
+	}
+
+	int Scene::Duplicate(const int id)
+	{
+		const Object* src = Find(id);
+		if (!src) return 0;
+		Object o = *src;
+		o.id = nextId_++;
+		std::string base = src->name;
+		const size_t sp = base.find_last_of(' ');
+		if (sp != std::string::npos && sp + 1 < base.size() && base.find_first_not_of("0123456789", sp + 1) == std::string::npos) base = base.substr(0, sp);
+		o.name = NewName(base);
+		o.origin[1] += 40.0f;
+		o.entNum = -1;
+		o.adopted = false;
+		if (o.type == ObjType::Actor && o.npcType.empty()) return 0;
+		if (o.type == ObjType::Actor && !Spawn(o)) return 0;
+		objects.push_back(o);
+		Op op; op.kind = Op::Add; op.after = o; op.timeMs = host_->NowMs();
+		Push(op);
+		selected = o.id;
+		return o.id;
+	}
+
+	static void SortClips(std::vector<AnimClip>& c)
+	{
+		std::stable_sort(c.begin(), c.end(), [](const AnimClip& a, const AnimClip& b) { return a.startUs < b.startUs; });
+	}
+
+	static int IndexOf(const std::vector<AnimClip>& c, const AnimClip& k)
+	{
+		for (size_t i = 0; i < c.size(); i++) if (c[i] == k) return static_cast<int>(i);
+		return -1;
+	}
+
+	int Scene::AddClip(const int id, const AnimClip& clip)
+	{
+		Object* o = Find(id);
+		if (!o || o->type != ObjType::Actor || clip.anim.empty()) return -1;
+		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = host_->NowMs();
+		AnimClip c = clip;
+		c.startUs = std::max<int64_t>(0, c.startUs);
+		c.lengthUs = std::max<int64_t>(1000, c.lengthUs);
+		o->clips.push_back(c);
+		SortClips(o->clips);
+		op.after = *o;
+		Push(op);
+		selectedClip = IndexOf(o->clips, c);
+		return selectedClip;
+	}
+
+	bool Scene::SetClip(const int id, const int index, const AnimClip& clip, const bool coalesce)
+	{
+		Object* o = Find(id);
+		if (!o || index < 0 || index >= static_cast<int>(o->clips.size())) return false;
+		AnimClip c = clip;
+		c.startUs = std::max<int64_t>(0, c.startUs);
+		c.lengthUs = std::max<int64_t>(1000, c.lengthUs);
+		const int64_t now = host_->NowMs();
+		const bool merge = coalesce && !undo_.empty() && undo_.back().kind == Op::Change && undo_.back().after.id == id &&
+			now - undo_.back().timeMs < 1000;
+		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = now;
+		o->clips[static_cast<size_t>(index)] = c;
+		SortClips(o->clips);
+		if (merge) { undo_.back().after = *o; undo_.back().timeMs = now; redo_.clear(); dirty = true; }
+		else { op.after = *o; Push(op); }
+		selectedClip = IndexOf(o->clips, c);
+		return true;
+	}
+
+	bool Scene::RemoveClip(const int id, const int index)
+	{
+		Object* o = Find(id);
+		if (!o || index < 0 || index >= static_cast<int>(o->clips.size())) return false;
+		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = host_->NowMs();
+		o->clips.erase(o->clips.begin() + index);
+		op.after = *o;
+		Push(op);
+		selectedClip = -1;
+		return true;
+	}
+
+	const AnimClip* Scene::ActiveClip(const Object& o, const int64_t t, int64_t& localUs, bool& holding)
+	{
+		const AnimClip* best = nullptr;
+		for (auto& c : o.clips)
+			if (c.startUs <= t && (!best || c.startUs >= best->startUs)) best = &c;
+		holding = false;
+		localUs = 0;
+		if (!best) return nullptr;
+		localUs = t - best->startUs;
+		if (!best->loop && localUs >= best->lengthUs) { holding = true; localUs = best->lengthUs; }
+		return best;
+	}
+
 	// Make the scene (and the world) hold `state` (exists) or not hold that object (!exists).
 	void Scene::Apply(const Object& state, const bool exists)
 	{
@@ -258,12 +407,28 @@ namespace cs
 		}
 		const int ent = cur->entNum;
 		const bool aiChanged = cur->ai != state.ai;
+		const bool typeChanged = cur->type == ObjType::Actor && cur->npcType != state.npcType;
+		const bool profileChanged = cur->profile != state.profile;
 		*cur = state;
 		cur->entNum = ent;		// the live entity, not the one in the snapshot
-		if (cur->type == ObjType::Actor && cur->entNum >= 0 && host_->ActorAlive(cur->entNum))
+		if (cur->type != ObjType::Actor) return;
+		if (typeChanged)
+		{
+			if (ent >= 0 && !cur->adopted) host_->RemoveActor(ent);
+			cur->adopted = false;
+			Spawn(*cur);		// also applies AI and the profile
+			return;
+		}
+		if (cur->entNum >= 0 && host_->ActorAlive(cur->entNum))
 		{
 			host_->SetActorTransform(cur->entNum, cur->origin, cur->angles);
 			if (aiChanged) host_->SetActorAI(cur->entNum, cur->ai);
+			if (profileChanged)
+			{
+				std::string why;
+				if (!host_->SetActorProfile(cur->entNum, cur->profile, why))
+					host_->Log(1, cur->name + ": animation profile not applied (" + why + ")");
+			}
 		}
 	}
 
@@ -307,6 +472,7 @@ namespace cs
 		undo_.clear();
 		redo_.clear();
 		selected = 0;
+		selectedClip = -1;
 		nextId_ = 1;
 		dirty = false;
 	}
@@ -317,6 +483,7 @@ namespace cs
 		undo_.clear();
 		redo_.clear();
 		selected = 0;
+		selectedClip = -1;
 		nextId_ = 1;
 		dirty = false;
 		project.clear();
@@ -383,6 +550,22 @@ namespace cs
 				j.set("npc", o.npcType);
 				j.set("ai", o.ai);
 				j.set("adopted", o.adopted);
+				if (!o.profile.empty()) j.set("profile", o.profile);
+				Json clips = Json::MakeArray();
+				for (auto& c : o.clips)
+				{
+					Json k = Json::MakeObject();
+					k.set("startUs", static_cast<double>(c.startUs));
+					k.set("lengthUs", static_cast<double>(c.lengthUs));
+					k.set("anim", c.anim);
+					k.set("parts", c.parts);
+					k.set("speed", static_cast<double>(c.speed));
+					k.set("loop", c.loop);
+					k.set("startFrame", c.startFrame);
+					k.set("endFrame", c.endFrame);
+					clips.push(k);
+				}
+				j.set("clips", clips);
 			}
 			else j.set("fov", static_cast<double>(o.fov));
 			objs.push(j);
@@ -481,6 +664,23 @@ namespace cs
 			{
 				o.npcType = j.get("npc").asString();
 				o.ai = j.get("ai").asBool(false);
+				o.profile = j.get("profile").asString();
+				const Json& clips = j.get("clips");
+				for (size_t k = 0; k < clips.size(); k++)
+				{
+					const Json& cj = clips[k];
+					AnimClip c;
+					c.startUs = static_cast<int64_t>(cj.get("startUs").asNumber(0));
+					c.lengthUs = static_cast<int64_t>(cj.get("lengthUs").asNumber(1e6));
+					c.anim = cj.get("anim").asString();
+					c.parts = cj.get("parts").asInt(PARTS_BOTH);
+					c.speed = static_cast<float>(cj.get("speed").asNumber(1));
+					c.loop = cj.get("loop").asBool(false);
+					c.startFrame = cj.get("startFrame").asInt(0);
+					c.endFrame = cj.get("endFrame").asInt(-1);
+					if (!c.anim.empty()) o.clips.push_back(c);
+				}
+				SortClips(o.clips);
 				// level NPCs that were adopted aren't in a fresh level by name: the studio respawns them
 				o.adopted = false;
 				if (o.npcType.empty()) { warnings.push_back(o.name + ": no NPC type"); continue; }

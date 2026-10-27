@@ -7068,7 +7068,7 @@ void PM_SetAnimFinal(int* torso_anim, int* legs_anim,
 			animSpeed *= gent->client->ps.forceUpperAnimSpeed;
 		}
 
-		gi.G2API_SetAnimIndex(&gent->ghoul2[gent->playerModel], cur_anim.glaIndex);
+		gi.G2API_SetAnimIndex(&gent->ghoul2[gent->playerModel], cur_anim.glaIndex + CS_GlaOffset(gent));
 		gi.G2API_SetBoneAnimIndex(&gent->ghoul2[gent->playerModel], tors_bone,
 			anim_start,
 			anim_end,
@@ -7116,7 +7116,7 @@ void PM_SetAnimFinal(int* torso_anim, int* legs_anim,
 			animSpeed *= gent->client->ps.forceLowerAnimSpeed;
 		}
 
-		gi.G2API_SetAnimIndex(&gent->ghoul2[gent->playerModel], cur_anim.glaIndex);
+		gi.G2API_SetAnimIndex(&gent->ghoul2[gent->playerModel], cur_anim.glaIndex + CS_GlaOffset(gent));
 		gi.G2API_SetBoneAnimIndex(&gent->ghoul2[gent->playerModel], body_bone,
 			anim_start,
 			anim_end,

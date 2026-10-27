@@ -1393,7 +1393,7 @@ static void CG_PlayerAnimEvents(const int anim_file_index, const qboolean torso,
 	// Determine GLA index for model
 	if (g_entities[entNum].ghoul2.size())
 	{
-		gla_index = gi.G2API_GetAnimIndex(&g_entities[entNum].ghoul2[0]);
+		gla_index = gi.G2API_GetAnimIndex(&g_entities[entNum].ghoul2[0]) - CS_GlaOffset(&g_entities[entNum]);
 	}
 
 	// Select torso or legs event table

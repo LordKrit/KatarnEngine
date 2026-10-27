@@ -475,6 +475,11 @@ float vectoyaw(const vec3_t vec);
 
 void G_AddEvent(gentity_t* ent, int event, int event_parm);
 void G_SetOrigin(gentity_t* ent, const vec3_t origin);
+// JK BUILD Cinematic Studio (cgame/cs_actor.cpp): an actor switched to another animation profile plays
+// its animations from another .gla: offset of that .gla's handle from the model's own
+int CS_GlaOffset(const gentity_t* ent);
+void CS_ClearEntity(int entNum);
+void CS_ClearAllEntities();
 void G_SetAngles(gentity_t* ent, const vec3_t angles);
 
 void G_DebugLine(vec3_t a, vec3_t b, int duration, int color);

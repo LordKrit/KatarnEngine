@@ -2469,7 +2469,7 @@ static void G_FreezeOnLastFrame(gentity_t* ent, const int anim)
 	const int last_frame = cur_anim.firstFrame + cur_anim.numFrames - 1;
 	const int time = cg.time ? cg.time : level.time;
 
-	gi.G2API_SetAnimIndex(&ent->ghoul2[ent->playerModel], cur_anim.glaIndex);
+	gi.G2API_SetAnimIndex(&ent->ghoul2[ent->playerModel], cur_anim.glaIndex + CS_GlaOffset(ent));
 	for (const int bone : { ent->rootBone, ent->lowerLumbarBone, ent->motionBone })
 	{
 		if (bone != -1)
