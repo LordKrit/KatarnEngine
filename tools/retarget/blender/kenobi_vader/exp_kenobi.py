@@ -150,6 +150,44 @@ if not KEEP_SOURCE_ARMOUR:
 exec(open('/home/claude/vbf2/vfix2.py').read())     # cape inner lining (if any) out
 
 cm = bpy.data.objects['mat_cape']
+# the cape is modelled draped over T-pose arms, so its sides stand out like wings once the arms come down.
+# Draw the sides in below the shoulders so they hang just outside the arms (shape keys/none, so edit coords).
+CAPE_TUCK = globals().get('CAPE_TUCK', 0.24)
+_mw = cm.matrix_world; _mi = _mw.inverted()
+for v in cm.data.vertices:
+    p = _mw @ v.co
+    k = 1 - CAPE_TUCK * (1 - _sm(1.18, 1.36, p.z))
+    p.x *= k; v.co = _mi @ p
+# BF2 look: cape lies flat on sloped shoulders (no hump) and the sides fall behind the arms
+CAPE_SH_DROP = globals().get('CAPE_SH_DROP', 0.0); CAPE_SH_IN = globals().get('CAPE_SH_IN', 0.0)
+CAPE_SWEEP = globals().get('CAPE_SWEEP', 0.05)
+_bo = [o for o in bpy.data.objects if o.type == 'MESH' and o.name.startswith('mat_body')]
+_cy = sum((_mw @ v.co).y for v in cm.data.vertices) / len(cm.data.vertices)
+_by = sum((o.matrix_world @ v.co).y for o in _bo for v in o.data.vertices) / max(1, sum(len(o.data.vertices) for o in _bo))
+_back = 1.0 if _cy > _by else -1.0
+for v in cm.data.vertices:
+    p = _mw @ v.co; ax = abs(p.x)
+    sh = _sm(1.26, 1.40, p.z) * (1 - _sm(1.50, 1.62, p.z)) * _sm(0.07, 0.20, ax)
+    p.z -= CAPE_SH_DROP * sh; p.x *= 1 - CAPE_SH_IN * sh
+    p.y += _back * CAPE_SWEEP * _sm(0.09, 0.20, ax) * (1 - _sm(1.20, 1.38, p.z))
+    v.co = _mi @ p
+print('CAPE back sign', _back)
+# keep the cape on top of the armour: anything under / too close to the body is lifted out along the surface normal
+from mathutils.bvhtree import BVHTree
+import bmesh
+_bm = bmesh.new()
+for o in _bo:
+    t = o.data.copy(); t.transform(o.matrix_world); _bm.from_mesh(t); bpy.data.meshes.remove(t)
+_tree = BVHTree.FromBMesh(_bm); CAPE_GAP = globals().get('CAPE_GAP', 0.012); n_l = 0
+for v in cm.data.vertices:
+    p = _mw @ v.co
+    if p.z < 1.15: continue
+    hit = _tree.find_nearest(p)
+    if hit[0] is None: continue
+    d = (p - hit[0]).dot(hit[1])
+    if d < CAPE_GAP:
+        v.co = _mi @ (p + hit[1] * (CAPE_GAP - d)); n_l += 1
+print('CAPE lifted off armour', n_l)
 sp = cm.vertex_groups.get('Spine2') or cm.vertex_groups.new(name='Spine2')
 drop = {g.index for g in cm.vertex_groups if re.search(r'(Arm|Elbow|Deltoid|Shoulder|Knee|Leg|Foot|Toe|^Hips$|^Spine$|^Spine1$)', g.name)}   # cape top rides the chest like the armour
 for v in cm.data.vertices:
@@ -163,8 +201,9 @@ if KEEP_SOURCE_ARMOUR:
     mwc = cm.matrix_world; n_c = 0
     for v in cm.data.vertices:
         p = mwc @ v.co
-        if p.z < 1.33: continue
-        t = _sm(0.12, 0.21, abs(p.x)) * BELL_FOLLOW
+        if p.z < 1.30: continue
+        # fade in with height so the sides below the shoulder hang from the chest, not the arm (no wings)
+        t = _sm(0.12, 0.21, abs(p.x)) * _sm(1.30, 1.46, p.z) * BELL_FOLLOW
         if t <= 0: continue
         ar = cm.vertex_groups.get(('Left' if p.x > 0 else 'Right') + 'Arm') or cm.vertex_groups.new(name=('Left' if p.x > 0 else 'Right') + 'Arm')
         tot = sum(ge.weight for ge in v.groups) or 1.0

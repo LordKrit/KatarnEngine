@@ -1,0 +1,1 @@
+g++ -O2 -std=c++17 -DMC_DEBUG -DARCH_STRING='"x86_64"' -I/home/claude/md/code -I/home/claude/md/code/rd-vanilla -I/home/claude/md/shared harness.cpp /home/claude/md/code/rd-vanilla/tr_meshcloth.cpp /home/claude/md/code/qcommon/matcomp.cpp /home/claude/md/code/qcommon/q_shared.cpp q_math.o q_string.o -o harness 2>&1 | grep -E " error"
