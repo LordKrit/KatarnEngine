@@ -58,6 +58,22 @@ for i in ([] if KEEP_SOURCE_ARMOUR else armor):
 def _sm(a, b, x):
     t = min(1, max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t)
 pads = 0
+if KEEP_SOURCE_ARMOUR:
+    # BF2 hangs the shoulder bells ~85% on the clavicle bone, which barely moves in BF2. Movie Duels
+    # animations lift and roll the clavicles a lot (stances, swings), which puffs the bells up and out.
+    # Keep 40% of that weight on the clavicle and give the rest to the chest.
+    for i in armor:
+        x = P[i][0]
+        if abs(x) < 0.15: continue
+        side = 'Left' if x > 0 else 'Right'
+        g = bo.vertex_groups.get(side + 'Shoulder')
+        if g is None: continue
+        for ge in bo.data.vertices[i].groups:
+            if ge.group == g.index and ge.weight > 0:
+                moved_w = ge.weight * 0.6
+                g.add([i], ge.weight - moved_w, 'REPLACE'); sp.add([i], moved_w, 'ADD'); pads += 1
+                break
+    print('PAD verts eased off the clavicle', pads)
 for i in ([] if KEEP_SOURCE_ARMOUR else armor):
     x = P[i][0]; t = _sm(0.14, 0.22, abs(x))
     if t <= 0: continue
@@ -80,7 +96,10 @@ for side in (() if KEEP_SOURCE_ARMOUR else ('Left', 'Right')):
         k = 1.0 - min(1, max(0, (t - 0.02) / 0.10)); up = max(0.0, r.normalized().z)
         v.co = mi @ (axis + r * (1.0 - 0.18 * k * (0.3 + 0.7 * up))); moved += 1
 print('SLEEVE tucked', moved)
-exec(open('/home/claude/vbf2/vfix.py').read())      # hidden undersuit out, cape off the armour
+if not KEEP_SOURCE_ARMOUR:
+    exec(open('/home/claude/vbf2/vfix.py').read())  # hidden undersuit out, cape off the armour
+# (with BF2's own weights the plates move on their own: the undersuit behind them must stay,
+#  and the cape keeps its modelled fit)
 exec(open('/home/claude/vbf2/vfix2.py').read())     # cape inner lining (if any) out
 
 cm = bpy.data.objects['mat_cape']
