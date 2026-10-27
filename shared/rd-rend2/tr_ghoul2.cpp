@@ -3942,14 +3942,14 @@ static bool MC_HiltCapsule(const mdxmSurface_t* clothSurf, CBoneCache* bones, co
 	if (VectorNormalize(dir) < 1e-4f) return false;
 	VectorScale(dir, -1.0f, dir);	// blade direction
 	vec3_t la, lb;
-	VectorMA(p[MDX_TAG_ORIGIN], -4.0f, dir, la);
-	VectorMA(p[MDX_TAG_ORIGIN], 9.0f, dir, lb);
+	VectorMA(p[MDX_TAG_ORIGIN], -r_meshClothHiltBack->value, dir, la);
+	VectorMA(p[MDX_TAG_ORIGIN], r_meshClothHiltLen->value, dir, lb);
 	for (int r = 0; r < 3; r++)
 	{
 		cap.a[r] = ent->e.origin[r] + axis[0][r] * la[0] + axis[1][r] * la[1] + axis[2][r] * la[2];
 		cap.b[r] = ent->e.origin[r] + axis[0][r] * lb[0] + axis[1][r] * lb[1] + axis[2][r] * lb[2];
 	}
-	cap.r = 1.6f;
+	cap.r = r_meshClothHiltRadius->value > 0.1f ? r_meshClothHiltRadius->value : 0.1f;
 	cap.hard = 1;
 	return true;
 }
@@ -4204,8 +4204,11 @@ static mcR2Inst_t* RB_MeshClothUpdate(CRenderableSurface* surf, const mdxmSurfac
 	}
 
 	// saber hilts in both hands
-	if (MC_HiltCapsule(surface, bones, "*r_hand", ent, axis, caps[ncaps])) ncaps++;
-	if (MC_HiltCapsule(surface, bones, "*l_hand", ent, axis, caps[ncaps])) ncaps++;
+	if (r_meshClothHilt->integer)
+	{
+		if (MC_HiltCapsule(surface, bones, "*r_hand", ent, axis, caps[ncaps])) ncaps++;
+		if (MC_HiltCapsule(surface, bones, "*l_hand", ent, axis, caps[ncaps])) ncaps++;
+	}
 
 	// CPU skinning: positions, normals and tangents
 	static std::vector<float> xyzBuf, nrmBuf, tanBuf;
@@ -4257,6 +4260,9 @@ static mcR2Inst_t* RB_MeshClothUpdate(CRenderableSurface* surf, const mdxmSurfac
 		prm.wind[0] = w[0]; prm.wind[1] = w[1]; prm.wind[2] = w[2];
 	}
 	prm.gust = r_meshClothGust->value;
+	prm.xpbd = r_meshClothXPBD->integer;
+	prm.xpbdIters = r_meshClothXPBDIter->integer;
+	prm.frictionScale = r_meshClothFriction->value < 0.0f ? 0.0f : r_meshClothFriction->value;
 	prm.timeSec = 0.0f;
 	MC_FloorUnder(ent, timeMs, prm);
 	MC_Apply(surface, bones, timeMs, ent->e.origin, axis, caps, ncaps, &prm,

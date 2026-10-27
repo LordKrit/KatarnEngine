@@ -74,6 +74,9 @@ struct mcDef_t {
 								// directly (angular inertia scale); the rest it feels as inertia. 0 = off
 	float			thickness;	// cloth thickness in units: keeps it this far off the body (half) and off itself (full)
 	float			weight;		// relative mass per area: 1 = normal cloth, 2 = heavy wool/leather (air moves it half as much), 0.5 = silk
+	float			stretch;	// 0..1 XPBD stretch give: 0 = rigid (default), 0.2 = a little elastic
+	float			friction;	// 0..1 kinetic friction against the body and floor (default 0.3)
+	float			sfriction;	// static friction: contacts sliding slower than this x the push stick (default 0.5)
 	int				proxy;		// simulation grid: 0 or -1 = none (every point simulated), N = a coarse grid of about N points
 };
 
@@ -92,6 +95,7 @@ struct mcGroup_t {
 	std::vector<float>					maxSpin;		// per particle
 	std::vector<float>					spread;			// per particle
 	std::vector<float>					weight;			// per particle
+	std::vector<float>					stretchG, fricK, fricS;	// per particle: XPBD stretch give, kinetic / static friction
 	std::vector<float>					thick;			// per particle: cloth thickness
 	float								selfThick = 1.2f;	// self-collision distance (largest thickness of the self-colliding surfaces)
 	std::vector<char>					hangs;			// per particle: hanging cloth ("above" rule: capes, robes, skirts)
@@ -149,6 +153,7 @@ struct mcInstance_t {
 	std::vector<float>	scratchTarget, scratchFrom, scratchTo, scratchN;
 	std::vector<float>	push, contactN, targetSub;	// per particle: this substep's body push, contact normal, previous substep target
 	std::vector<char>	contact;
+	std::vector<float>	lambda;			// XPBD: accumulated multiplier per link (reset every substep)
 	std::vector<float>	scratchTarget2, scratchCnt;
 	std::vector<float>	drawTarget, drawOut;	// 3 per drawn point, world
 	std::vector<char>	scratchDone;
@@ -419,6 +424,7 @@ mcGroup_t *MakeProxy( mcGroup_t *r, int want ) {
 		g->smooth.push_back( r->smooth[s] ); g->maxAccel.push_back( r->maxAccel[s] );
 		g->maxSpin.push_back( r->maxSpin[s] ); g->spread.push_back( r->spread[s] );
 		g->weight.push_back( r->weight[s] ); g->thick.push_back( r->thick[s] );
+		g->stretchG.push_back( r->stretchG[s] ); g->fricK.push_back( r->fricK[s] ); g->fricS.push_back( r->fricS[s] );
 		g->hangs.push_back( r->hangs[s] ); g->hardCol.push_back( r->hardCol[s] );
 		mcCopy( &r->bindPos[s * 3], &g->bindPos[i * 3] );
 	}
@@ -597,6 +603,9 @@ mcGroup_t *BuildGroup( const mdxmSurface_t *seed, const char *folder ) {
 				g->maxSpin.push_back( g->defs[si]->maxSpin );
 				g->spread.push_back( g->defs[si]->spread );
 				g->weight.push_back( g->defs[si]->weight );
+				g->stretchG.push_back( g->defs[si]->stretch );
+				g->fricK.push_back( g->defs[si]->friction );
+				g->fricS.push_back( g->defs[si]->sfriction );
 				g->thick.push_back( g->defs[si]->thickness );
 				g->hardCol.push_back( g->defs[si]->rule == MC_RULE_SEGMENT ? 0 : 1 );
 				g->hangs.push_back( g->defs[si]->rule == MC_RULE_ABOVE ? 1 : 0 );
@@ -793,10 +802,28 @@ int CullCapsules( const mcGroup_t *g, const std::vector<float> &target, const mc
 	return n;
 }
 
+// XPBD compliance (Macklin, Mueller & Chentanez 2016) from a 0..1 'give': the fraction of a
+// constraint's error left over per substep at the reference 6 substeps per 16 ms. Calibrated
+// so the default setup behaves exactly like the old position projection, but stiffness no
+// longer depends on the substep count, and extra solver iterations converge instead of
+// making cloth stiffer.
+inline float GiveToCompliance( float give ) {
+	if ( give <= 0.0f ) return 0.0f;
+	if ( give > 0.999f ) give = 0.999f;
+	const float h6 = MC_DT / 6.0f;
+	const float frac = 1.0f - give;				// error removed per reference substep
+	return h6 * h6 * 2.0f * ( 1.0f / frac - 1.0f );
+}
+inline float BendCompliance( float bs ) {
+	if ( bs <= 0.0f ) return -1.0f;				// no bending resistance
+	const float b = bs < 0.99f ? bs : 0.99f;
+	return GiveToCompliance( powf( 1.0f - b, 1.0f / 6.0f ) );
+}
+
 // One pass over every constraint, Gauss-Seidel. bendK is the per-substep
 // fraction of the bend error removed (stiffness made independent of the
 // substep count by the caller).
-void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps, float bendScale ) {
+void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *caps, int ncaps, float bendScale, float h, int xpbd, int xpbdIters ) {
 	if ( (int)in->contact.size() != g->numParticles ) {
 		in->contact.assign( g->numParticles, 0 );
 		in->push.assign( (size_t)g->numParticles * 3, 0.0f );
@@ -810,27 +837,64 @@ void SolveConstraints( const mcGroup_t *g, mcInstance_t *in, const mcCapsule_t *
 	}
 	// stretch: the fabric keeps the edge lengths the animated mesh has now
 	// (rigidly - real cloth barely stretches); bend links resist folding
-	for ( size_t l = 0; l < g->linkA.size(); l++ ) {
-		const int a = g->linkA[l], b = g->linkB[l];
-		const float wa = g->freedom[a] > 0.0f ? 1.0f : 0.0f, wb = g->freedom[b] > 0.0f ? 1.0f : 0.0f;
-		if ( wa + wb == 0.0f ) continue;
-		float *pa = &in->p[a * 3], *pb = &in->p[b * 3];
-		vec3_t dT, d;
-		mcSub( &in->target[b * 3], &in->target[a * 3], dT );
-		const float rest = mcLen( dT );
-		mcSub( pb, pa, d );
-		const float len = mcLen( d );
-		if ( len < 1e-5f ) continue;
-		float k = ( len - rest ) / ( len * ( wa + wb ) );
-		if ( g->linkBend[l] ) {
-			const float bs = 0.5f * ( g->bend[a] + g->bend[b] );
-			if ( bs <= 0.0f || bendScale <= 0.0f ) continue;
-			// the fraction of the fold removed per substep, so that one
-			// 16 ms step removes 'bend' of it whatever the substep count
-			k *= 1.0f - powf( 1.0f - ( bs < 0.99f ? bs : 0.99f ), bendScale );
+	if ( xpbd ) {
+		// XPBD: compliant constraints with accumulated multipliers
+		if ( in->lambda.size() != g->linkA.size() ) in->lambda.assign( g->linkA.size(), 0.0f );
+		std::fill( in->lambda.begin(), in->lambda.end(), 0.0f );
+		const float ih2 = 1.0f / ( h * h );
+		const int iters = xpbdIters < 1 ? 1 : ( xpbdIters > 8 ? 8 : xpbdIters );
+		for ( int it = 0; it < iters; it++ ) {
+			for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+				const int a = g->linkA[l], b = g->linkB[l];
+				const float wa = g->freedom[a] > 0.0f ? 1.0f : 0.0f, wb = g->freedom[b] > 0.0f ? 1.0f : 0.0f;
+				if ( wa + wb == 0.0f ) continue;
+				float alpha;
+				if ( g->linkBend[l] ) {
+					alpha = BendCompliance( 0.5f * ( g->bend[a] + g->bend[b] ) );
+					if ( alpha < 0.0f ) continue;
+				} else {
+					alpha = GiveToCompliance( 0.5f * ( g->stretchG[a] + g->stretchG[b] ) );
+				}
+				float *pa = &in->p[a * 3], *pb = &in->p[b * 3];
+				vec3_t dT, d;
+				mcSub( &in->target[b * 3], &in->target[a * 3], dT );
+				const float rest = mcLen( dT );
+				mcSub( pb, pa, d );
+				const float len = mcLen( d );
+				if ( len < 1e-5f ) continue;
+				const float C = len - rest;
+				const float at = alpha * ih2;
+				const float dl = ( -C - at * in->lambda[l] ) / ( wa + wb + at );
+				in->lambda[l] += dl;
+				// gradient: -n at a, +n at b (n = d / len)
+				const float s_ = dl / len;
+				mcMA( pa, -s_ * wa, d, pa );
+				mcMA( pb, s_ * wb, d, pb );
+			}
 		}
-		mcMA( pa, k * wa, d, pa );
-		mcMA( pb, -k * wb, d, pb );
+	} else {
+		for ( size_t l = 0; l < g->linkA.size(); l++ ) {
+			const int a = g->linkA[l], b = g->linkB[l];
+			const float wa = g->freedom[a] > 0.0f ? 1.0f : 0.0f, wb = g->freedom[b] > 0.0f ? 1.0f : 0.0f;
+			if ( wa + wb == 0.0f ) continue;
+			float *pa = &in->p[a * 3], *pb = &in->p[b * 3];
+			vec3_t dT, d;
+			mcSub( &in->target[b * 3], &in->target[a * 3], dT );
+			const float rest = mcLen( dT );
+			mcSub( pb, pa, d );
+			const float len = mcLen( d );
+			if ( len < 1e-5f ) continue;
+			float k = ( len - rest ) / ( len * ( wa + wb ) );
+			if ( g->linkBend[l] ) {
+				const float bs = 0.5f * ( g->bend[a] + g->bend[b] );
+				if ( bs <= 0.0f || bendScale <= 0.0f ) continue;
+				// the fraction of the fold removed per substep, so that one
+				// 16 ms step removes 'bend' of it whatever the substep count
+				k *= 1.0f - powf( 1.0f - ( bs < 0.99f ? bs : 0.99f ), bendScale );
+			}
+			mcMA( pa, k * wa, d, pa );
+			mcMA( pb, -k * wb, d, pb );
+		}
 	}
 	for ( int p = 0; p < g->numParticles; p++ ) {
 		const float f = g->freedom[p];
@@ -922,9 +986,8 @@ void Reset( mcInstance_t *in, int time ) {
 // position correction into speed, so a leg pushing the cape out would
 // throw it. The push is kept as a move but mostly not as speed, and the
 // sliding speed against the moving body is cut by friction.
-void ContactVelocity( const mcGroup_t *g, mcInstance_t *in ) {
+void ContactVelocity( const mcGroup_t *g, mcInstance_t *in, float frictionScale ) {
 	const float keepPush = 0.2f;	// part of the push that may become speed
-	const float friction = 0.3f;	// tangential speed removed per substep in contact
 	for ( int p = 0; p < g->numParticles; p++ ) {
 		if ( !in->contact[p] || g->freedom[p] <= 0.0f ) continue;
 		float *pp = &in->p[p * 3], *pv = &in->prev[p * 3];
@@ -937,7 +1000,14 @@ void ContactVelocity( const mcGroup_t *g, mcInstance_t *in ) {
 		const float *n = &in->contactN[p * 3];
 		const float vn = mcDot( vr, n );
 		mcMA( vr, -vn, n, vt );
-		mcMA( pv, friction, vt, pv );
+		// Coulomb friction (Macklin et al. 2014): a contact that slides less than
+		// sfriction x how hard it is pressed in sticks to the body (cloth resting on
+		// shoulders stops buzzing); otherwise kinetic friction slows the slide.
+		const float press = mcLen( &in->push[p * 3] ) + ( vn < 0.0f ? -vn : 0.0f );
+		const float slide = mcLen( vt );
+		float k = Clamp01( g->fricK[p] * frictionScale );
+		if ( slide <= g->fricS[p] * frictionScale * press ) k = 1.0f;
+		mcMA( pv, k, vt, pv );
 		// no new speed into the body
 		if ( vn < 0.0f ) mcMA( pv, vn, n, pv );
 	}
@@ -1090,7 +1160,8 @@ static void FloorCollide( const mcGroup_t *g, mcInstance_t *in, const mcParams_t
 		mcScale( prm->floorN, mcDot( v, prm->floorN ), vn );
 		vec3_t vt;
 		mcSub( v, vn, vt );
-		mcMA( pv, 0.6f, vt, pv );
+		const float fk = Clamp01( 0.3f + g->fricK[p] * prm->frictionScale );	// floors grip a little more than bodies
+		mcMA( pv, fk, vt, pv );
 		if ( mcDot( v, prm->floorN ) < 0.0f ) mcAdd( pv, vn, pv );
 	}
 }
@@ -1341,9 +1412,9 @@ void Step( const mcGroup_t *g, mcInstance_t *in, const std::vector<float> &tgtFr
 				mcMA( pp, k, d, pp );
 			}
 		}
-		SolveConstraints( g, in, caps, ncaps, bendScale );
+		SolveConstraints( g, in, caps, ncaps, bendScale, h, prm->xpbd, prm->xpbdIters );
 		FloorCollide( g, in, prm );
-		ContactVelocity( g, in );
+		ContactVelocity( g, in, prm->frictionScale );
 	}
 	in->impulse.clear();
 	SelfCollide( g, in );
@@ -1733,6 +1804,9 @@ int MC_LoadConfig( const char *text ) {
 		d.weight = 1.0f;
 		d.thickness = 1.2f;
 		d.proxy = -1;
+		d.stretch = 0.0f;
+		d.friction = 0.3f;
+		d.sfriction = 0.5f;
 		while ( 1 ) {
 			tok = COM_ParseExt( &p, qfalse );
 			if ( !tok[0] ) break;
@@ -1749,6 +1823,9 @@ int MC_LoadConfig( const char *text ) {
 			else if ( !Q_stricmp( tok, "maxaccel" ) ) { d.maxAccel = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.maxAccel < 0.0f ) d.maxAccel = 0.0f; }
 			else if ( !Q_stricmp( tok, "smooth" ) ) d.smooth = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 			else if ( !Q_stricmp( tok, "inertia" ) ) d.inertia = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
+			else if ( !Q_stricmp( tok, "stretch" ) ) { d.stretch = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) ); if ( d.stretch > 0.95f ) d.stretch = 0.95f; }
+			else if ( !Q_stricmp( tok, "friction" ) ) d.friction = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
+			else if ( !Q_stricmp( tok, "sfriction" ) ) { d.sfriction = (float)atof( COM_ParseExt( &p, qfalse ) ); if ( d.sfriction < 0.0f ) d.sfriction = 0.0f; if ( d.sfriction > 4.0f ) d.sfriction = 4.0f; }
 			else if ( !Q_stricmp( tok, "bend" ) ) d.bend = Clamp01( (float)atof( COM_ParseExt( &p, qfalse ) ) );
 		}
 		if ( d.tether < 0.0f ) d.tether = 0.0f;

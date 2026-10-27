@@ -45,10 +45,18 @@ from a config text (ext_data/meshcloth.cfg), one line per surface:
   spread   0..1 sideways-only pull toward the animated shape: keeps a
            cape from rolling into a rope in saber spins without slowing
            its swing front to back. Default 0.
+  stretch  0..1 XPBD stretch give: 0 = rigid fabric (default), 0.1-0.3 = a
+           little elastic (knits, leather straps).
+  friction 0..1 kinetic friction against the body and the floor. Default 0.3.
+  sfriction static friction: a contact sliding slower than sfriction x how
+           hard it is pressed in sticks (cloth rests on shoulders instead of
+           buzzing). Default 0.5. 0 = off.
   shape    0..1 optional pull back toward the modelled shape. Default 0
            (real cloth: only the attached part follows the animation).
 
-The solver is position-based dynamics with substeps (r_meshClothIter
+The solver is XPBD (r_meshClothXPBD 1, default; compliance from bend/stretch,
+r_meshClothXPBDIter iterations per substep) or plain position-based dynamics
+(r_meshClothXPBD 0), with substeps (r_meshClothIter
 substeps per 16 ms), rigid stretch constraints, bending, long range
 attachments, body capsules and an inertia scale (r_meshClothInertia).
 ===========================================================================
@@ -73,6 +81,9 @@ struct mcParams_t {
 	float	wind[3];		// world wind velocity, units/s (still air = 0 0 0)
 	float	gust;			// 0..1 how much the wind strength varies over time
 	float	timeSec;		// current time for gusts (filled in by MC_Apply)
+	int		xpbd;			// 1: XPBD constraints (compliance, substep independent); 0: old projection
+	int		xpbdIters;		// XPBD solver iterations per substep
+	float	frictionScale;	// multiplies every surface's friction (0 = frictionless)
 	int		floor;			// 1: floorPt / floorN hold the floor plane under the character (world)
 	float	floorPt[3];
 	float	floorN[3];

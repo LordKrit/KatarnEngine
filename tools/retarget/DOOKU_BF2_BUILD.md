@@ -20,3 +20,10 @@ python3 jka_retarget.py rig dooku4.glb --gla _humanoid_dooku/_humanoid.gla --map
 5. Cape settings: `ext_data/meshcloth.cfg` (dooku_bf2 lines, `above 50 46.5`).
 
 Preview helpers: hiltview.py (saber in hand vs MD Dooku), facepose.py (face poses), preview.py.
+
+## BF2 Vader (vader_bf2)
+Source: ROTS_Darth_Vader.fbx. Only the cape comes skinned, so `blender/export_vader.py` skins the body, gloves and
+inner cape by distance to the bone segments and binds the helmet to Head, then writes vader.glb plus LODs 1-3.
+Rig: same command as Dooku, but with `--gla _humanoid_vader/_humanoid.gla --tags darthvader/model.glm --name vader_bf2
+--ground-drop 2.6`, no face bones. The NPC is MD's md_vader_ep3 entry with playerModel vader_bf2.
+Shipped as zzz_vader_bf2.pk3 plus zzz_vader_bf2_skel.pk3 (the gla), and a cape line in meshcloth.cfg.

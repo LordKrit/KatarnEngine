@@ -132,6 +132,13 @@ cvar_t* r_meshClothMaxAccel;
 cvar_t* r_meshClothAirDrag;
 cvar_t* r_meshClothWind;
 cvar_t* r_meshClothGust;
+cvar_t* r_meshClothXPBD;
+cvar_t* r_meshClothXPBDIter;
+cvar_t* r_meshClothFriction;
+cvar_t* r_meshClothHilt;
+cvar_t* r_meshClothHiltLen;
+cvar_t* r_meshClothHiltBack;
+cvar_t* r_meshClothHiltRadius;
 cvar_t* r_shadowRange;
 cvar_t* r_flares;
 cvar_t* r_nobind;
@@ -1781,6 +1788,13 @@ static void R_Register()
 	r_meshClothAirDrag = ri.Cvar_Get("r_meshClothAirDrag", "2.5", CVAR_ARCHIVE);
 	r_meshClothWind = ri.Cvar_Get("r_meshClothWind", "0 0 0", CVAR_ARCHIVE);
 	r_meshClothGust = ri.Cvar_Get("r_meshClothGust", "0.5", CVAR_ARCHIVE);
+	r_meshClothXPBD = ri.Cvar_Get("r_meshClothXPBD", "1", CVAR_ARCHIVE);
+	r_meshClothXPBDIter = ri.Cvar_Get("r_meshClothXPBDIter", "2", CVAR_ARCHIVE);
+	r_meshClothFriction = ri.Cvar_Get("r_meshClothFriction", "1", CVAR_ARCHIVE);
+	r_meshClothHilt = ri.Cvar_Get("r_meshClothHilt", "1", CVAR_ARCHIVE);
+	r_meshClothHiltLen = ri.Cvar_Get("r_meshClothHiltLen", "10", CVAR_ARCHIVE);
+	r_meshClothHiltBack = ri.Cvar_Get("r_meshClothHiltBack", "4", CVAR_ARCHIVE);
+	r_meshClothHiltRadius = ri.Cvar_Get("r_meshClothHiltRadius", "1.8", CVAR_ARCHIVE);
 	r_shadowRange = ri.Cvar_Get("r_shadowRange", "1000", CVAR_ARCHIVE_ND);
 	/*
 	Ghoul2 Insert Start

@@ -1200,6 +1200,13 @@ extern	cvar_t* r_meshClothMaxAccel;
 extern cvar_t* r_meshClothAirDrag;
 extern cvar_t* r_meshClothWind;
 extern cvar_t* r_meshClothGust;
+extern cvar_t* r_meshClothXPBD;
+extern cvar_t* r_meshClothXPBDIter;
+extern cvar_t* r_meshClothFriction;
+extern cvar_t* r_meshClothHilt;
+extern cvar_t* r_meshClothHiltLen;
+extern cvar_t* r_meshClothHiltBack;
+extern cvar_t* r_meshClothHiltRadius;
 void R_MeshClothLoadConfig();
 void R_MeshClothShutdown();						// controls shadows: 0 = none, 1 = blur, 2 = stencil, 3 = black planar projection
 extern	cvar_t* r_flares;						// light flares
