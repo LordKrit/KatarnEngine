@@ -81,7 +81,19 @@ namespace cs
 	void SetSolid(int ent, bool solid);
 	// saber clashes between take-driven actors and any other blade (sparks, sound, flash); bounceLive:
 	// knock back the attacks of characters the game drives (you, while recording). Returns how many.
-	int DetectClashes(const std::vector<int>& takeEnts, bool bounceLive);			// a prop your saber can hit (still can't be hurt)
+	int DetectClashes(const std::vector<int>& takeEnts, bool bounceLive);
+
+	// ---- Combat replay (cs_replay.cpp, Phase 5) ----
+	struct CapturedEvent { WorldEvent ev; int actorEnt = -1, other2Ent = -1; int64_t absUs = 0; };
+	void SetEventCapture(bool on);				// off also forgets what was captured
+	bool EventCaptureOn();
+	std::vector<CapturedEvent> TakeCapturedEvents();
+	void PruneCapturedEvents(int64_t beforeUs);
+	void SetCaptureSkip(const std::vector<int>& ents);	// the studio's playback actors (their events aren't captured)
+	int64_t CaptureNowUs();						// the clock captured events and replay samples use
+	void FireEvent(const WorldEvent& ev, int actorEnt, int other2Ent);
+	void SetForceView(int ent, int forceBits, int takeFlags);	// until the frame is drawn
+	void ForceState(int ent, int& forceBits, int& takeFlags);			// a prop your saber can hit (still can't be hurt)
 }
 
 // called from the cgame
@@ -95,3 +107,6 @@ bool CS_ApplyView();					// after the view is built: the studio camera, if activ
 bool CS_IsOpen();
 void CS_Draw2D();						// instead of the HUD while the studio is open
 void CS_DrawOverlay();					// over the HUD while it's closed (recording)
+struct centity_s;
+void CS_CaptureEvent(centity_s* cent);	// CG_CheckEvents / player state events, before CG_EntityEvent
+void CS_EndFrame();						// after the frame is drawn

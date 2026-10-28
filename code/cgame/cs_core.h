@@ -21,7 +21,7 @@ namespace cs
 	constexpr int kProjectSchemaOld = 1;	// bump when the file layout changes; readers accept <= this
 	constexpr const char* kProjectRoot = "CinematicStudio/Projects";
 
-	enum class ObjType { Actor, Camera };
+	enum class ObjType { Actor, Camera, Events };
 
 	enum AnimParts { PARTS_LEGS = 1, PARTS_TORSO = 2, PARTS_BOTH = 3 };
 
@@ -63,10 +63,16 @@ namespace cs
 		float legsSpeed = 1, torsoSpeed = 1;	// the engine's playback speed of each (frames per 50 ms)
 		int flags = 0;				// TakeFlags
 		int weapon = 0;
+		int forceActive = 0;		// force powers in use (bits), shown on playback (Phase 5)
 		bool operator==(const TakeSample& o) const;
 	};
-	enum TakeFlags { TAKE_SABER1 = 1, TAKE_SABER2 = 2, TAKE_LEGS_LOOP = 4, TAKE_TORSO_LOOP = 8 };
-	constexpr int kTakeFields = 17;	// numbers per sample in a project file (12 in the first Phase 3 build)
+	enum TakeFlags
+	{
+		TAKE_SABER1 = 1, TAKE_SABER2 = 2, TAKE_LEGS_LOOP = 4, TAKE_TORSO_LOOP = 8,
+		TAKE_SHOCKED = 16, TAKE_STUNNED = 32, TAKE_DRAINED = 64,	// on the receiving end of force lightning / stun / drain
+	};
+	// the numbers per sample in a project file, by name (files say which ones they have, in "sampleFields")
+	extern const char* const kTakeFieldNames;
 
 	// the recorded data; shared between copies of a take (undo snapshots copy takes a lot)
 	struct TakeData
@@ -104,6 +110,22 @@ namespace cs
 	private:
 		std::shared_ptr<TakeData> data = std::make_shared<TakeData>();
 	};
+
+	// ---- Phase 5: world events (effects, sounds, hits, voices...) recorded with a fight ----
+	struct WorldEvent
+	{
+		int64_t tUs = 0;
+		bool temp = true;			// a temporary event entity (effect, sound at a spot...); else an event on a character
+		int event = 0, parm = 0;
+		int actor = 0;				// object id of the character it rides on / refers to (0 = none)
+		int other2 = 0;				// object id of a second character it refers to (0 = none)
+		float origin[3] = { 0, 0, 0 }, pos3[3] = { 0, 0, 0 }, pos4[3] = { 0, 0, 0 };
+		float angles[3] = { 0, 0, 0 }, angles2[3] = { 0, 0, 0 }, origin2[3] = { 0, 0, 0 };
+		int weapon = 0, loopSound = 0, modelindex = 0, time = 0, time2 = 0;
+		std::string fx, sound;		// effect / sound name when the event plays one (indexes differ between levels)
+		bool operator==(const WorldEvent& o) const;
+	};
+	struct EventData { std::vector<WorldEvent> events; };	// sorted by tUs; shared like take data
 
 	// ---- Phase 4: keyframed position ----
 	enum class Interp { Step, Linear, Smooth, CatmullRom };
@@ -148,6 +170,11 @@ namespace cs
 
 		// camera
 		float fov = 80.0f;
+
+		// events track (ObjType::Events): starts at eventsStartUs on the scene clock
+		int64_t eventsStartUs = 0;
+		std::shared_ptr<EventData> events = std::make_shared<EventData>();
+		const std::vector<WorldEvent>& Events() const { return events->events; }
 	};
 
 	// Engine services the core needs. The game implements it (cs_host_game.cpp); the tests fake it.
@@ -224,6 +251,9 @@ namespace cs
 		int AddActor(const std::string& npcType, const float origin[3], const float angles[3]);
 		int AdoptActor(int ent, const std::string& npcType, const std::string& name);
 		int AddCamera(const float origin[3], const float angles[3], float fov);
+		int AddEvents(const std::string& name, int64_t startUs, std::vector<WorldEvent> events);	// a world-events track
+		bool SetEventsStart(int id, int64_t startUs, bool coalesce);
+		bool SetVisible(int id, bool on);	// events tracks: off = not played
 		bool Remove(int id);
 		// coalesce: merge into the previous change of the same object if it was < 1 s ago (nudging)
 		bool SetTransform(int id, const float origin[3], const float angles[3], bool coalesce);

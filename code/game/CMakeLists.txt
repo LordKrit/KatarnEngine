@@ -218,6 +218,7 @@ set(SPGameCGameFiles
 	"${SPDir}/cgame/cs_core.h"
 	"${SPDir}/cgame/cs_host.cpp"
 	"${SPDir}/cgame/cs_actor.cpp"
+	"${SPDir}/cgame/cs_replay.cpp"
 	"${SPDir}/cgame/cs_studio.h"
 	"${SPDir}/cgame/cs_ui.cpp"
 	"${SPDir}/cgame/cg_playerstate.cpp"

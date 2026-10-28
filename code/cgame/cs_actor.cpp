@@ -598,6 +598,7 @@ namespace cs
 			if (ps.dualSabers && ps.saber[1].Active()) out.flags |= TAKE_SABER2;
 		}
 		out.weapon = ps.weapon;
+		ForceState(ent, out.forceActive, out.flags);
 		if (take.Samples().empty())
 		{
 			const animFileSet_t* set = Set(e);

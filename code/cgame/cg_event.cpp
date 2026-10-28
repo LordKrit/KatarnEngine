@@ -26,6 +26,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "cg_headers.h"
 
 #include "cg_media.h"
+#include "cs_studio.h"
 #include "FxScheduler.h"
 
 extern qboolean CG_TryPlayCustomSound(vec3_t origin, int entityNum, soundChannel_t channel, const char* sound_name,
@@ -1542,5 +1543,6 @@ void CG_CheckEvents(centity_t* cent)
 	EvaluateTrajectory(&cent->currentState.pos, cg.snap->serverTime, cent->lerpOrigin);
 	CG_SetEntitySoundPosition(cent);
 
+	CS_CaptureEvent(cent);	// Cinematic Studio: recording a fight
 	CG_EntityEvent(cent, cent->lerpOrigin);
 }

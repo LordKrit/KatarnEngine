@@ -216,6 +216,16 @@ namespace
 		int64_t keyUs = 0;
 		bool keyDrag = false;
 		bool clashes = true;		// saber clashes with takes
+		// ---- Phase 5: combat replay ----
+		int64_t recCgStartUs = 0;	// capture clock when recording began
+		int64_t lastEvalUs = -1;	// scene time events were played up to
+		bool irOn = false;			// instant replay: keep the last irSeconds of play
+		int irSeconds = 30;
+		int64_t irLastUs = -1, irLastPruneUs = 0;
+		struct IrTrack { int ent = -1; std::string npcType; Take take; int64_t firstAbsUs = 0; bool open = true; };
+		std::vector<IrTrack> irTracks;
+		int evDragObj = 0;
+		int64_t evDragGrabUs = 0;
 		// viewport drag of an actor a take or keys drive
 		float dragTakeOff[3] = { 0, 0, 0 }, dragTakeYaw = 0, dragOrgStart[3] = { 0, 0, 0 };
 	};
@@ -231,6 +241,7 @@ namespace
 	void Close();
 	void ReleasePreview();
 	void StartRecording(int target);
+	void SetInstantReplay(bool on);
 	void SetKeyAtPlayhead();
 
 	// ------------------------------------------------------------------------------------------
@@ -605,9 +616,9 @@ namespace
 			const bool sel = s.scene.selected == o.id;
 			if (sel) Rect(x + 1, ry, w - 2, kRow, kSel);
 			else if (Inside(s.cx, s.cy, x, ry, w, kRow)) Rect(x + 1, ry, w - 2, kRow, kHover);
-			const bool cam = o.type == ObjType::Camera;
-			Text(x + 4, ry + 1, cam ? "C" : "A", cam ? kCam : kAccent);
-			const bool missing = !cam && o.entNum < 0;
+			const bool cam = o.type == ObjType::Camera, evt = o.type == ObjType::Events;
+			Text(x + 4, ry + 1, cam ? "C" : (evt ? "E" : "A"), cam ? kCam : (evt ? kWarn : kAccent));
+			const bool missing = o.type == ObjType::Actor && o.entNum < 0;
 			TextClip(x + 14, ry + 1, o.name + (missing ? "  (missing)" : ""), w - 18, missing ? kWarn : kTextCol);
 			if (TakeClick(x, ry, w, kRow))
 			{
@@ -880,6 +891,7 @@ namespace
 			drive(x.torso, x.torsoFrame, x.torsoSpeed, (x.flags & TAKE_TORSO_LOOP) != 0, PARTS_TORSO);
 		}
 		SetSabers(o.entNum, x.flags);
+		if (x.forceActive || (x.flags & (TAKE_SHOCKED | TAKE_STUNNED | TAKE_DRAINED))) SetForceView(o.entNum, x.forceActive, x.flags);
 	}
 
 	bool Contains(const std::vector<int>& v, const int e) { return std::find(v.begin(), v.end(), e) != v.end(); }
@@ -1459,6 +1471,21 @@ namespace
 			if (DrawKeyEditor(ix, y)) break;
 			Text(ix, y, "INSPECTOR", kAccent); y += 12;
 			if (sel && sel->type == ObjType::Camera) DrawCameraInspector(ix, y, sel);
+			else if (sel && sel->type == ObjType::Events)
+			{
+				Label(ix, y, "name", sel->name); y += kRow;
+				Label(ix, y, "events", Fmt("%d", static_cast<int>(sel->Events().size()))); y += kRow;
+				Label(ix, y, "starts", Fmt("%.2fs", static_cast<double>(sel->eventsStartUs) / 1e6)); y += kRow;
+				if (!sel->Events().empty()) { Label(ix, y, "length", Fmt("%.2fs", static_cast<double>(sel->Events().back().tUs) / 1e6)); y += kRow; }
+				int fx = 0, snd = 0, chr = 0;
+				for (auto& e : sel->Events()) { if (!e.fx.empty()) fx++; else if (!e.sound.empty()) snd++; if (!e.temp) chr++; }
+				Label(ix, y, "kinds", Fmt("%d effects, %d sounds, %d on characters", fx, snd, chr)); y += kRow + 2;
+				if (Button(ix, y, 66, 11, sel->visible ? "PLAYS: ON" : "PLAYS: OFF", sel->visible)) s.scene.SetVisible(sel->id, !sel->visible);
+				y += 14;
+				Text(ix, y, "effects, sounds, hits, voices of the", kDim); y += kRow;
+				Text(ix, y, "fight; they play while the scene plays", kDim); y += kRow;
+				Text(ix, y, "drag on the timeline to retime; DEL", kDim);
+			}
 			else if (sel) DrawActorInspector(ix, y, sel, -1);
 			else if (s.levelSel >= 0) { Text(ix, y, "level character (not in scene)", kDim); DrawActorInspector(ix, y + 12, nullptr, s.levelSel); }
 			else
@@ -1489,7 +1516,12 @@ namespace
 				if (Button(ix + 100, y, kRightW - 112, 10, "SOLID TAKES", s.recSolidTakes)) s.recSolidTakes = !s.recSolidTakes;
 				y += 12;
 				if (Button(ix, y, 98, 10, Fmt("TAKE BLEND %d ms", s.takeBlendMs))) s.takeBlendMs = s.takeBlendMs >= 200 ? 0 : s.takeBlendMs + 50;
-				y += 15;
+				y += 12;
+				if (Button(ix, y, 98, 10, s.irOn ? "INSTANT REPLAY: ON" : "INSTANT REPLAY: OFF", s.irOn)) SetInstantReplay(!s.irOn);
+				if (Button(ix + 100, y, kRightW - 112, 10, Fmt("KEEP %ds", s.irSeconds))) s.irSeconds = s.irSeconds >= 60 ? 10 : s.irSeconds + 10;
+				y += 11;
+				Text(ix, y, "play; F9 puts the last seconds here", kDim, 0.34f);
+				y += 13;
 			}
 			Text(ix, y, "LEVEL CHARACTERS", kAccent); y += 12;
 			int ents[64];
@@ -1716,6 +1748,21 @@ namespace
 			}
 		}
 
+		// dragging an events track
+		if (s.evDragObj)
+		{
+			const Object* o = s.scene.Find(s.evDragObj);
+			if (!s.lmb || !o) s.evDragObj = 0;
+			else
+			{
+				const int64_t frameUs = 1000000 / c.fps;
+				int64_t start = XToTime(s.cx, lx, lw) - s.evDragGrabUs;
+				start = std::max<int64_t>(0, (start + frameUs / 2) / frameUs * frameUs);
+				start = Snap(start, lw, o->id, -1, 0);
+				if (start != o->eventsStartUs) s.scene.SetEventsStart(o->id, start, true);
+			}
+		}
+
 		// dragging a position key (whole frames)
 		if (s.keyDrag)
 		{
@@ -1787,7 +1834,7 @@ namespace
 			Object& o = s.scene.objects[static_cast<size_t>(i)];
 			const float yy = ry + kRow * static_cast<float>(row + 1);
 			if (o.id == s.scene.selected) Rect(0, yy, kW, kRow, kSel);
-			TextClip(14, yy + 1, o.name, kLeftW - 18, o.type == ObjType::Camera ? kCam : kTextCol);
+			TextClip(14, yy + 1, o.name, kLeftW - 18, o.type == ObjType::Camera ? kCam : (o.type == ObjType::Events ? kWarn : kTextCol));
 			Rect(lx, yy + 1, lw, kRow - 2, kLane);
 			if (o.type == ObjType::Actor)
 				for (auto& tk : o.takes)
@@ -1822,6 +1869,39 @@ namespace
 						s.keyObj = 0;
 					}
 				}
+			// world events: a bar from the first to the last, a tick per event
+			if (o.type == ObjType::Events && !o.Events().empty())
+			{
+				const int64_t e0 = o.eventsStartUs + o.Events().front().tUs, e1 = o.eventsStartUs + o.Events().back().tUs;
+				const float bx0 = TimeToX(e0, lx, lw), bx1 = std::max(bx0 + 2, TimeToX(e1, lx, lw));
+				const bool esel = o.id == s.scene.selected;
+				const vec4_t bar = { 0.85f, 0.45f, 0.20f, o.visible ? (esel ? 0.55f : 0.35f) : 0.12f };
+				const vec4_t tick = { 1.0f, 0.75f, 0.35f, o.visible ? 0.9f : 0.3f };
+				Rect(bx0, yy + 2, bx1 - bx0, kRow - 4, bar);
+				int64_t vs3, vl3;
+				ViewRange(vs3, vl3);
+				float lastX = -10;
+				for (auto& e : o.Events())
+				{
+					const int64_t at = o.eventsStartUs + e.tUs;
+					if (at < vs3 || at > vs3 + vl3) continue;
+					const float ex = TimeToX(at, lx, lw);
+					if (ex - lastX < 1.0f) continue;	// one tick per pixel
+					lastX = ex;
+					Rect(ex, yy + 2, 0.6f, kRow - 4, tick);
+				}
+				if (esel) Frame(bx0, yy + 1, bx1 - bx0, kRow - 2, kAccent);
+				if (s.clicked && Inside(s.clickX, s.clickY, bx0, yy, bx1 - bx0, kRow))
+				{
+					s.clicked = false;
+					s.scene.selected = o.id;
+					s.lastSel = o.id;
+					s.levelSel = -1;
+					s.evDragObj = o.id;
+					s.evDragGrabUs = XToTime(s.clickX, lx, lw) - o.eventsStartUs;
+					s.tab = TAB_SCENE;
+				}
+			}
 			// position keys: diamonds along the bottom of the lane
 			if (o.type == ObjType::Actor)
 				for (auto& k : o.keys)
@@ -2093,11 +2173,11 @@ namespace
 	}
 
 	// put one performer's take on its actor; returns the actor id
-	int KeepPerformance(Studio::Performer& p)
+	int KeepPerformance(Studio::Performer& p, const int64_t startUs)
 	{
 		Studio& s = S();
 		Take& tk = p.take;
-		tk.startUs = s.recPunchUs;
+		tk.startUs = startUs;
 		const TakeSample& first = tk.Samples()[0];
 		const float ang[3] = { 0, first.yaw, 0 };
 		int id = p.objId && s.scene.Find(p.objId) ? p.objId : 0;
@@ -2142,20 +2222,39 @@ namespace
 		if (!keep || !wasRecording || perf.empty() || perf[0].take.Samples().size() < 2)
 		{
 			s.host.Log(1, keep ? "Nothing recorded (stopped before the countdown ended)" : "Recording discarded");
+			SetEventCapture(s.irOn);
 			return;
 		}
 		int64_t end = 0;
 		int kept = 0, mine = 0;
 		std::string names;
+		std::map<int, int> entToObj;
 		for (auto& p : perf)
 		{
 			if (p.take.Samples().size() < 2) continue;
-			const int id = KeepPerformance(p);
+			const int id = KeepPerformance(p, s.recPunchUs);
+			if (p.ent >= 0) entToObj[p.ent] = id;
 			if (!id) continue;
 			if (p.ent == 0) mine = id;
 			kept++;
 			end = std::max(end, s.recPunchUs + p.take.LengthUs());
 			if (const Object* o = s.scene.Find(id)) names += (names.empty() ? "" : ", ") + o->name;
+		}
+		// what happened in the fight (effects, sounds, hits, voices) on a world-events track
+		{
+			std::vector<WorldEvent> ev;
+			for (auto& ce : TakeCapturedEvents())
+			{
+				if (ce.absUs < s.recCgStartUs) continue;
+				WorldEvent w = ce.ev;
+				w.tUs = ce.absUs - s.recCgStartUs;
+				w.actor = entToObj.count(ce.actorEnt) ? entToObj[ce.actorEnt] : 0;
+				w.other2 = entToObj.count(ce.other2Ent) ? entToObj[ce.other2Ent] : 0;
+				if (!w.temp && !w.actor) continue;	// on a character that wasn't recorded
+				ev.push_back(w);
+			}
+			if (!ev.empty()) s.scene.AddEvents("Fight events", s.recPunchUs, ev);
+			SetEventCapture(s.irOn);
 		}
 		if (end > c.lengthUs) c.lengthUs = (end + 999'999) / 1'000'000 * 1'000'000;
 		if (mine)
@@ -2178,6 +2277,9 @@ namespace
 		if (s.rec == Studio::REC_COUNTDOWN && NowMs() >= s.recCountdownEnd)
 		{
 			s.rec = Studio::REC_RECORDING;
+			SetEventCapture(false);	// fresh
+			SetEventCapture(true);
+			s.recCgStartUs = CaptureNowUs();
 			c.speed = 1.0;		// performances are recorded in real time
 			c.loop = false;
 			c.Play();
@@ -2191,9 +2293,179 @@ namespace
 		if (s.recLastUs < 0 || t - s.recLastUs >= 1'000'000 / 30) SampleNow();	// 30 samples a second (playback blends between)
 	}
 
+	// ---- Phase 5: instant replay ----
+	// While you play (studio closed), the last irSeconds of every character near you and every event
+	// are kept; "studio replay" (F9) turns them into takes and a world-events track at the playhead.
+
+	void InstantReplayFrame()
+	{
+		Studio& s = S();
+		if (!s.irOn || s.open || s.rec != Studio::REC_IDLE) return;
+		const int64_t now = CaptureNowUs();
+		if (s.irLastUs >= 0 && now - s.irLastUs < 1'000'000 / 30 && now >= s.irLastUs) return;
+		s.irLastUs = now;
+		if (!EventCaptureOn()) SetEventCapture(true);
+		EntInfo pi;
+		if (!EntityInfo(0, pi)) return;
+		for (auto& t : s.irTracks) t.open = false;
+		int ents[64];
+		const int n = ListCharacters(ents, 64);
+		for (int i = 0; i < n; i++)
+		{
+			const int e = ents[i];
+			EntInfo info;
+			if (!EntityInfo(e, info)) continue;
+			const Object* so = s.scene.FindByEntity(e);
+			if (so && so->prop) continue;	// the studio's own playback
+			const float dx = info.origin[0] - pi.origin[0], dy = info.origin[1] - pi.origin[1];
+			if (e != 0 && dx * dx + dy * dy > 3000.0f * 3000.0f) continue;
+			Studio::IrTrack* tr = nullptr;
+			for (auto& t : s.irTracks) if (t.ent == e && t.npcType == info.npcType && !t.take.Samples().empty() &&
+				now - (t.firstAbsUs + t.take.Samples().back().tUs) < 500'000) tr = &t;
+			if (!tr)
+			{
+				s.irTracks.emplace_back();
+				tr = &s.irTracks.back();
+				tr->ent = e;
+				tr->npcType = info.npcType;
+				tr->firstAbsUs = now;
+			}
+			TakeSample x;
+			if (!SampleEntity(e, tr->take, x)) continue;
+			x.tUs = now - tr->firstAbsUs;
+			if (!tr->take.Samples().empty() && x.tUs <= tr->take.Samples().back().tUs) continue;
+			tr->take.Add(x);
+			tr->open = true;
+		}
+		// forget what's older than the window (every 2 s)
+		if (now - s.irLastPruneUs > 2'000'000 || now < s.irLastPruneUs)
+		{
+			s.irLastPruneUs = now;
+			const int64_t cut = now - static_cast<int64_t>(s.irSeconds) * 1'000'000;
+			PruneCapturedEvents(cut);
+			for (auto& t : s.irTracks)
+			{
+				auto& sm = t.take.Edit().samples;
+				size_t k = 0;
+				while (k < sm.size() && t.firstAbsUs + sm[k].tUs < cut) k++;
+				if (!k) continue;
+				sm.erase(sm.begin(), sm.begin() + static_cast<long>(k));
+				if (sm.empty()) continue;
+				const int64_t shift = sm.front().tUs;
+				for (auto& q : sm) q.tUs -= shift;
+				t.firstAbsUs += shift;
+			}
+			s.irTracks.erase(std::remove_if(s.irTracks.begin(), s.irTracks.end(), [](const Studio::IrTrack& t) { return t.take.Samples().size() < 2 && !t.open; }), s.irTracks.end());
+		}
+	}
+
+	void SetInstantReplay(const bool on)
+	{
+		Studio& s = S();
+		s.irOn = on;
+		s.irTracks.clear();
+		s.irLastUs = -1;
+		if (s.rec == Studio::REC_IDLE) SetEventCapture(on);
+		s.host.Log(0, on ? Fmt("Instant replay on: F9 keeps the last %d s", s.irSeconds) : "Instant replay off");
+	}
+
+	void SaveInstantReplay()
+	{
+		Studio& s = S();
+		if (!s.irOn) { s.host.Log(1, "Instant replay is off (ACTORS tab: INSTANT REPLAY, or 'studio replay on')"); return; }
+		if (s.rec != Studio::REC_IDLE) return;
+		const int64_t now = CaptureNowUs();
+		const int64_t w0 = now - static_cast<int64_t>(s.irSeconds) * 1'000'000;
+		const int64_t punch = s.scene.clock.timeUs >= s.scene.clock.lengthUs ? 0 : s.scene.clock.timeUs;
+		int64_t first = now;
+		for (auto& t : s.irTracks)
+			for (auto& q : t.take.Samples()) if (t.firstAbsUs + q.tUs >= w0) { first = std::min(first, t.firstAbsUs + q.tUs); break; }
+		if (first >= now) { s.host.Log(1, "Nothing to replay yet"); return; }
+		struct Kept { int ent; int64_t a0, a1; int id; };
+		std::vector<Kept> kept;
+		int mine = 0, count = 0;
+		ReleasePreview();
+		for (auto& t : s.irTracks)
+		{
+			Studio::Performer p;
+			p.npcType = t.npcType;
+			// a track that ended (died, removed) or an entity used again: a new actor plays it
+			p.ent = t.open ? t.ent : (t.ent == 0 ? 0 : -1);
+			if (p.ent > 0) { const Object* so = s.scene.FindByEntity(p.ent); p.objId = so ? so->id : 0; }
+			for (auto& a : t.take.Anims()) p.take.AnimIndex(a);
+			int64_t a0 = -1, a1 = 0;
+			for (auto q : t.take.Samples())
+			{
+				const int64_t abs = t.firstAbsUs + q.tUs;
+				if (abs < w0) continue;
+				if (a0 < 0) a0 = abs;
+				q.tUs = abs - a0;
+				p.take.Add(q);
+				a1 = abs;
+			}
+			if (p.take.Samples().size() < 2) continue;
+			p.take.profile = t.take.profile;
+			p.take.performer = t.take.performer;
+			p.take.name = "Replay";
+			const int id = KeepPerformance(p, punch + (a0 - first));
+			if (!id) continue;
+			if (t.ent == 0) mine = id;
+			kept.push_back({ t.ent, a0, a1, id });
+			count++;
+		}
+		std::vector<WorldEvent> ev;
+		for (auto& ce : TakeCapturedEvents())
+		{
+			if (ce.absUs < first) continue;
+			WorldEvent w = ce.ev;
+			w.tUs = ce.absUs - first;
+			const auto who = [&](const int ent) { for (auto& k : kept) if (k.ent == ent && ce.absUs >= k.a0 - 100'000 && ce.absUs <= k.a1 + 100'000) return k.id; return 0; };
+			w.actor = ce.actorEnt >= 0 ? who(ce.actorEnt) : 0;
+			w.other2 = ce.other2Ent >= 0 ? who(ce.other2Ent) : 0;
+			if (!w.temp && !w.actor) continue;
+			ev.push_back(w);
+		}
+		if (!ev.empty()) s.scene.AddEvents("Replay events", punch, ev);
+		s.irTracks.clear();
+		s.irLastUs = -1;
+		Open();
+		Clock& c = s.scene.clock;
+		c.Pause();
+		const int64_t end = punch + (now - first);
+		if (end > c.lengthUs) c.lengthUs = (end + 999'999) / 1'000'000 * 1'000'000;
+		c.timeUs = punch;
+		if (mine) { s.scene.selected = mine; s.lastSel = mine; }
+		s.tab = TAB_SCENE;
+		s.host.Log(0, Fmt("Instant replay: %d character(s), %d event(s), %.1f s", count, static_cast<int>(ev.size()), static_cast<double>(now - first) / 1e6));
+	}
+
+	// world events between two scene times (from, to] play again
+	void PlaySceneEvents(const int64_t from, const int64_t to)
+	{
+		Studio& s = S();
+		for (auto& o : s.scene.objects)
+		{
+			if (o.type != ObjType::Events || !o.visible) continue;
+			const auto& ev = o.Events();
+			auto it = std::upper_bound(ev.begin(), ev.end(), from - o.eventsStartUs, [](const int64_t v, const WorldEvent& e) { return v < e.tUs; });
+			for (; it != ev.end() && o.eventsStartUs + it->tUs <= to; ++it)
+			{
+				const Object* a = it->actor ? s.scene.Find(it->actor) : nullptr;
+				const Object* b = it->other2 ? s.scene.Find(it->other2) : nullptr;
+				if (!it->temp && (!a || a->entNum < 0)) continue;
+				FireEvent(*it, a ? a->entNum : -1, b ? b->entNum : -1);
+			}
+		}
+	}
+
 	void DrawRecordingOverlay()
 	{
 		Studio& s = S();
+		if (s.irOn && s.rec == Studio::REC_IDLE)
+		{
+			Text(4, 470, Fmt("instant replay: F9 keeps the last %d s", s.irSeconds), kDim, 0.32f);
+			return;
+		}
 		if (s.rec == Studio::REC_IDLE) return;
 		if (s.rec == Studio::REC_COUNTDOWN)
 		{
@@ -2236,6 +2508,7 @@ namespace
 		s.clipDragIndex = -1;
 		s.takeDragId = 0;
 		s.keyDrag = false;
+		s.evDragObj = 0;
 		cgi_Cvar_Set("cs_active", "0");
 		if (Frozen()) SetFreeze(false);	// back to regular gameplay
 	}
@@ -2299,6 +2572,14 @@ void CS_Init()
 		cgi_SendConsoleCommand("bind F10 studio\n");
 		cgi_Cvar_Set("cs_firstrun", "1");
 	}
+	if (g_firstRun.integer < 2)
+	{
+		cgi_SendConsoleCommand("bind F9 \"studio replay\"\n");	// Phase 5: keep the last seconds of play
+		cgi_Cvar_Set("cs_firstrun", "2");
+	}
+	s.irTracks.clear();
+	s.lastEvalUs = -1;
+	SetEventCapture(s.irOn);
 }
 
 void CS_Shutdown()
@@ -2345,6 +2626,14 @@ void CS_Command_f()
 		}
 		return;
 	}
+	if (!Q_stricmp(sub, "replay"))
+	{
+		if (!Q_stricmp(a2.c_str(), "on")) SetInstantReplay(true);
+		else if (!Q_stricmp(a2.c_str(), "off")) SetInstantReplay(false);
+		else if (!a2.empty() && atoi(a2.c_str()) > 0) { s.irSeconds = std::max(5, std::min(120, atoi(a2.c_str()))); s.host.Log(0, Fmt("Instant replay keeps %d s", s.irSeconds)); }
+		else SaveInstantReplay();
+		return;
+	}
 	if (!Q_stricmp(sub, "countdown")) { s.recCountdownSec = std::max(0, std::min(10, atoi(a2.c_str()))); return; }
 	if (!Q_stricmp(sub, "open")) { Open(); return; }
 	if (!Q_stricmp(sub, "close")) { Close(); return; }
@@ -2370,7 +2659,7 @@ void CS_Command_f()
 	}
 	Com_Printf("studio [open|close|toggle]  save [name]  load <name> [force]  recover [name]  new\n"
 		"       spawn <npc>  camera  play  pause  stop  fps <24|30|60>  undo  redo  freeze  list\n"
-		"       rec [new|stop|cancel]  countdown <seconds>\n");
+		"       rec [new|stop|cancel]  countdown <seconds>  replay [on|off|<seconds>]  (replay: keep the last seconds)\n");
 }
 
 int CS_KeyEvent(int key, const int down)
@@ -2516,11 +2805,18 @@ void CS_Frame()
 		if (s.scene.clock.playing && s.previewEnt >= 0) ReleasePreview();	// playback takes the actors back
 	}
 	RecorderFrame();
+	InstantReplayFrame();
 	if (s.open || s.rec != Studio::REC_IDLE)
 	{
 		EvaluateScene();
 		// saber clashes with takes while the scene plays (recording: your attacks bounce off them)
 		if (s.clashes && s.scene.clock.playing && !s.takeEnts.empty()) DetectClashes(s.takeEnts, s.rec == Studio::REC_RECORDING);
+		SetCaptureSkip(s.takeEnts);
+		// world events play while the scene plays forward (not when scrubbing or jumping)
+		const int64_t t = s.scene.clock.timeUs;
+		if (s.scene.clock.playing && !s.scrubbing && s.lastEvalUs >= 0 && t > s.lastEvalUs && t - s.lastEvalUs < 400'000)
+			PlaySceneEvents(s.lastEvalUs, t);
+		s.lastEvalUs = t;
 	}
 
 	if (s.open && s.camActive && s.rmb)

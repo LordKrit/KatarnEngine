@@ -503,8 +503,73 @@ static void TestPhase4()
 	CHECK(l.Find(w)->keys == s.Find(w)->keys && l.Find(v)->clips == s.Find(v)->clips && l.Find(v)->takes[0] == s.Find(v)->takes[0]);
 }
 
+static void TestPhase5()
+{
+	FakeHost h;
+	Scene s(&h);
+	const float o[3] = { 0, 0, 0 }, a[3] = { 0, 0, 0 };
+	const int v = s.AddActor("md_vader", o, a);
+
+	// a world-events track
+	std::vector<WorldEvent> ev(3);
+	ev[0].tUs = 500'000; ev[0].event = 60; ev[0].fx = "saber/saber_block"; ev[0].origin[0] = 4; ev[0].pos3[2] = 1;
+	ev[1].tUs = 100'000; ev[1].event = 70; ev[1].temp = false; ev[1].actor = v; ev[1].parm = 50;
+	ev[2].tUs = 300'000; ev[2].event = 39; ev[2].sound = "sound/weapons/saber/saberblock1.mp3"; ev[2].other2 = v;
+	CHECK(!s.AddEvents("World events", 0, {}));
+	const int e = s.AddEvents("World events", 2'000'000, ev);
+	const Object* eo = s.Find(e);
+	CHECK(eo && eo->type == ObjType::Events && eo->name == "World events 01" && eo->eventsStartUs == 2'000'000);
+	CHECK(eo->Events().size() == 3 && eo->Events()[0].tUs == 100'000 && eo->Events()[2].fx == "saber/saber_block");	// sorted
+	CHECK(s.Undo() && !s.Find(e) && s.Redo() && s.Find(e));
+	CHECK(s.Duplicate(e) && s.Undo());
+	CHECK(s.SetEventsStart(e, 2'500'000, true) && s.SetEventsStart(e, 3'000'000, true) && s.Find(e)->eventsStartUs == 3'000'000);
+	CHECK(s.Undo() && s.Find(e)->eventsStartUs == 2'000'000 && !s.SetEventsStart(v, 0, false));
+	CHECK(s.SetVisible(e, false) && !s.Find(e)->visible && s.Undo() && s.Find(e)->visible);
+
+	// a take with force powers
+	Take t = MakeTake();
+	TakeSample x = t.Samples()[3];
+	x.tUs = 2'000'000;
+	x.forceActive = 1 << 3;
+	x.flags |= TAKE_SHOCKED;
+	t.Add(x);
+	CHECK(s.AddTake(v, t, true));
+
+	CHECK(s.Save("P5"));
+	Scene l(&h);
+	std::vector<std::string> warn;
+	CHECK(l.Load("P5", false, false, warn) && warn.empty());
+	const Object* le = l.Find(e);
+	CHECK(le && le->type == ObjType::Events && le->eventsStartUs == 2'000'000 && le->Events().size() == 3);
+	eo = s.Find(e);
+	CHECK(le->Events()[0] == eo->Events()[0] && le->Events()[1] == eo->Events()[1] && le->Events()[2] == eo->Events()[2]);
+	CHECK(l.Find(v)->takes[0] == s.Find(v)->takes[0] && l.Find(v)->takes[0].Samples().back().forceActive == 8);
+
+	// a take saved by Phase 3.1 / 4 (17 fields, no force) still loads
+	std::string sj = h.files["CinematicStudio/Projects/P5/scenes/scene_01.json"];
+	const std::string t17 = "{\"id\": 9, \"name\": \"P4\", \"anims\": [\"BOTH_STAND1\"], "
+		"\"sampleFields\": \"tUs x y z vx vy vz yaw pitch legs legsFrame legsSpeed torso torsoFrame torsoSpeed flags weapon\", "
+		"\"samples\": [0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 9, 0.5, 0, 10, 0.75, 1, 2,  100000, 1, 2, 3, 4, 5, 6, 7, 8, 0, 9, 0.5, 0, 10, 0.75, 1, 2]}";
+	const size_t tk = sj.find("\"takes\": [");
+	CHECK(tk != std::string::npos);
+	sj.insert(tk + 10, t17 + ",");
+	h.files["CinematicStudio/Projects/P5/scenes/scene_01.json"] = sj;
+	Scene f(&h);
+	warn.clear();
+	CHECK(f.Load("P5", true, false, warn));
+	Object* fo = f.Find(v);
+	const Take* p4 = fo ? Scene::FindTake(*fo, 9) : nullptr;
+	CHECK(p4 && p4->Samples().size() == 2);
+	if (p4)
+	{
+		const TakeSample& q = p4->Samples()[0];
+		CHECK(q.origin[2] == 3 && q.velocity[2] == 6 && q.pitch == 8 && q.legsSpeed == 0.5f && q.torsoSpeed == 0.75f && q.weapon == 2 && q.forceActive == 0);
+	}
+}
+
 int main()
 {
+	TestPhase5();
 	TestPhase4();
 	TestPhase3();
 	TestPhase2();

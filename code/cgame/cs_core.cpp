@@ -11,7 +11,7 @@ namespace cs
 {
 	const char* ObjTypeName(const ObjType t)
 	{
-		return t == ObjType::Camera ? "camera" : "actor";
+		return t == ObjType::Camera ? "camera" : (t == ObjType::Events ? "events" : "actor");
 	}
 
 	// ------------------------------------------------------------------------------------------
@@ -180,6 +180,41 @@ namespace cs
 		return o.id;
 	}
 
+	int Scene::AddEvents(const std::string& name, const int64_t startUs, std::vector<WorldEvent> events)
+	{
+		if (events.empty()) return 0;
+		std::stable_sort(events.begin(), events.end(), [](const WorldEvent& a, const WorldEvent& b) { return a.tUs < b.tUs; });
+		Object o;
+		o.id = nextId_++;
+		o.type = ObjType::Events;
+		o.name = NewName(name);
+		o.eventsStartUs = std::max<int64_t>(0, startUs);
+		o.events = std::make_shared<EventData>();
+		o.events->events = std::move(events);
+		objects.push_back(o);
+		Op op; op.kind = Op::Add; op.after = o; op.timeMs = host_->NowMs();
+		Push(op);
+		return o.id;
+	}
+
+	bool Scene::SetEventsStart(const int id, const int64_t startUs, const bool coalesce)
+	{
+		const Object* o = Find(id);
+		if (!o || o->type != ObjType::Events) return false;
+		Object after = *o;
+		after.eventsStartUs = std::max<int64_t>(0, startUs);
+		return after.eventsStartUs == o->eventsStartUs || Change(after, coalesce, "events start");
+	}
+
+	bool Scene::SetVisible(const int id, const bool on)
+	{
+		const Object* o = Find(id);
+		if (!o || o->visible == on) return false;
+		Object after = *o;
+		after.visible = on;
+		return Change(after, false);
+	}
+
 	bool Scene::Remove(const int id)
 	{
 		Object* o = Find(id);
@@ -315,12 +350,25 @@ namespace cs
 	// Takes (Phase 3)
 	// ------------------------------------------------------------------------------------------
 
+	const char* const kTakeFieldNames =
+		"tUs x y z vx vy vz yaw pitch legs legsFrame legsSpeed torso torsoFrame torsoSpeed flags weapon force";
+
+	bool WorldEvent::operator==(const WorldEvent& o) const
+	{
+		for (int i = 0; i < 3; i++)
+			if (origin[i] != o.origin[i] || pos3[i] != o.pos3[i] || pos4[i] != o.pos4[i] || angles[i] != o.angles[i] ||
+				angles2[i] != o.angles2[i] || origin2[i] != o.origin2[i]) return false;
+		return tUs == o.tUs && temp == o.temp && event == o.event && parm == o.parm && actor == o.actor && other2 == o.other2 &&
+			weapon == o.weapon && loopSound == o.loopSound && modelindex == o.modelindex && time == o.time && time2 == o.time2 &&
+			fx == o.fx && sound == o.sound;
+	}
+
 	bool TakeSample::operator==(const TakeSample& o) const
 	{
 		for (int i = 0; i < 3; i++) if (origin[i] != o.origin[i] || velocity[i] != o.velocity[i]) return false;
 		return tUs == o.tUs && legsSpeed == o.legsSpeed && torsoSpeed == o.torsoSpeed &&
 			yaw == o.yaw && pitch == o.pitch && legs == o.legs && torso == o.torso && legsFrame == o.legsFrame &&
-			torsoFrame == o.torsoFrame && flags == o.flags && weapon == o.weapon;
+			torsoFrame == o.torsoFrame && flags == o.flags && weapon == o.weapon && forceActive == o.forceActive;
 	}
 
 	bool Take::operator==(const Take& o) const
@@ -1008,17 +1056,17 @@ namespace cs
 					Json an = Json::MakeArray();
 					for (auto& a : t.Anims()) an.push(a);
 					k.set("anims", an);
-					// samples flattened, kTakeFields numbers each, in the order of sampleFields
+					// samples flattened, in the order of sampleFields
 					Json sm = Json::MakeArray();
 					for (auto& x : t.Samples())
 					{
-						const double v[kTakeFields] = { static_cast<double>(x.tUs), x.origin[0], x.origin[1], x.origin[2],
+						const double v[] = { static_cast<double>(x.tUs), x.origin[0], x.origin[1], x.origin[2],
 							x.velocity[0], x.velocity[1], x.velocity[2], x.yaw, x.pitch,
 							static_cast<double>(x.legs), x.legsFrame, x.legsSpeed, static_cast<double>(x.torso), x.torsoFrame, x.torsoSpeed,
-							static_cast<double>(x.flags), static_cast<double>(x.weapon) };
+							static_cast<double>(x.flags), static_cast<double>(x.weapon), static_cast<double>(x.forceActive) };
 						for (const double d : v) sm.push(Json(d));
 					}
-					k.set("sampleFields", "tUs x y z vx vy vz yaw pitch legs legsFrame legsSpeed torso torsoFrame torsoSpeed flags weapon");
+					k.set("sampleFields", kTakeFieldNames);
 					k.set("samples", sm);
 					takes.push(k);
 				}
@@ -1037,6 +1085,37 @@ namespace cs
 					}
 					j.set("keys", keys);
 				}
+			}
+			else if (o.type == ObjType::Events)
+			{
+				j.set("startUs", static_cast<double>(o.eventsStartUs));
+				Json ev = Json::MakeArray();
+				for (auto& e : o.Events())
+				{
+					Json k = Json::MakeObject();
+					k.set("t", static_cast<double>(e.tUs));
+					k.set("temp", e.temp);
+					k.set("ev", e.event);
+					if (e.parm) k.set("parm", e.parm);
+					if (e.actor) k.set("actor", e.actor);
+					if (e.other2) k.set("other2", e.other2);
+					k.set("o", Vec(e.origin));
+					const auto nz = [](const float* v) { return v[0] != 0 || v[1] != 0 || v[2] != 0; };
+					if (nz(e.pos3)) k.set("pos3", Vec(e.pos3));
+					if (nz(e.pos4)) k.set("pos4", Vec(e.pos4));
+					if (nz(e.angles)) k.set("ang", Vec(e.angles));
+					if (nz(e.angles2)) k.set("ang2", Vec(e.angles2));
+					if (nz(e.origin2)) k.set("o2", Vec(e.origin2));
+					if (e.weapon) k.set("weapon", e.weapon);
+					if (e.loopSound) k.set("loop", e.loopSound);
+					if (e.modelindex) k.set("model", e.modelindex);
+					if (e.time) k.set("time", e.time);
+					if (e.time2) k.set("time2", e.time2);
+					if (!e.fx.empty()) k.set("fx", e.fx);
+					if (!e.sound.empty()) k.set("sound", e.sound);
+					ev.push(k);
+				}
+				j.set("events", ev);
 			}
 			else j.set("fov", static_cast<double>(o.fov));
 			objs.push(j);
@@ -1125,12 +1204,45 @@ namespace cs
 			Object o;
 			o.id = j.get("id").asInt(nextId_);
 			if (Find(o.id)) o.id = nextId_;
-			o.type = j.get("type").asString() == "camera" ? ObjType::Camera : ObjType::Actor;
+			const std::string ty = j.get("type").asString();
+			o.type = ty == "camera" ? ObjType::Camera : (ty == "events" ? ObjType::Events : ObjType::Actor);
 			o.name = j.get("name").asString(NewName(ObjTypeName(o.type)));
 			ReadVec(j.get("origin"), o.origin);
 			ReadVec(j.get("angles"), o.angles);
 			o.visible = j.get("visible").asBool(true);
 			if (o.type == ObjType::Camera) o.fov = static_cast<float>(j.get("fov").asNumber(80));
+			else if (o.type == ObjType::Events)
+			{
+				o.eventsStartUs = static_cast<int64_t>(j.get("startUs").asNumber(0));
+				o.events = std::make_shared<EventData>();
+				const Json& ev = j.get("events");
+				for (size_t k = 0; k < ev.size(); k++)
+				{
+					const Json& e = ev[k];
+					WorldEvent w;
+					w.tUs = static_cast<int64_t>(e.get("t").asNumber(0));
+					w.temp = e.get("temp").asBool(true);
+					w.event = e.get("ev").asInt(0);
+					w.parm = e.get("parm").asInt(0);
+					w.actor = e.get("actor").asInt(0);
+					w.other2 = e.get("other2").asInt(0);
+					ReadVec(e.get("o"), w.origin);
+					ReadVec(e.get("pos3"), w.pos3);
+					ReadVec(e.get("pos4"), w.pos4);
+					ReadVec(e.get("ang"), w.angles);
+					ReadVec(e.get("ang2"), w.angles2);
+					ReadVec(e.get("o2"), w.origin2);
+					w.weapon = e.get("weapon").asInt(0);
+					w.loopSound = e.get("loop").asInt(0);
+					w.modelindex = e.get("model").asInt(0);
+					w.time = e.get("time").asInt(0);
+					w.time2 = e.get("time2").asInt(0);
+					w.fx = e.get("fx").asString();
+					w.sound = e.get("sound").asString();
+					if (w.event) o.events->events.push_back(w);
+				}
+				std::stable_sort(o.events->events.begin(), o.events->events.end(), [](const WorldEvent& a, const WorldEvent& b) { return a.tUs < b.tUs; });
+			}
 			else
 			{
 				o.npcType = j.get("npc").asString();
@@ -1174,29 +1286,45 @@ namespace cs
 					const Json& an = tj.get("anims");
 					for (size_t q = 0; q < an.size(); q++) t.AnimIndex(an[q].asString());
 					const Json& sm = tj.get("samples");
-					// 12 fields: the first Phase 3 build (no velocity or speeds)
-					const bool old12 = tj.get("sampleFields").asString() == "tUs x y z yaw pitch legs legsFrame torso torsoFrame flags weapon";
-					const size_t kF = old12 ? 12 : kTakeFields;
+					// fields by name: files from earlier builds have fewer (no velocity, speeds or force)
+					std::vector<std::string> fields;
+					{
+						std::string names = tj.get("sampleFields").asString("tUs x y z yaw pitch legs legsFrame torso torsoFrame flags weapon");
+						size_t p0 = 0;
+						while (p0 < names.size())
+						{
+							size_t p1 = names.find(' ', p0);
+							if (p1 == std::string::npos) p1 = names.size();
+							if (p1 > p0) fields.push_back(names.substr(p0, p1 - p0));
+							p0 = p1 + 1;
+						}
+					}
+					const auto col = [&](const char* n) { for (size_t i = 0; i < fields.size(); i++) if (fields[i] == n) return static_cast<int>(i); return -1; };
+					const int cT = col("tUs"), cX = col("x"), cY = col("y"), cZ = col("z"), cVx = col("vx"), cVy = col("vy"), cVz = col("vz");
+					const int cYaw = col("yaw"), cPitch = col("pitch"), cL = col("legs"), cLf = col("legsFrame"), cLs = col("legsSpeed");
+					const int cTo = col("torso"), cTf = col("torsoFrame"), cTs = col("torsoSpeed"), cFl = col("flags"), cW = col("weapon"), cF = col("force");
+					const bool old12 = cVx < 0;
+					const size_t kF = fields.size();
 					const int na = static_cast<int>(t.Anims().size());
 					auto& out = t.Edit().samples;
-					for (size_t b = 0; b + kF <= sm.size(); b += kF)
+					for (size_t b = 0; kF && cT >= 0 && b + kF <= sm.size(); b += kF)
 					{
 						TakeSample x;
-						const auto n = [&](const size_t i) { return static_cast<float>(sm[b + i].asNumber()); };
-						x.tUs = static_cast<int64_t>(sm[b].asNumber());
-						for (int i = 0; i < 3; i++) x.origin[i] = n(1 + i);
-						size_t i = 4;
-						if (!old12) { for (int v = 0; v < 3; v++) x.velocity[v] = n(i++); }
-						x.yaw = n(i++);
-						x.pitch = n(i++);
-						x.legs = sm[b + i++].asInt(-1);
-						x.legsFrame = n(i++);
-						if (!old12) x.legsSpeed = n(i++);
-						x.torso = sm[b + i++].asInt(-1);
-						x.torsoFrame = n(i++);
-						if (!old12) x.torsoSpeed = n(i++);
-						x.flags = sm[b + i++].asInt(0);
-						x.weapon = sm[b + i++].asInt(0);
+						const auto n = [&](const int c, const double d) { return c < 0 ? d : sm[b + static_cast<size_t>(c)].asNumber(d); };
+						x.tUs = static_cast<int64_t>(n(cT, 0));
+						x.origin[0] = static_cast<float>(n(cX, 0)); x.origin[1] = static_cast<float>(n(cY, 0)); x.origin[2] = static_cast<float>(n(cZ, 0));
+						x.velocity[0] = static_cast<float>(n(cVx, 0)); x.velocity[1] = static_cast<float>(n(cVy, 0)); x.velocity[2] = static_cast<float>(n(cVz, 0));
+						x.yaw = static_cast<float>(n(cYaw, 0));
+						x.pitch = static_cast<float>(n(cPitch, 0));
+						x.legs = static_cast<int>(n(cL, -1));
+						x.legsFrame = static_cast<float>(n(cLf, 0));
+						x.legsSpeed = static_cast<float>(n(cLs, 1));
+						x.torso = static_cast<int>(n(cTo, -1));
+						x.torsoFrame = static_cast<float>(n(cTf, 0));
+						x.torsoSpeed = static_cast<float>(n(cTs, 1));
+						x.flags = static_cast<int>(n(cFl, 0));
+						x.weapon = static_cast<int>(n(cW, 0));
+						x.forceActive = static_cast<int>(n(cF, 0));
 						if (x.legs >= na) x.legs = -1;
 						if (x.torso >= na) x.torso = -1;
 						if (!out.empty() && x.tUs < out.back().tUs) continue;	// keep them sorted

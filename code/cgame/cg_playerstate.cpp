@@ -29,6 +29,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 // this line must stay at top so the whole PCH thing works...
 
 #include "cg_media.h"
+#include "cs_studio.h"
 
 /*
 ==============
@@ -229,6 +230,7 @@ void CG_CheckPlayerstateEvents(playerState_t* ps, playerState_t* ops)
 			cent = &cg_entities[ps->clientNum];
 			cent->currentState.event = event;
 			cent->currentState.eventParm = ps->eventParms[i & MAX_PS_EVENTS - 1];
+			CS_CaptureEvent(cent);	// Cinematic Studio: recording a fight
 			CG_EntityEvent(cent, cent->lerpOrigin);
 		}
 	}

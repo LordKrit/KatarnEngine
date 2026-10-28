@@ -10890,4 +10890,5 @@ void CG_DrawActive(const stereoFrame_t stereoView)
 		CG_Draw2D();
 		CS_DrawOverlay();
 	}
+	CS_EndFrame();
 }
