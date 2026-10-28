@@ -494,7 +494,15 @@ static void TestPhase4()
 	CHECK(EvaluateKeys(ks, 1'500'000, org, yaw, vel) && org[1] == 0 && vel[1] == 0);	// step: holds
 	CHECK(EvaluateKeys(ks, 9'000'000, org, yaw, vel) && org[1] == 100);
 	CHECK(s.SetKeyInterp(w, 1'000'000, Interp::Smooth) && EvaluateKeys(s.Find(w)->keys, 1'250'000, org, yaw, vel));
-	CHECK(std::fabs(org[1] - 100 * 0.15625f) < 1e-3);					// smoothstep(0.25)
+	CHECK(org[1] > 100 * 0.15625f + 1);									// flows out of the key in between (not from rest)
+	{
+		TransformKey stop = s.Find(w)->keys[1];
+		stop.easeOut = 1;
+		CHECK(s.SetKey(w, stop) && EvaluateKeys(s.Find(w)->keys, 1'250'000, org, yaw, vel));
+		CHECK(std::fabs(org[1] - 100 * 0.15625f) < 1e-3);				// eased out fully: smoothstep(0.25)
+		stop.easeOut = 0;
+		CHECK(s.SetKey(w, stop));
+	}
 	CHECK(s.SetKeyInterp(w, 1'000'000, Interp::CatmullRom) && EvaluateKeys(s.Find(w)->keys, 1'500'000, org, yaw, vel));
 	CHECK(org[1] > 40 && org[1] < 60 && org[0] > 100);					// a curve through the keys, overshooting a bit
 	TransformKey k1b = k1; k1b.origin[0] = 120;
@@ -756,8 +764,44 @@ static void TestPhase8()
 	CHECK(l.Find(m) && l.Find(m)->music && l.Find(m)->sounds == s.Find(m)->sounds);
 }
 
+static void TestEase()
+{
+	// three keys in a line, uneven times: Smooth flows through the middle one at a steady speed
+	std::vector<TransformKey> k(3);
+	k[0].tUs = 0; k[1].tUs = 1'000'000; k[1].origin[0] = 100; k[2].tUs = 3'000'000; k[2].origin[0] = 300;
+	float o[3], yaw, v[3], v2[3];
+	CHECK(EvaluateKeys(k, 999'000, o, yaw, v) && EvaluateKeys(k, 1'001'000, o, yaw, v2));
+	CHECK(v[0] > 50 && std::fabs(v[0] - v2[0]) < 2.0f);		// no stop, no jump in speed at the middle key
+	CHECK(EvaluateKeys(k, 0, o, yaw, v) && std::fabs(v[0]) < 5.0f);	// starts at rest
+	CHECK(EvaluateKeys(k, 2'999'000, o, yaw, v) && std::fabs(v[0]) < 5.0f);	// ends at rest
+	CHECK(EvaluateKeys(k, 1'000'000, o, yaw, v) && std::fabs(o[0] - 100) < 1e-3);	// still through the key
+	// ease in fully at the middle key: it arrives at rest
+	k[1].easeIn = 1;
+	CHECK(EvaluateKeys(k, 999'000, o, yaw, v) && std::fabs(v[0]) < 5.0f);
+	CHECK(EvaluateKeys(k, 1'001'000, o, yaw, v) && v[0] > 50);		// and leaves moving (ease out 0)
+	k[1].easeOut = 0.5f;
+	CHECK(EvaluateKeys(k, 1'001'000, o, yaw, v2) && v2[0] < v[0] && v2[0] > 10);	// half the speed out
+	// cameras: angles flow too (and across 180)
+	std::vector<TransformKey> c(3);
+	c[0].yaw = 150; c[1].tUs = 1'000'000; c[1].yaw = 180; c[2].tUs = 2'000'000; c[2].yaw = -150;
+	float a[3], f, a2[3];
+	CHECK(EvaluateCameraKeys(c, 1'000'000, o, a, f) && std::fabs(AngleWrap(a[1]) - 180) < 1e-3);
+	CHECK(EvaluateCameraKeys(c, 1'500'000, o, a2, f) && AngleWrap(a2[1]) < -160 && AngleWrap(a2[1]) > -180);
+	// saved and loaded
+	FakeHost h;
+	Scene s(&h);
+	const float z[3] = { 0, 0, 0 };
+	const int cam = s.AddCamera(z, z, 80);
+	TransformKey e; e.easeIn = 0.25f; e.easeOut = 0.75f;
+	CHECK(s.SetKey(cam, e) && s.Save("PE"));
+	Scene l(&h);
+	std::vector<std::string> warn;
+	CHECK(l.Load("PE", false, false, warn) && l.Find(cam)->keys[0].easeIn == 0.25f && l.Find(cam)->keys[0].easeOut == 0.75f);
+}
+
 int main()
 {
+	TestEase();
 	TestPhase8();
 	TestPhase7();
 	TestPhase6();

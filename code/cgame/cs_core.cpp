@@ -769,22 +769,37 @@ namespace cs
 		const TransformKey& b = k[static_cast<size_t>(std::min(i + 1, n - 1))];
 		const TransformKey& p0 = k[static_cast<size_t>(std::max(i - 1, 0))];
 		const TransformKey& p3 = k[static_cast<size_t>(std::min(i + 2, n - 1))];
-		float f = t;
-		if (a.interp == Interp::Step) f = 0;
-		else if (a.interp == Interp::Smooth) f = t * t * (3 - 2 * t);
 		const float t2 = t * t, t3 = t2 * t;
+		// seconds between keys, for the speed through a key (Smooth)
+		const double ta = static_cast<double>(a.tUs) / 1e6, tb = static_cast<double>(b.tUs) / 1e6;
+		const double t0 = static_cast<double>(p0.tUs) / 1e6, t3s = static_cast<double>(p3.tUs) / 1e6;
+		const float D = static_cast<float>(std::max(1e-6, tb - ta));
+		const bool firstA = i == 0, lastB = i + 1 >= n - 1;
 		for (int c = 0; c < 7; c++)
 		{
 			const bool ang = c >= 3 && c <= 5;
 			const float va = Ch(a, c);
 			const float vb = ang ? Unwrap(va, Ch(b, c)) : Ch(b, c);
-			if (a.interp == Interp::CatmullRom)
+			const float v0 = ang ? Unwrap(va, Ch(p0, c)) : Ch(p0, c);
+			const float v3 = ang ? Unwrap(vb, Ch(p3, c)) : Ch(p3, c);
+			switch (a.interp)
 			{
-				const float v0 = ang ? Unwrap(va, Ch(p0, c)) : Ch(p0, c);
-				const float v3 = ang ? Unwrap(vb, Ch(p3, c)) : Ch(p3, c);
+			case Interp::Step: out[c] = va; break;
+			case Interp::Linear: out[c] = va + (vb - va) * t; break;
+			case Interp::CatmullRom:
 				out[c] = 0.5f * (2 * va + (-v0 + vb) * t + (2 * v0 - 5 * va + 4 * vb - v3) * t2 + (-v0 + 3 * va - 3 * vb + v3) * t3);
+				break;
+			default:
+			{
+				// Hermite with the speed through each key from its neighbours (units per second), so a move
+				// flows through the keys in between instead of stopping at each; ease scales it down to 0
+				const float ma = firstA ? 0.0f : static_cast<float>((vb - v0) / std::max(1e-6, tb - t0)) * (1.0f - std::max(0.0f, std::min(1.0f, a.easeOut)));
+				const float mb = lastB ? 0.0f : static_cast<float>((v3 - va) / std::max(1e-6, t3s - ta)) * (1.0f - std::max(0.0f, std::min(1.0f, b.easeIn)));
+				const float h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+				out[c] = h00 * va + h10 * D * ma + h01 * vb + h11 * D * mb;
+				break;
 			}
-			else out[c] = va + (vb - va) * f;
+			}
 		}
 	}
 
@@ -1344,6 +1359,8 @@ namespace cs
 			if (k.pitch != 0) kj.set("pitch", static_cast<double>(k.pitch));
 			if (k.roll != 0) kj.set("roll", static_cast<double>(k.roll));
 			if (k.fov != 0) kj.set("fov", static_cast<double>(k.fov));
+			if (k.easeIn != 0) kj.set("easeIn", static_cast<double>(k.easeIn));
+			if (k.easeOut != 0) kj.set("easeOut", static_cast<double>(k.easeOut));
 			kj.set("interp", InterpName(k.interp));
 			arr.push(kj);
 		}
@@ -1361,6 +1378,8 @@ namespace cs
 			key.pitch = static_cast<float>(keys[k].get("pitch").asNumber(0));
 			key.roll = static_cast<float>(keys[k].get("roll").asNumber(0));
 			key.fov = static_cast<float>(keys[k].get("fov").asNumber(0));
+			key.easeIn = static_cast<float>(keys[k].get("easeIn").asNumber(0));
+			key.easeOut = static_cast<float>(keys[k].get("easeOut").asNumber(0));
 			key.interp = InterpFromName(keys[k].get("interp").asString());
 			bool dup = false;
 			for (auto& e : out) dup = dup || e.tUs == key.tUs;

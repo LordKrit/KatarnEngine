@@ -41,16 +41,18 @@ namespace
 	constexpr float kRow = 10, kRulerH = 12, kStatusH = 10;
 	constexpr float kText = 0.42f;			// font scale for panel text
 
-	const vec4_t kPanel = { 0.04f, 0.05f, 0.07f, 0.80f };
-	const vec4_t kPanelDark = { 0.02f, 0.02f, 0.03f, 0.88f };
+	const vec4_t kPanel = { 0.05f, 0.06f, 0.08f, 0.88f };
+	const vec4_t kPanelDark = { 0.025f, 0.03f, 0.04f, 0.92f };
 	const vec4_t kLine = { 0.30f, 0.34f, 0.40f, 0.9f };
+	const vec4_t kLineSoft = { 0.30f, 0.34f, 0.40f, 0.45f };
+	const vec4_t kHeaderLine = { 1.00f, 0.62f, 0.15f, 0.35f };
 	const vec4_t kTextCol = { 0.88f, 0.90f, 0.93f, 1 };
 	const vec4_t kDim = { 0.55f, 0.58f, 0.62f, 1 };
 	const vec4_t kAccent = { 1.00f, 0.62f, 0.15f, 1 };
 	const vec4_t kSel = { 0.95f, 0.55f, 0.10f, 0.35f };
-	const vec4_t kHover = { 1, 1, 1, 0.08f };
-	const vec4_t kButton = { 0.16f, 0.18f, 0.22f, 0.95f };
-	const vec4_t kButtonOn = { 0.70f, 0.38f, 0.06f, 0.95f };
+	const vec4_t kHover = { 1, 1, 1, 0.10f };
+	const vec4_t kButton = { 0.12f, 0.14f, 0.18f, 0.95f };
+	const vec4_t kButtonOn = { 0.78f, 0.44f, 0.08f, 0.95f };
 	const vec4_t kRed = { 0.95f, 0.25f, 0.20f, 1 };
 	const vec4_t kWarn = { 1.0f, 0.85f, 0.3f, 1 };
 	const vec4_t kCam = { 0.35f, 0.75f, 1.0f, 1 };
@@ -69,7 +71,7 @@ namespace
 	{
 		ACT_CLOSE, ACT_PANELS, ACT_PLAY, ACT_STOP, ACT_STEP_BACK, ACT_STEP_FWD, ACT_UNDO, ACT_REDO, ACT_SAVE,
 		ACT_DELETE, ACT_FOCUS, ACT_FREEZE, ACT_LEFT, ACT_RIGHT, ACT_FWD, ACT_BACK, ACT_UP, ACT_DOWN, ACT_TURN_L, ACT_TURN_R,
-		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_DIRECTOR, ACT_PREV_KEY, ACT_NEXT_KEY, ACT_LOOK, ACT_COUNT
+		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_DIRECTOR, ACT_PREV_KEY, ACT_NEXT_KEY, ACT_LOOK, ACT_CLEAN, ACT_COUNT
 	};
 	struct Hotkey { const char* name; int key; bool ctrl; };
 	Hotkey g_keys[ACT_COUNT] = {
@@ -82,7 +84,7 @@ namespace
 		{ "nudge_up", A_PAGE_UP, false }, { "nudge_down", A_PAGE_DOWN, false },
 		{ "turn_left", A_LOW_Q, false }, { "turn_right", A_LOW_E, false }, { "player_view", A_LOW_V, false },
 		{ "duplicate", A_LOW_D, true }, { "split", A_LOW_B, true }, { "set_key", A_LOW_K, false }, { "snap", A_LOW_N, false }, { "director", A_LOW_C, false },
-		{ "prev_key", A_OPEN_BRACKET, false }, { "next_key", A_CLOSE_BRACKET, false }, { "look_through", A_LOW_L, false },
+		{ "prev_key", A_OPEN_BRACKET, false }, { "next_key", A_CLOSE_BRACKET, false }, { "look_through", A_LOW_L, false }, { "clean_view", A_LOW_H, false },
 	};
 
 	struct KeyName { const char* n; int k; };
@@ -245,6 +247,12 @@ namespace
 		std::map<int, int> idleApplied, eyeApplied;	// per entity: idle on (1) / off (0); eyes mode + 1
 		bool soundsStarted = false;				// the studio started sounds (stopped when playback stops)
 		bool musicStarted = false;
+		// clean view: nothing of the editor on screen (H)
+		bool clean = false;
+		int cleanHintMs = 0;
+		// a scrollbar being dragged
+		float* scrollDrag = nullptr;
+		float scrollGrab = 0;
 		// ---- Phase 7: props ----
 		bool propModels = false;		// the PROPS tab lists model files instead of entity classes
 		std::string propSearch, propDir = "models/map_objects", propClass = "misc_model_breakable", propModel;
@@ -331,10 +339,41 @@ namespace
 		const bool hover = enabled && Inside(s.cx, s.cy, x, y, w, h);
 		Rect(x, y, w, h, on ? kButtonOn : kButton);
 		if (hover) Rect(x, y, w, h, kHover);
-		Frame(x, y, w, h, kLine);
+		Frame(x, y, w, h, hover ? kHeaderLine : kLineSoft);
 		const float tw = TextW(label);
 		Text(x + (w - tw) * 0.5f, y + 1.5f, label, enabled ? kTextCol : kDim);
 		return enabled && TakeClick(x, y, w, h);
+	}
+
+	// a scrollbar for a list of `total` rows showing `rows`: drag the thumb, click above / below it to page
+	void ScrollBar(const float x, const float y, const float h, float& scroll, const int total, const int rows)
+	{
+		Studio& s = S();
+		if (total <= rows) { if (s.scrollDrag == &scroll) s.scrollDrag = nullptr; return; }
+		const float maxS = static_cast<float>(total - rows);
+		const float th = std::max(10.0f, h * static_cast<float>(rows) / static_cast<float>(total));
+		const float ty = y + (h - th) * std::max(0.0f, std::min(1.0f, scroll / maxS));
+		const bool grab = s.scrollDrag == &scroll, hover = Inside(s.cx, s.cy, x - 2, y, 9, h);
+		Rect(x, y, 5, h, kLane);
+		Rect(x, ty, 5, th, grab || hover ? kAccent : kLine);
+		if (s.clicked && Inside(s.clickX, s.clickY, x - 2, y, 9, h))
+		{
+			s.clicked = false;
+			if (s.clickY >= ty && s.clickY <= ty + th) { s.scrollDrag = &scroll; s.scrollGrab = s.clickY - ty; }
+			else scroll += s.clickY < ty ? -static_cast<float>(rows) : static_cast<float>(rows);
+		}
+		if (grab)
+		{
+			if (!s.lmb) s.scrollDrag = nullptr;
+			else scroll = (s.cy - s.scrollGrab - y) / std::max(1.0f, h - th) * maxS;
+		}
+		scroll = std::max(0.0f, std::min(maxS, scroll));
+	}
+
+	void Header(const float x, const float y, const std::string& t, const float w = kRightW - 12)
+	{
+		Text(x, y, t, kAccent);
+		Rect(x, y + 9, w, 0.6f, kHeaderLine);
 	}
 
 	void Label(const float x, const float y, const std::string& k, const std::string& v, const float w = kRightW - 12)
@@ -678,24 +717,30 @@ namespace
 	{
 		Studio& s = S();
 		Rect(0, 0, kW, kTitleH, kPanelDark);
-		Text(4, 2, "JK BUILD - CINEMATIC STUDIO", kAccent);
+		Text(4, 2, "CINEMATIC STUDIO", kAccent);
 		const std::string proj = s.scene.project.empty() ? "unsaved scene" : s.scene.project;
-		const std::string mid = proj + (s.scene.dirty ? " *" : "") + "    map: " + s.host.MapName();
-		Text(200, 2, mid, kDim);
-		if (Button(kW - 82, 1, 40, 11, "SAVE"))
+		Text(84, 2, proj + (s.scene.dirty ? " *" : "") + "   " + s.host.MapName(), kDim);
+		Text(300, 2, s.scene.clock.Timecode() + (s.scene.clock.playing ? "  PLAYING" : ""), s.scene.clock.playing ? kRed : kTextCol);
+		if (Button(kW - 168, 1, 64, 11, "HIDE UI (H)")) { s.clean = true; s.cleanHintMs = NowMs(); }
+		if (Button(kW - 102, 1, 50, 11, "SAVE"))
 		{
 			if (!s.scene.project.empty()) Save(s.scene.project);
 			else { s.tab = TAB_PROJECT; BeginField(FIELD_PROJECT, s.projectName); }
 		}
-		if (Button(kW - 40, 1, 38, 11, "X")) Close();
+		if (Button(kW - 50, 1, 48, 11, "CLOSE")) Close();
 
 		Rect(0, kTabsY, kW, kTabsH, kPanel);
-		float x = 4;
+		Rect(0, kTabsY + kTabsH - 0.6f, kW, 0.6f, kLineSoft);
+		float x = 6;
 		for (int t = 0; t < TAB_COUNT; t++)
 		{
-			const float w = TextW(kTabNames[t]) + 12;
-			if (Button(x, kTabsY + 1, w, kTabsH - 2, kTabNames[t], s.tab == t)) s.tab = t;
-			x += w + 2;
+			const float w = TextW(kTabNames[t]) + 14;
+			const bool on = s.tab == t, hover = Inside(s.cx, s.cy, x, kTabsY, w, kTabsH);
+			if (hover && !on) Rect(x, kTabsY + 1, w, kTabsH - 2, kHover);
+			Text(x + 7, kTabsY + 2, kTabNames[t], on ? kAccent : (hover ? kTextCol : kDim));
+			if (on) Rect(x + 3, kTabsY + kTabsH - 2, w - 6, 1.6f, kAccent);
+			if (TakeClick(x, kTabsY, w, kTabsH)) s.tab = t;
+			x += w;
 		}
 		const bool frozen = Frozen();
 		if (Button(kW - 82, kTabsY + 1, 80, kTabsH - 2, frozen ? "WORLD FROZEN" : "FREEZE WORLD", frozen)) SetFreeze(!frozen);
@@ -1186,22 +1231,23 @@ namespace
 			}
 			shown.push_back(&a);
 		}
-		const float listH = 9 * 9.0f;
+		const float listH = 12 * 9.0f;
 		const int rows = static_cast<int>(listH / 9);
 		Rect(ix, y, w, listH, kPanelDark);
 		if (Inside(s.cx, s.cy, ix, y, w, listH)) { s.animScroll -= static_cast<float>(s.wheel) * 3; s.wheel = 0; }
 		s.animScroll = std::max(0.0f, std::min(s.animScroll, static_cast<float>(std::max(0, static_cast<int>(shown.size()) - rows))));
+		ScrollBar(ix + w - 5, y, listH, s.animScroll, static_cast<int>(shown.size()), rows);
 		for (int r = 0; r < rows; r++)
 		{
 			const int i = static_cast<int>(s.animScroll) + r;
 			if (i >= static_cast<int>(shown.size())) break;
 			const AnimInfo* a = shown[static_cast<size_t>(i)];
 			const float ry = y + static_cast<float>(r) * 9;
-			if (a->anim == s.browseAnim) Rect(ix, ry, w, 9, kSel);
-			else if (Inside(s.cx, s.cy, ix, ry, w, 9)) Rect(ix, ry, w, 9, kHover);
-			TextClip(ix + 2, ry + 0.5f, a->name + (a->extra ? "  *" : ""), w - 34, a->extra ? kAccent : kTextCol);
-			Text(ix + w - 30, ry + 0.5f, Fmt("%d", a->numFrames), kDim, 0.36f);
-			if (TakeClick(ix, ry, w, 9))
+			if (a->anim == s.browseAnim) Rect(ix, ry, w - 7, 9, kSel);
+			else if (Inside(s.cx, s.cy, ix, ry, w - 7, 9)) Rect(ix, ry, w - 7, 9, kHover);
+			TextClip(ix + 2, ry + 0.5f, a->name + (a->extra ? "  *" : ""), w - 40, a->extra ? kAccent : kTextCol);
+			Text(ix + w - 34, ry + 0.5f, Fmt("%d", a->numFrames), kDim, 0.36f);
+			if (TakeClick(ix, ry, w - 7, 9))
 			{
 				if (s.browseAnim != a->anim) { s.browseAnim = a->anim; s.rangeStart = 0; s.rangeEnd = -1; s.previewFrame = 0; }
 				if (s.doubleClick) StartPreview(false);
@@ -1277,6 +1323,7 @@ namespace
 	void SplitAtPlayhead();
 	void SetKeyAtPlayhead();
 	void JumpKey(int dir);
+	void AddKeyOnPath();
 	bool DrawTakeEditor(const float x, float y)
 	{
 		Studio& s = S();
@@ -1489,28 +1536,96 @@ namespace
 		if (o && o->id == s.scene.selected) for (auto& e : o->keys) if (e.tUs == s.keyUs) k = &e;
 		if (!k) { s.keyObj = 0; return false; }
 		const float w = kRightW - 12;
-		Text(x, y, "POSITION KEY", kAccent);
-		if (Button(x + w - 40, y - 1, 40, 10, "CLOSE")) { s.keyObj = 0; return false; }
-		y += 11;
-		Label(x, y, "actor", o->name, w); y += kRow;
-		Label(x, y, "time", Fmt("%.3fs", static_cast<double>(k->tUs) / 1e6), w); y += kRow;
-		Label(x, y, "position", Fmt("%.0f %.0f %.0f", k->origin[0], k->origin[1], k->origin[2]), w); y += kRow;
-		if (o->type == ObjType::Camera) { Label(x, y, "angles", Fmt("%.0f %.0f %.0f  fov %.0f", k->pitch, k->yaw, k->roll, k->fov), w); y += kRow + 1; }
-		else { Label(x, y, "yaw", Fmt("%.0f", k->yaw), w); y += kRow + 1; }
+		int idx = 0;
+		for (size_t i = 0; i < o->keys.size(); i++) if (&o->keys[i] == k) idx = static_cast<int>(i);
+		Header(x, y, Fmt("KEY %d / %d", idx + 1, static_cast<int>(o->keys.size())) + "  " + o->name);
+		if (Button(x + w - 34, y - 1, 34, 9, "CLOSE")) { s.keyObj = 0; return false; }
+		y += 12;
 		const int id = o->id;
 		const int64_t at = k->tUs;
-		static const Interp kOrder[] = { Interp::Smooth, Interp::Linear, Interp::CatmullRom, Interp::Step };
-		int cur = 0;
-		for (int i = 0; i < 4; i++) if (kOrder[i] == k->interp) cur = i;
-		if (Button(x, y, 70, 10, std::string("TO NEXT: ") + InterpName(k->interp))) { s.scene.SetKeyInterp(id, at, kOrder[(cur + 1) % 4]); return true; }
-		if (Button(x + 72, y, 46, 10, "GO TO")) { s.scene.clock.Pause(); s.scene.clock.timeUs = at; }
-		if (Button(x + w - 40, y, 40, 10, "DELETE")) { s.scene.RemoveKey(id, at); s.keyObj = 0; return true; }
-		y += 12;
-		if (o->type == ObjType::Camera)
+		const bool cam = o->type == ObjType::Camera, prop = o->type == ObjType::Prop;
+		TransformKey nk = *k;
+		bool ch = false;
+		const auto nudge = [&](const float bx, const float by, const char* l, float& v, const float step)
 		{
-			if (Button(x, y, w, 10, "SET FROM THE VIEW"))
+			if (Button(bx, by, 11, 9, "-")) { v -= step; ch = true; }
+			Text(bx + 13, by + 0.5f, l, kDim);
+			if (Button(bx + 21, by, 11, 9, "+")) { v += step; ch = true; }
+		};
+		const float third = w / 3;
+		// time
+		Label(x, y, "time", Fmt("%.3fs", static_cast<double>(at) / 1e6), w - 30);
+		{
+			const int64_t step = s.shift ? 1'000'000 : 1'000'000 / s.scene.clock.fps;
+			if (Button(x + w - 26, y, 12, 9, "-") && s.scene.MoveKey(id, at, at - step, true)) { s.keyUs = std::max<int64_t>(0, at - step); return true; }
+			if (Button(x + w - 12, y, 12, 9, "+") && s.scene.MoveKey(id, at, at + step, true)) { s.keyUs = at + step; return true; }
+		}
+		y += kRow;
+		// position
+		const float pstep = s.shift ? 16.0f : (s.ctrl ? 0.25f : 2.0f);
+		Label(x, y, "position", Fmt("%.1f %.1f %.1f", k->origin[0], k->origin[1], k->origin[2]), w); y += kRow;
+		nudge(x, y, "X", nk.origin[0], pstep); nudge(x + third, y, "Y", nk.origin[1], pstep); nudge(x + 2 * third, y, "Z", nk.origin[2], pstep);
+		y += kRow + 1;
+		// angles
+		const float astep = s.shift ? 15.0f : (s.ctrl ? 0.25f : 2.0f);
+		if (cam || prop)
+		{
+			Label(x, y, "angles", Fmt("%.1f %.1f %.1f", k->pitch, k->yaw, k->roll), w); y += kRow;
+			nudge(x, y, "P", nk.pitch, astep); nudge(x + third, y, "Y", nk.yaw, astep); nudge(x + 2 * third, y, "R", nk.roll, astep);
+			y += kRow + 1;
+		}
+		else
+		{
+			Label(x, y, "yaw", Fmt("%.1f", k->yaw), w - 36);
+			nudge(x + w - 34, y, "", nk.yaw, astep);
+			y += kRow + 1;
+		}
+		if (cam)
+		{
+			Label(x, y, "fov", Fmt("%.1f", k->fov), w - 36);
+			nudge(x + w - 34, y, "", nk.fov, s.shift ? 10.0f : 1.0f);
+			nk.fov = std::max(5.0f, std::min(150.0f, nk.fov));
+			y += kRow + 1;
+		}
+		// how it moves to the next key
+		Text(x, y, "to the next key", kDim); y += 9;
+		{
+			static const Interp kOrder[] = { Interp::Smooth, Interp::Linear, Interp::CatmullRom, Interp::Step };
+			static const char* kNames[] = { "SMOOTH", "LINEAR", "CURVE", "STEP" };
+			const float bw = (w - 6) / 4;
+			for (int i = 0; i < 4; i++)
+				if (Button(x + i * (bw + 2), y, bw, 10, kNames[i], k->interp == kOrder[i])) { s.scene.SetKeyInterp(id, at, kOrder[i]); return true; }
+			y += 12;
+		}
+		// ease (smooth): 0 = flows through, 1 = comes to a stop at this key
+		{
+			const bool ends = idx == 0 || idx == static_cast<int>(o->keys.size()) - 1;
+			Label(x, y, "ease in", Fmt("%d%%", static_cast<int>(k->easeIn * 100 + 0.5f)), w - 36);
+			if (Button(x + w - 34, y, 11, 9, "-")) { nk.easeIn -= 0.25f; ch = true; }
+			if (Button(x + w - 11, y, 11, 9, "+")) { nk.easeIn += 0.25f; ch = true; }
+			y += kRow;
+			Label(x, y, "ease out", Fmt("%d%%", static_cast<int>(k->easeOut * 100 + 0.5f)), w - 36);
+			if (Button(x + w - 34, y, 11, 9, "-")) { nk.easeOut -= 0.25f; ch = true; }
+			if (Button(x + w - 11, y, 11, 9, "+")) { nk.easeOut += 0.25f; ch = true; }
+			y += kRow;
+			const bool stops = k->easeIn >= 1 && k->easeOut >= 1;
+			if (Button(x, y, w / 2 - 1, 10, stops ? "STOPS HERE" : "FLOWS THROUGH", stops))
 			{
-				TransformKey nk = *k;
+				nk.easeIn = nk.easeOut = stops ? 0.0f : 1.0f;
+				ch = true;
+			}
+			if (Button(x + w / 2 + 1, y, w / 2 - 1, 10, "GO TO")) { s.scene.clock.Pause(); s.scene.clock.timeUs = at; }
+			y += 12;
+			if (ends) { Text(x, y, "first / last key: starts / ends at rest", kDim, 0.34f); y += 9; }
+			nk.easeIn = std::max(0.0f, std::min(1.0f, nk.easeIn));
+			nk.easeOut = std::max(0.0f, std::min(1.0f, nk.easeOut));
+		}
+		if (ch) { s.scene.SetKey(id, nk, true); return true; }
+		// set from / add / delete
+		if (cam)
+		{
+			if (Button(x, y, w / 2 - 1, 10, "SET FROM VIEW"))
+			{
 				VectorCopy(cg.refdef.vieworg, nk.origin);
 				nk.pitch = cg.refdefViewAngles[PITCH]; nk.yaw = cg.refdefViewAngles[YAW]; nk.roll = cg.refdefViewAngles[ROLL];
 				nk.fov = cg.refdef.fov_x;
@@ -1518,17 +1633,37 @@ namespace
 				return true;
 			}
 		}
-		else if (Button(x, y, w, 10, "SET FROM WHERE IT IS NOW"))
+		else if (Button(x, y, w / 2 - 1, 10, "SET FROM NOW"))
 		{
-			TransformKey nk = *k;
 			EntInfo info;
-			if (EntityInfo(o->entNum, info)) { VectorCopy(info.origin, nk.origin); nk.yaw = info.yaw; s.scene.SetKey(id, nk); }
+			if (o->type == ObjType::Actor && EntityInfo(o->entNum, info)) { VectorCopy(info.origin, nk.origin); nk.yaw = info.yaw; s.scene.SetKey(id, nk); }
 			return true;
 		}
-		y += 13;
-		Text(x, y, "K: key at playhead  drag keys in time", kDim); y += kRow;
-		Text(x, y, "drag the actor at a key's time to move it", kDim);
+		if (Button(x + w / 2 + 1, y, w / 2 - 1, 10, "DELETE")) { s.scene.RemoveKey(id, at); s.keyObj = 0; return true; }
+		y += 12;
+		if (Button(x, y, w, 10, "ADD KEY ON THE PATH AT PLAYHEAD (SHIFT+K)")) AddKeyOnPath();
+		y += 12;
+		Text(x, y, "SHIFT = big steps  CTRL = fine  [ ] keys", kDim, 0.34f);
 		return true;
+	}
+
+	// a key at the playhead exactly where the path already is (to shape the move from there)
+	void AddKeyOnPath()
+	{
+		Studio& s = S();
+		const Object* o = s.scene.Find(s.scene.selected);
+		if (!o || o->keys.empty()) { s.host.Log(1, "Select something with keys (K sets the first ones)"); return; }
+		const int64_t frameUs = 1'000'000 / s.scene.clock.fps;
+		const int64_t t = s.scene.clock.timeUs / frameUs * frameUs;
+		TransformKey k;
+		k.tUs = t;
+		float ang[3], fov = 0, vel[3];
+		if (o->type == ObjType::Camera || o->type == ObjType::Prop) { EvaluateCameraKeys(o->keys, t, k.origin, ang, fov); k.pitch = ang[0]; k.yaw = ang[1]; k.roll = ang[2]; k.fov = fov; }
+		else EvaluateKeys(o->keys, t, k.origin, k.yaw, vel);
+		// keep the way the move goes on from the key before
+		for (auto& e : o->keys) if (e.tUs <= t) k.interp = e.interp;
+		const int id = o->id;
+		if (s.scene.SetKey(id, k)) { s.keyObj = id; s.keyUs = t; s.host.Log(0, o->name + ": key on its path at " + s.scene.clock.Timecode()); }
 	}
 
 	// ---- Phase 8: audio and faces ----
@@ -1684,7 +1819,7 @@ namespace
 		if (o && o->type == ObjType::Actor)
 		{
 			// ---- voice lines
-			Text(ix, y, "VOICE LINES: " + o->name, kAccent); y += 11;
+			Header(ix, y, "VOICE LINES: " + o->name); y += 11;
 			DrawField(ix, y, w, FIELD_VOICE, s.voicePath); y += 13;
 			if (Button(ix, y, w, 10, "ADD LINE AT PLAYHEAD (lip sync)"))
 			{
@@ -1770,7 +1905,7 @@ namespace
 				y += kRow + 2;
 			}
 			// ---- eyes
-			Text(ix, y, "EYES", kAccent); y += 11;
+			Header(ix, y, "EYES"); y += 11;
 			EyeKey cur;
 			const bool haveEyes = EyesAt(o->eyeKeys, t, cur);
 			const Object* tg = haveEyes && cur.mode == EyeKey::LookAt ? s.scene.Find(cur.target) : nullptr;
@@ -1835,7 +1970,7 @@ namespace
 		}
 		if (o && o->type == ObjType::Audio)
 		{
-			Text(ix, y, (o->music ? "MUSIC: " : "SOUNDS: ") + o->name, kAccent); y += 11;
+			Header(ix, y, (o->music ? "MUSIC: " : "SOUNDS: ") + o->name); y += 11;
 			DrawField(ix, y, w, FIELD_MUSIC, s.soundPath); y += 13;
 			if (Button(ix, y, w, 10, o->music ? "ADD MUSIC AT PLAYHEAD" : "ADD SOUND AT PLAYHEAD"))
 			{
@@ -1859,7 +1994,7 @@ namespace
 			Text(ix, y, o->music ? "music: one track at a time, plays on" : "sounds play where the scene starts them", kDim, 0.34f);
 			return;
 		}
-		Text(ix, y, "AUDIO", kAccent); y += 12;
+		Header(ix, y, "AUDIO"); y += 12;
 		Text(ix, y, "Select an actor for voice lines and", kDim); y += kRow;
 		Text(ix, y, "face tracks, or add a track:", kDim); y += kRow + 3;
 		if (Button(ix, y, w, 11, "ADD MUSIC TRACK")) s.scene.AddAudio("", true);
@@ -1940,7 +2075,7 @@ namespace
 		Label(x, y, "position", Fmt("%.0f %.0f %.0f", org[0], org[1], org[2])); y += kRow;
 		Label(x, y, "angles", Fmt("%.0f %.0f %.0f", ang[0], ang[1], ang[2])); y += kRow + 2;
 		// its keys
-		Text(x, y, "KEYS (key value)", kAccent); y += 10;
+		Header(x, y, "KEYS (key value)"); y += 10;
 		int shown = 0;
 		for (auto& p : o->kv)
 		{
@@ -2025,7 +2160,7 @@ namespace
 		Studio& s = S();
 		const float ix = x + 6, w = kRightW - 12;
 		float y = y0 + 2;
-		Text(ix, y, "PROPS: MAP OBJECTS", kAccent); y += 11;
+		Header(ix, y, "PROPS: MAP OBJECTS"); y += 11;
 		if (Button(ix, y, w / 2 - 1, 10, "ENTITY CLASSES", !s.propModels)) { s.propModels = false; s.propScroll = 0; }
 		if (Button(ix + w / 2 + 1, y, w / 2 - 1, 10, "MODELS", s.propModels)) { s.propModels = true; s.propScroll = 0; }
 		y += 12;
@@ -2049,16 +2184,17 @@ namespace
 		if (Inside(s.cx, s.cy, x, y, kRightW, listH) && s.wheel) { s.propScroll -= static_cast<float>(s.wheel) * 3; s.wheel = 0; }
 		s.propScroll = std::max(0.0f, std::min(s.propScroll, static_cast<float>(std::max(0, static_cast<int>(list.size()) - rows))));
 		Rect(x + 2, y, kRightW - 4, rows * kRow, kPanelDark);
+		ScrollBar(x + kRightW - 8, y, rows * kRow, s.propScroll, static_cast<int>(list.size()), rows);
 		for (int i = 0; i < rows && static_cast<size_t>(i) + static_cast<size_t>(s.propScroll) < list.size(); i++)
 		{
 			const std::string& it = list[static_cast<size_t>(i) + static_cast<size_t>(s.propScroll)];
 			const float ry = y + i * kRow;
 			const bool sel = s.propModels ? it == s.propModel : it == s.propClass;
-			if (sel) Rect(x + 2, ry, kRightW - 4, kRow, kSel);
+			if (sel) Rect(x + 2, ry, kRightW - 12, kRow, kSel);
 			std::string shown = it;
 			if (s.propModels && shown.size() > s.propDir.size() + 1) shown = shown.substr(s.propDir.size() + 1);
-			TextClip(ix, ry + 0.5f, shown, w, it == "cs_model" ? kAccent : kTextCol);
-			if (TakeClick(x, ry, kRightW, kRow))
+			TextClip(ix, ry + 0.5f, shown, w - 8, it == "cs_model" ? kAccent : kTextCol);
+			if (TakeClick(x, ry, kRightW - 10, kRow))
 			{
 				if (s.propModels) s.propModel = it; else s.propClass = it;
 				if (s.doubleClick) SpawnPropInFront();
@@ -2247,6 +2383,7 @@ namespace
 		Studio& s = S();
 		const float x = kRightX, y0 = kPanelY, h = kTransportY - kPanelY;
 		Rect(x, y0, kRightW, h, kPanel);
+		Rect(x, y0, 0.6f, h, kLineSoft);
 		const float ix = x + 6;
 		float y = y0 + 2;
 		Object* sel = s.scene.Find(s.scene.selected);
@@ -2258,7 +2395,7 @@ namespace
 			if (DrawClipEditor(ix, y)) break;
 			if (DrawTakeEditor(ix, y)) break;
 			if (DrawKeyEditor(ix, y)) break;
-			Text(ix, y, "INSPECTOR", kAccent); y += 12;
+			Header(ix, y, "INSPECTOR"); y += 12;
 			if (sel && sel->type == ObjType::Camera) DrawCameraInspector(ix, y, sel);
 			else if (sel && sel->type == ObjType::Prop) DrawPropInspector(ix, y, sel);
 			else if (sel && sel->type == ObjType::Audio) DrawAudioPanel(x, y0, h);
@@ -2290,7 +2427,7 @@ namespace
 
 		case TAB_ACTORS:
 		{
-			Text(ix, y, "ADD ACTOR (NPC type)", kAccent); y += 12;
+			Header(ix, y, "ADD ACTOR (NPC type)"); y += 12;
 			DrawField(ix, y, kRightW - 12, FIELD_NPC, s.npcType); y += 13;
 			if (Button(ix, y, kRightW - 12, 11, "SPAWN IN FRONT OF VIEW")) { s.field = FIELD_NONE; SpawnActor(s.npcType); }
 			y += 13;
@@ -2314,7 +2451,7 @@ namespace
 				Text(ix, y, "play; F9 puts the last seconds here", kDim, 0.34f);
 				y += 13;
 			}
-			Text(ix, y, "LEVEL CHARACTERS", kAccent); y += 12;
+			Header(ix, y, "LEVEL CHARACTERS"); y += 12;
 			int ents[64];
 			const int n = ListCharacters(ents, 64);
 			for (int i = 0; i < n && y < y0 + h - kRow; i++)
@@ -2338,7 +2475,7 @@ namespace
 
 		case TAB_CAMERA:
 		{
-			Text(ix, y, "CAMERAS", kAccent); y += 12;
+			Header(ix, y, "CAMERAS"); y += 12;
 			if (Button(ix, y, 66, 11, "NEW FROM VIEW")) AddCameraFromView();
 			if (Button(ix + 70, y, 44, 11, "FREE CAM", s.camActive && !s.lookId)) { StopLooking(); StartFreeCam(); }
 			if (Button(ix + 116, y, 44, 11, "PLAYER", !s.camActive)) PlayerView();
@@ -2365,11 +2502,13 @@ namespace
 			Object* cam = sel && sel->type == ObjType::Camera ? sel : nullptr;
 			if (cam)
 			{
-				Text(ix, y, cam->name + ": KEYS", kAccent); y += 11;
+				Header(ix, y, cam->name + ": KEYS"); y += 11;
 				const float bw = (kRightW - 16) / 3;
 				if (Button(ix, y, bw * 2 + 2, 12, "KEY WHAT I SEE (K)")) SetKeyAtPlayhead();
 				if (Button(ix + 2 * (bw + 2), y, bw, 12, "CUT HERE")) { if (s.scene.AddCut(cam->id, s.scene.clock.timeUs)) s.host.Log(0, "Cut to " + cam->name + " at " + s.scene.clock.Timecode()); }
 				y += 14;
+				if (Button(ix, y, bw * 2 + 2, 11, "KEY ON THE PATH (SHIFT+K)", false, !cam->keys.empty())) AddKeyOnPath();
+				y += 13;
 				if (Button(ix, y, bw, 11, "< PREV KEY", false, !cam->keys.empty())) JumpKey(-1);
 				if (Button(ix + bw + 2, y, bw, 11, "NEXT KEY >", false, !cam->keys.empty())) JumpKey(1);
 				if (Button(ix + 2 * (bw + 2), y, bw, 11, "PLAY IT")) { LookThrough(cam->id, false); s.scene.clock.Play(); }
@@ -2386,7 +2525,7 @@ namespace
 
 		case TAB_PROJECT:
 		{
-			Text(ix, y, "PROJECT", kAccent); y += 12;
+			Header(ix, y, "PROJECT"); y += 12;
 			DrawField(ix, y, kRightW - 12, FIELD_PROJECT, s.projectName.empty() ? s.scene.project : s.projectName); y += 13;
 			const std::string name = s.projectName.empty() ? s.scene.project : s.projectName;
 			if (Button(ix, y, 44, 11, "SAVE", false, !name.empty())) Save(name);
@@ -2401,7 +2540,7 @@ namespace
 			}
 			if (Button(ix + 92, y, 44, 11, "FORCE", false, !name.empty())) Load(name, true, false);
 			y += 16;
-			Text(ix, y, "RECENT", kAccent); y += 12;
+			Header(ix, y, "RECENT"); y += 12;
 			for (auto& r : s.recent)
 			{
 				if (y > y0 + h - 30) break;
@@ -2889,7 +3028,7 @@ namespace
 			TextClip(4, sy + 1, m.second, kW - 8, m.first >= 2 ? kRed : (m.first == 1 ? kWarn : kTextCol));
 		}
 		else
-			Text(4, sy + 1, "F10 close   TAB hide panels   SPACE play   , . step   CTRL+Z/Y undo/redo   CTRL+S save   "
+			Text(4, sy + 1, "F10 close  H clean view  TAB panels  SPACE play  , . step  [ ] keys  CTRL+Z/Y undo  CTRL+S save  "
 				"right mouse + WASD fly   F focus   P freeze   K key   CTRL+B split   N snap", kDim, 0.36f);
 	}
 
@@ -3667,6 +3806,15 @@ void CS_Command_f()
 		else SaveInstantReplay();
 		return;
 	}
+	if (!Q_stricmp(sub, "hud"))
+	{
+		// the game's own HUD (for filming outside the studio): studio hud [on|off]
+		const bool on = !a2.empty() ? (!Q_stricmp(a2.c_str(), "on") || a2 == "1") : !cg_draw2D.integer;
+		cgi_Cvar_Set("cg_draw2D", on ? "1" : "0");
+		s.host.Log(0, on ? "Game HUD on" : "Game HUD off (studio hud to turn it back on)");
+		return;
+	}
+	if (!Q_stricmp(sub, "clean")) { s.clean = !s.clean; s.cleanHintMs = NowMs(); return; }
 	if (!Q_stricmp(sub, "countdown")) { s.recCountdownSec = std::max(0, std::min(10, atoi(a2.c_str()))); return; }
 	if (!Q_stricmp(sub, "open")) { Open(); return; }
 	if (!Q_stricmp(sub, "close")) { Close(); return; }
@@ -3692,6 +3840,7 @@ void CS_Command_f()
 	}
 	Com_Printf("studio [open|close|toggle]  save [name]  load <name> [force]  recover [name]  new\n"
 		"       spawn <npc>  camera  play  pause  stop  fps <24|30|60>  undo  redo  freeze  list\n"
+		"       hud [on|off] (the game's HUD)  clean (hide the editor)\n"
 		"       rec [new|stop|cancel]  countdown <seconds>  replay [on|off|<seconds>]  (replay: keep the last seconds)\n");
 }
 
@@ -3765,6 +3914,7 @@ int CS_KeyEvent(int key, const int down)
 	}
 	if (key == A_ESCAPE)
 	{
+		if (s.clean) { s.clean = false; return 1; }
 		if (s.camActive) { PlayerView(); return 1; }
 		Close();
 		return 1;
@@ -3788,9 +3938,11 @@ int CS_KeyEvent(int key, const int down)
 		else s.scene.Remove(s.scene.selected);
 	}
 	else if (is(ACT_DUPLICATE)) s.scene.Duplicate(s.scene.selected);
+	else if (key == g_keys[ACT_KEY].key && s.shift && !s.ctrl) AddKeyOnPath();
 	else if (is(ACT_SPLIT)) SplitAtPlayhead();
 	else if (is(ACT_KEY)) SetKeyAtPlayhead();
 	else if (is(ACT_DIRECTOR)) { s.director = !s.director; if (s.director) { s.pilotId = 0; s.camActive = true; } s.host.Log(0, s.director ? "Director view: the cut track picks the camera" : "Director view off"); }
+	else if (is(ACT_CLEAN)) { s.clean = !s.clean; s.cleanHintMs = NowMs(); }
 	else if (is(ACT_PREV_KEY)) JumpKey(-1);
 	else if (is(ACT_NEXT_KEY)) JumpKey(1);
 	else if (is(ACT_LOOK))
@@ -3931,6 +4083,14 @@ void CS_Draw2D()
 	if (!g_s || !g_s->open) return;
 	Studio& s = S();
 	if (s.scene.selected != s.lastSel) { s.scene.selectedClip = -1; s.scene.selectedTake = 0; s.keyObj = 0; s.lastSel = s.scene.selected; }
+	if (s.clean)
+	{
+		// the picture only: no panels, markers, paths, text or cursor
+		if (NowMs() - s.cleanHintMs < 2000) Text(6, 6, "clean view - H or ESC shows the editor", kDim, 0.36f);
+		s.clicked = false;
+		s.doubleClick = false;
+		return;
+	}
 	UpdateDrag();
 	DrawGizmo();
 	if (s.panels)
@@ -3945,7 +4105,7 @@ void CS_Draw2D()
 	else
 	{
 		DrawViewportOverlay();
-		Text(4, 4, "CINEMATIC STUDIO  (TAB: panels)", kAccent, 0.36f);
+		Text(4, 4, "TAB: panels   H: clean view", kDim, 0.34f);
 	}
 	// clicks no panel took are viewport picks (only in the viewport area while panels are up)
 	if (s.clicked)

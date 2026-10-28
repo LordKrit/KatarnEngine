@@ -181,10 +181,14 @@ namespace cs
 		float yaw = 0;
 		float pitch = 0, roll = 0, fov = 0;	// cameras (Phase 6)
 		Interp interp = Interp::Smooth;	// how it moves from this key to the next
+		// Smooth: the move flows through keys at a steady speed; ease slows it into (in) / out of (out)
+		// this key, 1 = comes to a stop here. The first and last keys always start / end at rest.
+		float easeIn = 0, easeOut = 0;
 		bool operator==(const TransformKey& o) const
 		{
 			return tUs == o.tUs && origin[0] == o.origin[0] && origin[1] == o.origin[1] && origin[2] == o.origin[2] &&
-				yaw == o.yaw && pitch == o.pitch && roll == o.roll && fov == o.fov && interp == o.interp;
+				yaw == o.yaw && pitch == o.pitch && roll == o.roll && fov == o.fov && interp == o.interp &&
+				easeIn == o.easeIn && easeOut == o.easeOut;
 		}
 	};
 	// position and facing from keys at a time (holds the first / last key outside them); velocity in units/s
