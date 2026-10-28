@@ -14,7 +14,7 @@ class FakeHost : public Host
 {
 public:
 	struct Ent { std::string npc, name; float o[3], a[3]; bool ai = false; bool alive = true; std::string profile; bool prop = false;
-		std::string cls; std::vector<std::pair<std::string, std::string>> kv; };
+		std::string cls; std::vector<std::pair<std::string, std::string>> kv; float scale = 1; };
 	std::map<int, Ent> ents;
 	std::map<std::string, std::string> files;
 	std::string map = "md_test";
@@ -59,6 +59,7 @@ public:
 		ents[nextEnt] = e;
 		return nextEnt++;
 	}
+	void SetEntityScale(int ent, float sc) override { ents[ent].scale = sc; }
 	void SetPropTransform(int ent, const float o[3], const float a[3]) override
 	{
 		for (int i = 0; i < 3; i++) { ents[ent].o[i] = o[i]; ents[ent].a[i] = a[i]; }
@@ -799,8 +800,31 @@ static void TestEase()
 	CHECK(l.Load("PE", false, false, warn) && l.Find(cam)->keys[0].easeIn == 0.25f && l.Find(cam)->keys[0].easeOut == 0.75f);
 }
 
+static void TestScale()
+{
+	FakeHost h;
+	Scene s(&h);
+	const float o[3] = { 0, 0, 0 };
+	const int v = s.AddActor("md_vader", o, o);
+	const int p = s.AddProp("cs_model", { { "model", "models/a.md3" } }, o, o);
+	const int c = s.AddCamera(o, o, 80);
+	CHECK(!s.SetScale(c, 2, false));
+	CHECK(s.SetScale(p, 1.5f, true) && s.SetScale(p, 2.5f, true) && h.ents[s.Find(p)->entNum].scale == 2.5f);
+	CHECK(s.Undo() && s.Find(p)->scale == 1 && h.ents[s.Find(p)->entNum].scale == 1);	// one drag, one undo
+	CHECK(s.SetScale(v, 100, false) && s.Find(v)->scale == 20 && h.ents[s.Find(v)->entNum].scale == 20);
+	CHECK(s.SetScale(p, 3, false));
+	const int d = s.Duplicate(p);
+	CHECK(d && h.ents[s.Find(d)->entNum].scale == 3);		// copies keep their size
+	CHECK(s.SetPropKey(p, "health", "5") && h.ents[s.Find(p)->entNum].scale == 3);	// and after respawning
+	CHECK(s.Save("PS"));
+	Scene l(&h);
+	std::vector<std::string> warn;
+	CHECK(l.Load("PS", false, false, warn) && l.Find(p)->scale == 3 && l.Find(v)->scale == 20 && h.ents[l.Find(p)->entNum].scale == 3);
+}
+
 int main()
 {
+	TestScale();
 	TestEase();
 	TestPhase8();
 	TestPhase7();

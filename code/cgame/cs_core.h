@@ -204,6 +204,7 @@ namespace cs
 		float origin[3] = { 0, 0, 0 };
 		float angles[3] = { 0, 0, 0 };	// pitch yaw roll
 		bool visible = true;
+		float scale = 1.0f;		// actors and props: drawn this much bigger / smaller
 
 		// actor
 		std::string npcType;	// NPC type from ext_data/npcs (e.g. md_vader)
@@ -266,6 +267,7 @@ namespace cs
 		virtual int SpawnProp(const std::string& classname, const std::vector<std::pair<std::string, std::string>>& kv,
 			const float origin[3], const float angles[3]) = 0;
 		virtual void SetPropTransform(int ent, const float origin[3], const float angles[3]) = 0;
+		virtual void SetEntityScale(int ent, float scale) = 0;	// how big it's drawn (1 = as made)
 		virtual std::string MapName() = 0;
 		// files, relative to the game's write directory
 		virtual bool WriteFile(const std::string& path, const std::string& data) = 0;
@@ -334,6 +336,7 @@ namespace cs
 		bool SetAttach(int id, int actorId, const std::string& bolt, const float offset[3], const float angles[3], bool coalesce);
 		bool SetEventsStart(int id, int64_t startUs, bool coalesce);
 		bool SetVisible(int id, bool on);	// events tracks: off = not played
+		bool SetScale(int id, float scale, bool coalesce);	// actors and props, 0.05 - 20
 		bool Remove(int id);
 		// coalesce: merge into the previous change of the same object if it was < 1 s ago (nudging)
 		bool SetTransform(int id, const float origin[3], const float angles[3], bool coalesce);

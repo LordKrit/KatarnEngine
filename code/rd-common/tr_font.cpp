@@ -1437,6 +1437,14 @@ CFontInfo* GetFont(const int index)
 	return pFont;
 }
 
+// STYLE_ASPECT: the 640x480 2D space is stretched to the screen; this squeezes letters back to their shape
+static float FontAspectScale(const int iFontHandle)
+{
+	if (!(iFontHandle & STYLE_ASPECT) || glConfig.vidWidth <= 0 || glConfig.vidHeight <= 0) return 1.0f;
+	const float r = (640.0f * static_cast<float>(glConfig.vidHeight)) / (480.0f * static_cast<float>(glConfig.vidWidth));
+	return r > 0.2f && r < 1.0f ? r : 1.0f;
+}
+
 int RE_Font_StrLenPixels(const char* psText, const int iFontHandle, const float fScale)
 {
 #ifdef JK2_MODE
@@ -1530,7 +1538,7 @@ int RE_Font_StrLenPixels(const char* psText, const int iFontHandle, const float 
 	}
 
 	// using ceil because we need to make sure that all the text is contained within the integer pixel width we're returning
-	return static_cast<int>(ceilf(fMaxWidth));
+	return static_cast<int>(ceilf(fMaxWidth * FontAspectScale(iFontHandle)));
 #endif
 }
 
@@ -1816,11 +1824,12 @@ void RE_Font_DrawString(int ox, int oy, const char* psText, const float* rgba, c
 		const vec4_t v4DKGREY2 = { 0.15f, 0.15f, 0.15f, rgba ? rgba[3] : 1.0f };
 
 		gbInShadow = qtrue;
-		RE_Font_DrawString(ox + offset, oy + offset, psText, v4DKGREY2, iFontHandle & SET_MASK, iMaxPixelWidth, fScale);
+		RE_Font_DrawString(ox + offset, oy + offset, psText, v4DKGREY2, iFontHandle & (SET_MASK | STYLE_ASPECT), iMaxPixelWidth, fScale);
 		gbInShadow = qfalse;
 	}
 
 	RE_SetColor(rgba);
+	const float fAspect = FontAspectScale(iFontHandle);
 
 	// Now we take off the training wheels and become a big font renderer
 	// It's all floats from here on out
@@ -1908,9 +1917,11 @@ void RE_Font_DrawString(int ox, int oy, const char* psText, const float* rgba, c
 					fy += 3.0f; // I'm sick and tired of going round in circles trying to do this legally, so bollocks to it
 				}
 
-				RE_StretchPic(curfont->mbRoundCalcs ? fx + Round(pLetter->horizOffset * fThisScale) : fx + pLetter->horizOffset * fThisScale, // float x
+				const float fGlyphX = curfont->mbRoundCalcs ? fx + Round(pLetter->horizOffset * fThisScale) : fx + pLetter->horizOffset * fThisScale;
+				const float fGlyphW = curfont->mbRoundCalcs ? Round(pLetter->width * fThisScale) : pLetter->width * fThisScale;
+				RE_StretchPic(fox + (fGlyphX - fox) * fAspect, // float x (STYLE_ASPECT: squeezed back to the letter's shape)
 					(uiLetter > static_cast<unsigned>(g_iNonScaledCharRange)) ? fy - fAsianYAdjust : fy,	// float y
-					curfont->mbRoundCalcs ? Round(pLetter->width * fThisScale) : pLetter->width * fThisScale,	// float w
+					fGlyphW * fAspect,	// float w
 					curfont->mbRoundCalcs ? Round(pLetter->height * fThisScale) : pLetter->height * fThisScale, // float h
 					pLetter->s,						// float s1
 					pLetter->t,						// float t1

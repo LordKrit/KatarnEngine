@@ -543,6 +543,9 @@ constexpr auto GLYPH_COUNT = 256;
 constexpr auto STYLE_DROPSHADOW = 0x80000000;
 constexpr auto STYLE_BLINK = 0x40000000;
 constexpr auto SET_MASK = 0x00ffffff;
+// draw / measure with the letters' real proportions on a widescreen (the 640x480 2D space is stretched):
+// for crisp, unstretched text. A renderer without it ignores the bit.
+constexpr auto STYLE_ASPECT = 0x20000000;
 
 using glyphInfo_t = struct
 {

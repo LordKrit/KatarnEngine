@@ -117,6 +117,7 @@ namespace cs
 		{
 			o.entNum = host_->SpawnProp(o.classname, o.kv, o.origin, o.angles);
 			if (o.entNum < 0) { host_->Log(1, "Couldn't spawn prop '" + o.name + "' (" + o.classname + ")"); return false; }
+			if (o.scale != 1.0f) host_->SetEntityScale(o.entNum, o.scale);
 			return true;
 		}
 		o.entNum = host_->SpawnActor(o.npcType, o.origin, o.angles, o.name);
@@ -127,6 +128,7 @@ namespace cs
 		}
 		host_->SetActorAI(o.entNum, o.ai && !o.prop);
 		if (o.prop) host_->SetActorProp(o.entNum, true);
+		if (o.scale != 1.0f) host_->SetEntityScale(o.entNum, o.scale);
 		if (!o.profile.empty())
 		{
 			std::string why;
@@ -365,6 +367,15 @@ namespace cs
 		Object after = *o;
 		after.visible = on;
 		return Change(after, false);
+	}
+
+	bool Scene::SetScale(const int id, const float scale, const bool coalesce)
+	{
+		const Object* o = Find(id);
+		if (!o || (o->type != ObjType::Actor && o->type != ObjType::Prop)) return false;
+		Object after = *o;
+		after.scale = std::max(0.05f, std::min(20.0f, scale));
+		return after.scale == o->scale || Change(after, coalesce, "scale");
 	}
 
 	bool Scene::Remove(const int id)
@@ -1183,6 +1194,7 @@ namespace cs
 				Spawn(*cur);
 			}
 			else host_->SetPropTransform(cur->entNum, cur->origin, cur->angles);
+			if (cur->entNum >= 0) host_->SetEntityScale(cur->entNum, cur->scale);
 			return;
 		}
 		const int ent = cur->entNum;
@@ -1203,6 +1215,7 @@ namespace cs
 		if (cur->entNum >= 0 && host_->ActorAlive(cur->entNum))
 		{
 			host_->SetActorTransform(cur->entNum, cur->origin, cur->angles);
+			host_->SetEntityScale(cur->entNum, cur->scale);
 			if (propChanged) host_->SetActorProp(cur->entNum, cur->prop);
 			if (aiChanged) host_->SetActorAI(cur->entNum, cur->ai && !cur->prop);
 			if (profileChanged)
@@ -1406,6 +1419,7 @@ namespace cs
 			j.set("origin", Vec(o.origin));
 			j.set("angles", Vec(o.angles));
 			j.set("visible", o.visible);
+			if (o.scale != 1.0f) j.set("scale", static_cast<double>(o.scale));
 			if (o.type == ObjType::Actor)
 			{
 				j.set("npc", o.npcType);
@@ -1672,6 +1686,8 @@ namespace cs
 			ReadVec(j.get("origin"), o.origin);
 			ReadVec(j.get("angles"), o.angles);
 			o.visible = j.get("visible").asBool(true);
+			o.scale = static_cast<float>(j.get("scale").asNumber(1));
+			if (!(o.scale > 0.0f)) o.scale = 1.0f;
 			if (o.type == ObjType::Camera)
 			{
 				o.fov = static_cast<float>(j.get("fov").asNumber(80));

@@ -109,6 +109,15 @@ namespace cs
 		gi.linkentity(e);
 	}
 
+	void GameHost::SetEntityScale(const int ent, const float scale)
+	{
+		if (ent <= 0 || ent >= ENTITYNUM_WORLD || !g_entities[ent].inuse) return;
+		gentity_t* e = &g_entities[ent];
+		const float sc = scale > 0 ? scale : 1.0f;
+		VectorSet(e->s.modelScale, sc, sc, sc);
+		gi.linkentity(e);
+	}
+
 	std::vector<std::string> ListSpawnClasses()
 	{
 		static std::vector<std::string> out;

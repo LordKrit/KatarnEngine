@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <ctime>
 
 cvar_t* cl_aviFrameRate;
+cvar_t* cl_aviFixedFrames;	// 1: one video frame per drawn frame (a frame-exact render driven by fixedtime), no audio
 cvar_t* cl_aviMotionJpeg;
 cvar_t* cl_avi2GBLimit;
 
@@ -407,9 +408,9 @@ qboolean CL_OpenAVIForWriting(const char* fileName)
 			"of the audio rate, suggest %d\n", suggestRate);
 	}
 
-	if (!Cvar_VariableIntegerValue("s_initsound"))
+	if (!Cvar_VariableIntegerValue("s_initsound") || (cl_aviFixedFrames && cl_aviFixedFrames->integer))
 	{
-		afd.audio = qfalse;
+		afd.audio = qfalse;	// a fixed-frame render runs faster / slower than real time: the mixer's sound wouldn't fit
 	}
 	else if (Cvar_VariableIntegerValue("s_UseOpenAL") == 0)
 		//else if( Q_stricmp( Cvar_VariableString( "s_backend" ), "OpenAL" ) )
@@ -637,7 +638,8 @@ void CL_VideoRecordingFrame(void)
 		return;
 
 	const int elapsed = Sys_Milliseconds() - afd.startTime;
-	const int due = static_cast<int>(static_cast<long long>(elapsed) * afd.frameRate / 1000) + 1;
+	const int due = cl_aviFixedFrames && cl_aviFixedFrames->integer ? afd.framesRequested + 1 :	// every drawn frame, once
+		static_cast<int>(static_cast<long long>(elapsed) * afd.frameRate / 1000) + 1;
 	int owed = due - afd.framesRequested;
 
 	if (owed <= 0)
@@ -896,6 +898,7 @@ CL_InitVideoRecording
 void CL_InitVideoRecording(void)
 {
 	cl_aviFrameRate = Cvar_Get("cl_aviFrameRate", "25", CVAR_ARCHIVE);
+	cl_aviFixedFrames = Cvar_Get("cl_aviFixedFrames", "0", 0);
 	cl_aviMotionJpeg = Cvar_Get("cl_aviMotionJpeg", "1", CVAR_ARCHIVE);
 	cl_avi2GBLimit = Cvar_Get("cl_avi2GBLimit", "1", CVAR_ARCHIVE);
 

@@ -21,6 +21,7 @@ namespace cs
 		int SpawnProp(const std::string& classname, const std::vector<std::pair<std::string, std::string>>& kv,
 			const float origin[3], const float angles[3]) override;
 		void SetPropTransform(int ent, const float origin[3], const float angles[3]) override;
+		void SetEntityScale(int ent, float scale) override;
 		bool SetActorProfile(int ent, const std::string& profile, std::string& why, bool force) override;
 		std::string MapName() override;
 		bool WriteFile(const std::string& path, const std::string& data) override;
@@ -106,7 +107,8 @@ namespace cs
 	void SetPropRenderPose(int ent, const float org[3], const float ang[3]);	// drawn there this frame
 	void ClearPropRenderPoses();
 	void ForceState(int ent, int& forceBits, int& takeFlags);
-	void SetLookTarget(int ent, int target);	// -1 = none			// a prop your saber can hit (still can't be hurt)
+	void SetLookTarget(int ent, int target);	// -1 = none
+	std::string CvarString(const char* name);			// a prop your saber can hit (still can't be hurt)
 }
 
 // face rig (cg_face.cpp), driven by the studio's face tracks (Phase 8)

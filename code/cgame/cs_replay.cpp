@@ -179,6 +179,13 @@ namespace cs
 		g_force.clear();
 	}
 
+	std::string CvarString(const char* name)
+	{
+		char buf[256] = { 0 };
+		gi.Cvar_VariableStringBuffer(name, buf, sizeof buf);
+		return buf;
+	}
+
 	// eyes and head toward another character (ENTITYNUM_NONE / -1 = their own business)
 	void SetLookTarget(const int ent, const int target)
 	{

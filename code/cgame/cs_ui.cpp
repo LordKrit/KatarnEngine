@@ -59,19 +59,19 @@ namespace
 	const vec4_t kLane = { 1, 1, 1, 0.04f };
 	const vec4_t kBar = { 0.35f, 0.55f, 0.80f, 0.45f };
 
-	enum Tab { TAB_SCENE, TAB_ACTORS, TAB_ANIMS, TAB_CAMERA, TAB_AUDIO, TAB_PROPS, TAB_PROJECT, TAB_COUNT };
-	const char* kTabNames[TAB_COUNT] = { "SCENE", "ACTORS", "ANIMATIONS", "CAMERA", "AUDIO", "PROPS", "PROJECT" };
+	enum Tab { TAB_SCENE, TAB_ACTORS, TAB_ANIMS, TAB_CAMERA, TAB_AUDIO, TAB_PROPS, TAB_PROJECT, TAB_RENDER, TAB_COUNT };
+	const char* kTabNames[TAB_COUNT] = { "SCENE", "ACTORS", "ANIMATIONS", "CAMERA", "AUDIO", "PROPS", "PROJECT", "RENDER" };
 
 	enum Field { FIELD_NONE, FIELD_NPC, FIELD_PROJECT, FIELD_RENAME, FIELD_ANIMSEARCH, FIELD_NPCTYPE,
 		FIELD_PROPSEARCH, FIELD_PROPDIR, FIELD_PROPKV, FIELD_PROPSET, FIELD_BOLT,
-		FIELD_VOICE, FIELD_MUSIC };
+		FIELD_VOICE, FIELD_MUSIC, FIELD_RENDERNAME };
 
 	// configurable hotkeys (CinematicStudio/hotkeys.cfg)
 	enum Action
 	{
 		ACT_CLOSE, ACT_PANELS, ACT_PLAY, ACT_STOP, ACT_STEP_BACK, ACT_STEP_FWD, ACT_UNDO, ACT_REDO, ACT_SAVE,
 		ACT_DELETE, ACT_FOCUS, ACT_FREEZE, ACT_LEFT, ACT_RIGHT, ACT_FWD, ACT_BACK, ACT_UP, ACT_DOWN, ACT_TURN_L, ACT_TURN_R,
-		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_DIRECTOR, ACT_PREV_KEY, ACT_NEXT_KEY, ACT_LOOK, ACT_CLEAN, ACT_COUNT
+		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_DIRECTOR, ACT_PREV_KEY, ACT_NEXT_KEY, ACT_LOOK, ACT_CLEAN, ACT_SCALE, ACT_MARK_IN, ACT_MARK_OUT, ACT_COUNT
 	};
 	struct Hotkey { const char* name; int key; bool ctrl; };
 	Hotkey g_keys[ACT_COUNT] = {
@@ -84,7 +84,8 @@ namespace
 		{ "nudge_up", A_PAGE_UP, false }, { "nudge_down", A_PAGE_DOWN, false },
 		{ "turn_left", A_LOW_Q, false }, { "turn_right", A_LOW_E, false }, { "player_view", A_LOW_V, false },
 		{ "duplicate", A_LOW_D, true }, { "split", A_LOW_B, true }, { "set_key", A_LOW_K, false }, { "snap", A_LOW_N, false }, { "director", A_LOW_C, false },
-		{ "prev_key", A_OPEN_BRACKET, false }, { "next_key", A_CLOSE_BRACKET, false }, { "look_through", A_LOW_L, false }, { "clean_view", A_LOW_H, false },
+		{ "prev_key", A_OPEN_BRACKET, false }, { "next_key", A_CLOSE_BRACKET, false }, { "look_through", A_LOW_L, false }, { "clean_view", A_LOW_H, false }, { "scale_mode", A_LOW_S, false },
+		{ "mark_in", A_LOW_I, false }, { "mark_out", A_LOW_O, false },
 	};
 
 	struct KeyName { const char* n; int k; };
@@ -247,6 +248,21 @@ namespace
 		std::map<int, int> idleApplied, eyeApplied;	// per entity: idle on (1) / off (0); eyes mode + 1
 		bool soundsStarted = false;				// the studio started sounds (stopped when playback stops)
 		bool musicStarted = false;
+		// ---- scale mode (S): drag / wheel scales the selected prop or actor
+		bool scaleMode = false;
+		bool scaleDrag = false;
+		float scaleStart = 1, scaleStartX = 0;
+		// ---- Phase 9: director preview and rendering ----
+		int64_t markIn = 0, markOut = -1;	// -1 = the scene's end
+		int letterbox = 0;			// 0 none, 1 = 1.85:1, 2 = 2.39:1
+		bool useDirector = true;	// preview / render through the cut track (if it has cuts)
+		bool previewing = false;
+		enum { RENDER_IDLE, RENDER_WARMUP, RENDER_RUN } render = RENDER_IDLE;
+		int renderWarm = 0;
+		int64_t renderFrame = 0, renderFrames = 0;
+		std::string renderName;
+		std::string savedCheats, savedFixed, savedAviRate, savedAviFixed;
+		int renderStartMs = 0;
 		// clean view: nothing of the editor on screen (H)
 		bool clean = false;
 		int cleanHintMs = 0;
@@ -295,14 +311,33 @@ namespace
 	// drawing helpers
 	// ------------------------------------------------------------------------------------------
 
+	// HD text (cs_hdText 1): the menu font, sized like the small one was, drawn with the letters' real proportions
+	// on a widescreen (STYLE_ASPECT, this build's renderers); 0 = the classic small font
+	vmCvar_t g_csHdText;
+	int UiFont()
+	{
+		return g_csHdText.integer ? (cgs.media.qhFontMedium | 0x20000000)	/* STYLE_ASPECT (qcommon/qfiles.h) */ : cgs.media.qhFontSmall;
+	}
+	float UiScale(const float sc)
+	{
+		if (!g_csHdText.integer) return sc;
+		static float k = 0;
+		if (k <= 0)
+		{
+			const int hs = cgi_R_Font_HeightPixels(cgs.media.qhFontSmall, 1.0f), hm = cgi_R_Font_HeightPixels(cgs.media.qhFontMedium, 1.0f);
+			k = hs > 0 && hm > 0 ? static_cast<float>(hs) / static_cast<float>(hm) * 1.1f : 1.0f;	// a little larger: it's narrower now
+		}
+		return sc * k;
+	}
+
 	float TextW(const std::string& s, const float sc = kText)
 	{
-		return static_cast<float>(cgi_R_Font_StrLenPixels(s.c_str(), cgs.media.qhFontSmall, sc));
+		return static_cast<float>(cgi_R_Font_StrLenPixels(s.c_str(), UiFont(), UiScale(sc)));
 	}
 
 	void Text(const float x, const float y, const std::string& s, const float* col, const float sc = kText)
 	{
-		cgi_R_Font_DrawString(static_cast<int>(x), static_cast<int>(y), s.c_str(), col, cgs.media.qhFontSmall, -1, sc);
+		cgi_R_Font_DrawString(static_cast<int>(x + 0.5f), static_cast<int>(y + 0.5f), s.c_str(), col, UiFont(), -1, UiScale(sc));
 	}
 
 	// text clipped to a width (with "..")
@@ -671,6 +706,7 @@ namespace
 		if (f == FIELD_ANIMSEARCH) { s.animSearch = t; s.animScroll = 0; return; }
 		if (f == FIELD_PROPSEARCH) { s.propSearch = t; s.propScroll = 0; return; }
 		if (f == FIELD_VOICE) { s.voicePath = t; return; }
+		if (f == FIELD_RENDERNAME) { s.renderName = t; return; }
 		if (f == FIELD_MUSIC) { s.soundPath = t; return; }
 		if (f == FIELD_PROPDIR) { s.propDir = t.empty() ? "models" : t; s.propFilesDir.clear(); s.propScroll = 0; return; }
 		if (f == FIELD_PROPKV || f == FIELD_PROPSET)
@@ -817,6 +853,12 @@ namespace
 			if (s.field == FIELD_NPCTYPE) { DrawField(x, y, kRightW - 12, FIELD_NPCTYPE, o->npcType); y += 13; }
 			else if (Button(x, y, kRightW - 12, 11, "CHANGE NPC TYPE", false, !o->adopted)) BeginField(FIELD_NPCTYPE, o->npcType), y += 13;
 			else y += 13;
+			Label(x, y, "scale", Fmt("%.2fx", o->scale), kRightW - 88);
+			if (Button(x + kRightW - 86, y, 12, 9, "-")) s.scene.SetScale(o->id, o->scale / (s.shift ? 1.25f : 1.05f), true);
+			if (Button(x + kRightW - 72, y, 12, 9, "+")) s.scene.SetScale(o->id, o->scale * (s.shift ? 1.25f : 1.05f), true);
+			if (Button(x + kRightW - 58, y, 24, 9, "1x")) s.scene.SetScale(o->id, 1, false);
+			if (Button(x + kRightW - 32, y, 20, 9, "S", s.scaleMode)) s.scaleMode = !s.scaleMode;
+			y += kRow + 1;
 			if (Button(x, y, kRightW - 60, 11, "ANIMATIONS...")) s.tab = TAB_ANIMS;
 			if (Button(x + kRightW - 58, y, 46, 11, "KEY (K)")) SetKeyAtPlayhead();
 			y += 13;
@@ -2005,6 +2047,198 @@ namespace
 		Text(ix, y, "through their start (not when scrubbing).", kDim);
 	}
 
+	// ---- Phase 9: director preview and final render ----
+	int64_t MarkOut()
+	{
+		Studio& s = S();
+		const int64_t len = s.scene.clock.lengthUs;
+		return s.markOut < 0 || s.markOut > len ? len : s.markOut;
+	}
+
+	// black bars for a wider picture (drawn in previews and renders)
+	void DrawLetterbox()
+	{
+		Studio& s = S();
+		if (!s.letterbox) return;
+		const float target = s.letterbox == 1 ? 1.85f : 2.39f;
+		const float screen = static_cast<float>(cgs.glconfig.vidWidth) / static_cast<float>(std::max(1, cgs.glconfig.vidHeight));
+		if (screen >= target) return;
+		const float bar = (1.0f - screen / target) * 0.5f * kH;
+		const vec4_t black = { 0, 0, 0, 1 };
+		Rect(0, 0, kW, bar, black);
+		Rect(0, kH - bar, kW, bar, black);
+	}
+
+	// where the bars would be, while editing
+	void DrawFrameGuides()
+	{
+		Studio& s = S();
+		if (!s.letterbox) return;
+		const float target = s.letterbox == 1 ? 1.85f : 2.39f;
+		const float screen = static_cast<float>(cgs.glconfig.vidWidth) / static_cast<float>(std::max(1, cgs.glconfig.vidHeight));
+		if (screen >= target) return;
+		const float bar = (1.0f - screen / target) * 0.5f * kH;
+		const vec4_t guide = { 1, 1, 1, 0.25f };
+		Rect(kLeftW, bar, kRightX - kLeftW, 0.6f, guide);
+		Rect(kLeftW, kH - bar, kRightX - kLeftW, 0.6f, guide);
+	}
+
+	bool HasCuts()
+	{
+		return !S().scene.Cuts().empty();
+	}
+
+	void StartPreview()
+	{
+		Studio& s = S();
+		Clock& c = s.scene.clock;
+		c.Pause();
+		c.timeUs = std::min(s.markIn, MarkOut());
+		if (s.useDirector && HasCuts()) { s.pilotId = 0; s.director = true; s.camActive = true; }
+		s.clean = true;
+		s.cleanHintMs = 0;
+		s.previewing = true;
+		c.speed = 1.0;
+		c.Play();
+	}
+
+	void StopPreview()
+	{
+		Studio& s = S();
+		s.previewing = false;
+		s.clean = false;
+		s.scene.clock.Pause();
+	}
+
+
+	void StartRender()
+	{
+		Studio& s = S();
+		if (s.render != Studio::RENDER_IDLE || s.rec != Studio::REC_IDLE) return;
+		Clock& c = s.scene.clock;
+		const int64_t in = std::min(s.markIn, MarkOut()), out = MarkOut();
+		if (out - in < 100'000) { s.host.Log(1, "Nothing to render: set IN before OUT"); return; }
+		std::string name = s.renderName;
+		if (name.empty()) name = s.scene.project.empty() ? "studio_render" : s.scene.project;
+		for (auto& ch : name) if (!isalnum(static_cast<unsigned char>(ch)) && ch != '_' && ch != '-') ch = '_';
+		s.renderName = name;
+		// frame-exact: the game advances exactly one video frame per drawn frame (fixedtime), the video takes
+		// every drawn frame (cl_aviFixedFrames, this build's exe); fixedtime is a cheat cvar, so cheats go on meanwhile
+		s.savedCheats = CvarString("helpUsObi");
+		s.savedFixed = CvarString("fixedtime");
+		s.savedAviRate = CvarString("cl_aviFrameRate");
+		s.savedAviFixed = CvarString("cl_aviFixedFrames");
+		cgi_Cvar_Set("helpUsObi", "1");
+		cgi_Cvar_Set("cl_aviFrameRate", Fmt("%d", c.fps).c_str());
+		cgi_Cvar_Set("cl_aviFixedFrames", "1");
+		cgi_Cvar_Set("fixedtime", Fmt("%d", 1000 / c.fps).c_str());
+		if (Frozen()) SetFreeze(false);
+		c.Pause();
+		c.timeUs = in;
+		c.speed = 1.0;
+		if (s.useDirector && HasCuts()) { s.pilotId = 0; s.director = true; s.camActive = true; }
+		s.clean = true;
+		s.cleanHintMs = 0;
+		s.render = Studio::RENDER_WARMUP;
+		s.renderWarm = 0;
+		s.renderFrame = 0;
+		s.renderFrames = (out - in) * c.fps / 1'000'000;
+		s.renderStartMs = NowMs();
+		s.host.Log(0, Fmt("Rendering %lld frames at %d fps to demos/%s.avi (ESC stops)", static_cast<long long>(s.renderFrames), c.fps, name.c_str()));
+	}
+
+	void EndRender(const bool finished)
+	{
+		Studio& s = S();
+		if (s.render == Studio::RENDER_IDLE) return;
+		if (s.render == Studio::RENDER_RUN) cgi_SendConsoleCommand("stopvideo\n");
+		s.render = Studio::RENDER_IDLE;
+		cgi_Cvar_Set("fixedtime", s.savedFixed.empty() ? "0" : s.savedFixed.c_str());
+		cgi_Cvar_Set("cl_aviFixedFrames", s.savedAviFixed.empty() ? "0" : s.savedAviFixed.c_str());
+		if (!s.savedAviRate.empty()) cgi_Cvar_Set("cl_aviFrameRate", s.savedAviRate.c_str());
+		cgi_Cvar_Set("helpUsObi", s.savedCheats.empty() ? "0" : s.savedCheats.c_str());
+		s.scene.clock.Pause();
+		s.clean = false;
+		const double secs = (NowMs() - s.renderStartMs) / 1000.0;
+		s.host.Log(finished ? 0 : 1, Fmt("%s %lld frames to demos/%s.avi in %.0f s", finished ? "Rendered" : "Render stopped after",
+			static_cast<long long>(s.renderFrame), s.renderName.c_str(), secs));
+	}
+
+	// every frame from CS_Frame (instead of the real-time clock while rendering)
+	void RenderFrame()
+	{
+		Studio& s = S();
+		Clock& c = s.scene.clock;
+		if (s.render == Studio::RENDER_WARMUP)
+		{
+			// a couple of frames for the first pose and the camera to settle, then the recording starts
+			// (the video command runs at the start of the next frame: that frame is the first one recorded)
+			if (++s.renderWarm == 2) cgi_SendConsoleCommand(Fmt("video %s\n", s.renderName.c_str()).c_str());
+			if (s.renderWarm < 3) return;
+			s.render = Studio::RENDER_RUN;
+			c.Play();
+		}
+		if (s.render != Studio::RENDER_RUN) return;
+		const int64_t in = std::min(s.markIn, MarkOut());
+		// frame n at exactly n / fps; the game moves by the whole milliseconds between this frame and the next
+		const int64_t msNow = s.renderFrame * 1000 / c.fps, msNext = (s.renderFrame + 1) * 1000 / c.fps;
+		c.timeUs = in + s.renderFrame * 1'000'000 / c.fps;
+		c.playing = true;
+		cgi_Cvar_Set("fixedtime", Fmt("%d", static_cast<int>(std::max<int64_t>(1, msNext - msNow))).c_str());
+		s.renderFrame++;
+		if (c.timeUs >= MarkOut() || s.renderFrame > s.renderFrames + 1) EndRender(true);
+	}
+
+	void DrawRenderPanel(const float x, const float y0, const float h)
+	{
+		Studio& s = S();
+		const float ix = x + 6, w = kRightW - 12;
+		float y = y0 + 2;
+		Clock& c = s.scene.clock;
+		Header(ix, y, "DIRECTOR / RENDER"); y += 12;
+		// range
+		Label(ix, y, "in", Fmt("%.2fs", static_cast<double>(s.markIn) / 1e6), w - 64);
+		if (Button(ix + w - 62, y, 40, 9, "SET (I)")) s.markIn = c.timeUs;
+		if (Button(ix + w - 20, y, 20, 9, "0")) s.markIn = 0;
+		y += kRow;
+		Label(ix, y, "out", s.markOut < 0 ? Fmt("end (%.2fs)", static_cast<double>(c.lengthUs) / 1e6) : Fmt("%.2fs", static_cast<double>(s.markOut) / 1e6), w - 64);
+		if (Button(ix + w - 62, y, 40, 9, "SET (O)")) s.markOut = c.timeUs;
+		if (Button(ix + w - 20, y, 20, 9, "END")) s.markOut = -1;
+		y += kRow;
+		Label(ix, y, "length", Fmt("%.2fs, %lld frames at %d fps", static_cast<double>(MarkOut() - std::min(s.markIn, MarkOut())) / 1e6,
+			static_cast<long long>((MarkOut() - std::min(s.markIn, MarkOut())) * c.fps / 1'000'000), c.fps), w);
+		y += kRow + 2;
+		// look
+		static const char* kBars[] = { "NONE", "1.85 : 1", "2.39 : 1" };
+		Label(ix, y, "letterbox", kBars[s.letterbox], w - 40);
+		if (Button(ix + w - 38, y, 38, 9, "NEXT")) s.letterbox = (s.letterbox + 1) % 3;
+		y += kRow;
+		Label(ix, y, "camera", s.useDirector ? (HasCuts() ? "director (the CUTS row)" : "director: no cuts yet") : "the current view", w - 40);
+		if (Button(ix + w - 38, y, 38, 9, "SWAP")) s.useDirector = !s.useDirector;
+		y += kRow;
+		if (Button(ix, y, 50, 9, Fmt("%d FPS", c.fps))) c.SetFps(c.fps == 24 ? 30 : (c.fps == 30 ? 60 : 24));
+		if (Button(ix + 52, y, w - 52, 9, g_csHdText.integer ? "HD TEXT: ON" : "HD TEXT: OFF", g_csHdText.integer != 0))
+			cgi_Cvar_Set("cs_hdText", g_csHdText.integer ? "0" : "1");
+		y += 13;
+		// preview
+		Header(ix, y, "PREVIEW"); y += 12;
+		if (Button(ix, y, w, 13, "PLAY THE CUT (clean, in to out)")) StartPreview();
+		y += 15;
+		Text(ix, y, "ESC or H stops; scrub as usual otherwise", kDim, 0.34f); y += 12;
+		// render
+		Header(ix, y, "RENDER TO VIDEO"); y += 12;
+		DrawField(ix, y, w, FIELD_RENDERNAME, s.renderName.empty() ? (s.scene.project.empty() ? std::string("studio_render") : s.scene.project) : s.renderName);
+		y += 13;
+		if (Button(ix, y, w, 14, "RENDER AVI", false, s.rec == Studio::REC_IDLE)) StartRender();
+		y += 17;
+		Text(ix, y, "frame-exact: every frame of the video is", kDim, 0.34f); y += 9;
+		Text(ix, y, "one 1/fps step of the scene, however long", kDim, 0.34f); y += 9;
+		Text(ix, y, "it takes to draw. At the game's resolution;", kDim, 0.34f); y += 9;
+		Text(ix, y, "no sound (record it with a live PREVIEW", kDim, 0.34f); y += 9;
+		Text(ix, y, "and 'video' if you need the game's audio).", kDim, 0.34f); y += 9;
+		Text(ix, y, "Files: demos/<name>.avi (cl_aviMotionJpeg).", kDim, 0.34f);
+	}
+
 	// ---- Phase 7: props ----
 	void SpawnPropInFront()
 	{
@@ -2087,6 +2321,12 @@ namespace
 		if (s.field == FIELD_PROPSET) { DrawField(x, y, w, FIELD_PROPSET, ""); y += 13; }
 		else if (Button(x, y, w, 10, "SET KEY (e.g. health 100)")) BeginField(FIELD_PROPSET, ""), y += 13;
 		else y += 12;
+		Label(x, y, "scale", Fmt("%.2fx", o->scale), w - 76);
+		if (Button(x + w - 74, y, 12, 9, "-")) s.scene.SetScale(o->id, o->scale / (s.shift ? 1.25f : 1.05f), true);
+		if (Button(x + w - 60, y, 12, 9, "+")) s.scene.SetScale(o->id, o->scale * (s.shift ? 1.25f : 1.05f), true);
+		if (Button(x + w - 46, y, 24, 9, "1x")) s.scene.SetScale(o->id, 1, false);
+		if (Button(x + w - 20, y, 20, 9, "S", s.scaleMode)) s.scaleMode = !s.scaleMode;
+		y += kRow + 1;
 		const float bw = (w - 4) / 3;
 		if (Button(x, y, bw, 11, "KEY (K)")) SetKeyAtPlayhead();
 		if (Button(x + bw + 2, y, bw, 11, "RESPAWN")) { Object a = *o; s.scene.SetPropKey(o->id, "cs_respawn", "1"); s.scene.SetPropKey(o->id, "cs_respawn", ""); }
@@ -2247,6 +2487,15 @@ namespace
 	bool TryStartDrag()
 	{
 		Studio& s = S();
+		if (s.scaleMode)
+		{
+			const Object* o = s.scene.Find(s.scene.selected);
+			if (!o || (o->type != ObjType::Actor && o->type != ObjType::Prop)) return false;
+			s.scaleDrag = true;
+			s.scaleStart = o->scale;
+			s.scaleStartX = s.clickX;
+			return true;
+		}
 		float org[3], yaw;
 		int id;
 		EntInfo info;
@@ -2288,6 +2537,14 @@ namespace
 	void UpdateDrag()
 	{
 		Studio& s = S();
+		if (s.scaleDrag)
+		{
+			if (!s.lmb) { s.scaleDrag = false; return; }
+			// right = bigger, left = smaller: x2 per 60 units (x2 per 20 with SHIFT)
+			const float sc = s.scaleStart * powf(2.0f, (s.cx - s.scaleStartX) / (s.shift ? 20.0f : 60.0f));
+			s.scene.SetScale(s.scene.selected, sc, true);
+			return;
+		}
 		if (!s.dragging) return;
 		if (!s.lmb) { s.dragging = false; return; }
 		float org[3], yaw;
@@ -2560,6 +2817,9 @@ namespace
 		case TAB_AUDIO:
 			DrawAudioPanel(x, y0, h);
 			break;
+		case TAB_RENDER:
+			DrawRenderPanel(x, y0, h);
+			break;
 		case TAB_PROPS:
 			DrawPropsPanel(x, y0, h);
 			break;
@@ -2674,6 +2934,15 @@ namespace
 			for (int64_t f = vs * c.fps / 1'000'000; f * 1'000'000 / c.fps <= vs + vl; f++)
 				Rect(TimeToX(f * 1'000'000 / c.fps, lx, lw), y0 + kRulerH - 3, 0.4f, 3, kLine);
 		if (s.viewLenUs > 0) Text(lx + lw - 70, y0 + 1, Fmt("zoom %.1fs  CTRL+wheel", static_cast<double>(vl) / 1e6), kAccent, 0.32f);
+		// in / out (render range)
+		if (s.markIn > 0 || s.markOut >= 0)
+		{
+			const float ix0 = std::max(lx, TimeToX(std::min(s.markIn, MarkOut()), lx, lw)), ix1 = std::min(lx + lw, TimeToX(MarkOut(), lx, lw));
+			const vec4_t range = { 0.35f, 0.75f, 1.0f, 0.18f }, edge = { 0.35f, 0.75f, 1.0f, 0.9f };
+			if (ix1 > ix0) Rect(ix0, y0 + kRulerH - 4, ix1 - ix0, 4, range);
+			Rect(ix0, y0, 1, kRulerH, edge);
+			Rect(ix1 - 1, y0, 1, kRulerH, edge);
+		}
 
 		// dragging a clip along its lane (whole frames)
 		if (s.clipDragIndex >= 0)
@@ -3663,6 +3932,8 @@ namespace
 	{
 		Studio& s = S();
 		if (!s.open) return;
+		if (s.render != Studio::RENDER_IDLE) EndRender(false);
+		s.previewing = false;
 		s.open = false;
 		s.field = FIELD_NONE;
 		s.rmb = s.lmb = s.scrubbing = false;
@@ -3728,6 +3999,8 @@ void CS_Init()
 	s.ghostEnts.clear();
 	s.solidEnts.clear();
 	s.recPerf.clear();
+	if (s.render != Studio::RENDER_IDLE) EndRender(false);
+	s.previewing = false;
 	s.faceApplied.clear();
 	s.idleApplied.clear();
 	s.eyeApplied.clear();
@@ -3739,6 +4012,7 @@ void CS_Init()
 	// first run: a key to open the studio (the studio can't see keys while it's closed)
 	cgi_Cvar_Register(&g_clPaused, "cl_paused", "0", 0);
 	cgi_Cvar_Register(&g_firstRun, "cs_firstrun", "0", CVAR_ARCHIVE);
+	cgi_Cvar_Register(&g_csHdText, "cs_hdText", "1", CVAR_ARCHIVE);
 	if (!g_firstRun.integer)
 	{
 		cgi_SendConsoleCommand("bind F10 studio\n");
@@ -3814,6 +4088,8 @@ void CS_Command_f()
 		s.host.Log(0, on ? "Game HUD on" : "Game HUD off (studio hud to turn it back on)");
 		return;
 	}
+	if (!Q_stricmp(sub, "render")) { if (!a2.empty()) s.renderName = a2; StartRender(); return; }
+	if (!Q_stricmp(sub, "preview")) { StartPreview(); return; }
 	if (!Q_stricmp(sub, "clean")) { s.clean = !s.clean; s.cleanHintMs = NowMs(); return; }
 	if (!Q_stricmp(sub, "countdown")) { s.recCountdownSec = std::max(0, std::min(10, atoi(a2.c_str()))); return; }
 	if (!Q_stricmp(sub, "open")) { Open(); return; }
@@ -3840,7 +4116,7 @@ void CS_Command_f()
 	}
 	Com_Printf("studio [open|close|toggle]  save [name]  load <name> [force]  recover [name]  new\n"
 		"       spawn <npc>  camera  play  pause  stop  fps <24|30|60>  undo  redo  freeze  list\n"
-		"       hud [on|off] (the game's HUD)  clean (hide the editor)\n"
+		"       hud [on|off] (the game's HUD)  clean (hide the editor)  preview  render [name]\n"
 		"       rec [new|stop|cancel]  countdown <seconds>  replay [on|off|<seconds>]  (replay: keep the last seconds)\n");
 }
 
@@ -3914,6 +4190,8 @@ int CS_KeyEvent(int key, const int down)
 	}
 	if (key == A_ESCAPE)
 	{
+		if (s.render != Studio::RENDER_IDLE) { EndRender(false); return 1; }
+		if (s.previewing) { StopPreview(); return 1; }
 		if (s.clean) { s.clean = false; return 1; }
 		if (s.camActive) { PlayerView(); return 1; }
 		Close();
@@ -3942,7 +4220,11 @@ int CS_KeyEvent(int key, const int down)
 	else if (is(ACT_SPLIT)) SplitAtPlayhead();
 	else if (is(ACT_KEY)) SetKeyAtPlayhead();
 	else if (is(ACT_DIRECTOR)) { s.director = !s.director; if (s.director) { s.pilotId = 0; s.camActive = true; } s.host.Log(0, s.director ? "Director view: the cut track picks the camera" : "Director view off"); }
-	else if (is(ACT_CLEAN)) { s.clean = !s.clean; s.cleanHintMs = NowMs(); }
+	else if (s.render != Studio::RENDER_IDLE) {}	// rendering: only ESC (above)
+	else if (is(ACT_CLEAN)) { if (s.previewing) StopPreview(); else { s.clean = !s.clean; s.cleanHintMs = NowMs(); } }
+	else if (is(ACT_MARK_IN)) { s.markIn = c.timeUs; s.host.Log(0, "In at " + c.Timecode()); }
+	else if (is(ACT_MARK_OUT)) { s.markOut = c.timeUs; s.host.Log(0, "Out at " + c.Timecode()); }
+	else if (is(ACT_SCALE)) { s.scaleMode = !s.scaleMode; s.host.Log(0, s.scaleMode ? "Scale mode: drag the selection or use the wheel (SHIFT: faster), S to leave" : "Scale mode off"); }
 	else if (is(ACT_PREV_KEY)) JumpKey(-1);
 	else if (is(ACT_NEXT_KEY)) JumpKey(1);
 	else if (is(ACT_LOOK))
@@ -3993,7 +4275,9 @@ void CS_Frame()
 	s.lastMs = now;
 	if (dt < 0 || dt > 250) dt = 0;	// hitches and alt-tab don't jump the clock
 
-	s.scene.clock.Advance(static_cast<int64_t>(dt) * 1000);
+	if (s.render != Studio::RENDER_IDLE) RenderFrame();	// the render steps the clock exactly
+	else s.scene.clock.Advance(static_cast<int64_t>(dt) * 1000);
+	if (s.previewing && (s.scene.clock.timeUs >= MarkOut() || !s.scene.clock.playing)) StopPreview();
 	s.scene.SyncFromWorld();
 	if (s.open)
 	{
@@ -4085,7 +4369,8 @@ void CS_Draw2D()
 	if (s.scene.selected != s.lastSel) { s.scene.selectedClip = -1; s.scene.selectedTake = 0; s.keyObj = 0; s.lastSel = s.scene.selected; }
 	if (s.clean)
 	{
-		// the picture only: no panels, markers, paths, text or cursor
+		// the picture only: no panels, markers, paths, text or cursor (letterbox bars if chosen)
+		if (s.previewing || s.render != Studio::RENDER_IDLE) DrawLetterbox();
 		if (NowMs() - s.cleanHintMs < 2000) Text(6, 6, "clean view - H or ESC shows the editor", kDim, 0.36f);
 		s.clicked = false;
 		s.doubleClick = false;
@@ -4093,6 +4378,7 @@ void CS_Draw2D()
 	}
 	UpdateDrag();
 	DrawGizmo();
+	DrawFrameGuides();
 	if (s.panels)
 	{
 		DrawTitle();
@@ -4108,6 +4394,21 @@ void CS_Draw2D()
 		Text(4, 4, "TAB: panels   H: clean view", kDim, 0.34f);
 	}
 	// clicks no panel took are viewport picks (only in the viewport area while panels are up)
+	if (s.scaleMode && s.wheel)
+	{
+		const bool inViewport = !s.panels || Inside(s.cx, s.cy, kLeftW, kPanelY, kRightX - kLeftW, kTransportY - kPanelY);
+		const Object* o = s.scene.Find(s.scene.selected);
+		if (inViewport && o && (o->type == ObjType::Actor || o->type == ObjType::Prop))
+			s.scene.SetScale(o->id, o->scale * powf(s.shift ? 1.25f : 1.05f, static_cast<float>(s.wheel)), true);
+		s.wheel = 0;
+	}
+	if (s.scaleMode)
+	{
+		const Object* o = s.scene.Find(s.scene.selected);
+		const bool ok = o && (o->type == ObjType::Actor || o->type == ObjType::Prop);
+		Text(kLeftW + 6, kTransportY - 12, ok ? Fmt("SCALE MODE (S)  %s  %.2fx   drag left / right or wheel", o->name.c_str(), o->scale)
+			: std::string("SCALE MODE (S): select a prop or an actor"), kAccent, 0.4f);
+	}
 	if (s.clicked)
 	{
 		const bool inViewport = !s.panels || Inside(s.clickX, s.clickY, kLeftW, kPanelY, kRightX - kLeftW, kTransportY - kPanelY);
