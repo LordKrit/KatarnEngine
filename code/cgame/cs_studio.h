@@ -18,6 +18,9 @@ namespace cs
 		void SetActorTransform(int ent, const float origin[3], const float angles[3]) override;
 		void SetActorAI(int ent, bool on) override;
 		void SetActorProp(int ent, bool on) override;
+		int SpawnProp(const std::string& classname, const std::vector<std::pair<std::string, std::string>>& kv,
+			const float origin[3], const float angles[3]) override;
+		void SetPropTransform(int ent, const float origin[3], const float angles[3]) override;
 		bool SetActorProfile(int ent, const std::string& profile, std::string& why, bool force) override;
 		std::string MapName() override;
 		bool WriteFile(const std::string& path, const std::string& data) override;
@@ -93,6 +96,15 @@ namespace cs
 	int64_t CaptureNowUs();						// the clock captured events and replay samples use
 	void FireEvent(const WorldEvent& ev, int actorEnt, int other2Ent);
 	void SetForceView(int ent, int forceBits, int takeFlags);	// until the frame is drawn
+
+	// ---- Props (cs_props.cpp, Phase 7) ----
+	std::vector<std::string> ListSpawnClasses();		// every class the game spawns + cs_model
+	std::vector<std::string> ListModels(const std::string& dir);	// .md3 / .glm under dir (and one level down)
+	bool PropBounds(int ent, float mins[3], float maxs[3]);
+	bool PropAlive(int ent);
+	bool AttachPose(int actorEnt, const std::string& bolt, const float offset[3], const float angOff[3], float org[3], float ang[3]);
+	void SetPropRenderPose(int ent, const float org[3], const float ang[3]);	// drawn there this frame
+	void ClearPropRenderPoses();
 	void ForceState(int ent, int& forceBits, int& takeFlags);			// a prop your saber can hit (still can't be hurt)
 }
 
@@ -110,3 +122,4 @@ void CS_DrawOverlay();					// over the HUD while it's closed (recording)
 struct centity_s;
 void CS_CaptureEvent(centity_s* cent);	// CG_CheckEvents / player state events, before CG_EntityEvent
 void CS_EndFrame();						// after the frame is drawn
+void CS_PropRenderPose(centity_s* cent);	// CG_CalcEntityLerpPositions: attached props

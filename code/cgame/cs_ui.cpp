@@ -60,7 +60,9 @@ namespace
 	enum Tab { TAB_SCENE, TAB_ACTORS, TAB_ANIMS, TAB_CAMERA, TAB_AUDIO, TAB_PROPS, TAB_PROJECT, TAB_COUNT };
 	const char* kTabNames[TAB_COUNT] = { "SCENE", "ACTORS", "ANIMATIONS", "CAMERA", "AUDIO", "PROPS", "PROJECT" };
 
-	enum Field { FIELD_NONE, FIELD_NPC, FIELD_PROJECT, FIELD_RENAME, FIELD_ANIMSEARCH, FIELD_NPCTYPE };
+	enum Field { FIELD_NONE, FIELD_NPC, FIELD_PROJECT, FIELD_RENAME, FIELD_ANIMSEARCH, FIELD_NPCTYPE,
+		FIELD_PROPSEARCH, FIELD_PROPDIR, FIELD_PROPKV, FIELD_PROPSET, FIELD_BOLT,
+		FIELD_VOICE, FIELD_MUSIC };
 
 	// configurable hotkeys (CinematicStudio/hotkeys.cfg)
 	enum Action
@@ -226,6 +228,13 @@ namespace
 		std::vector<IrTrack> irTracks;
 		int evDragObj = 0;
 		int64_t evDragGrabUs = 0;
+		// ---- Phase 7: props ----
+		bool propModels = false;		// the PROPS tab lists model files instead of entity classes
+		std::string propSearch, propDir = "models/map_objects", propClass = "misc_model_breakable", propModel;
+		std::vector<std::string> propClasses, propFiles;
+		std::string propFilesDir;
+		float propScroll = 0;
+		std::vector<std::pair<std::string, std::string>> propKv;	// extra keys for the next spawn
 		// ---- Phase 6: camera director ----
 		bool director = false;		// the view follows the cut track
 		bool camRec = false;		// record the piloted camera's moves as keys while the scene plays
@@ -251,6 +260,7 @@ namespace
 	void Close();
 	void ReleasePreview();
 	void StartRecording(int target);
+	bool PropPose(const Object& o, int64_t t, float org[3], float ang[3]);
 	bool CamPose(const Object& cam, int64_t t, float org[3], float ang[3], float& fov, bool effects);
 	void CameraRecordFrame();
 	void SetInstantReplay(bool on);
@@ -603,6 +613,25 @@ namespace
 		const std::string t = s.fieldText;
 		s.field = FIELD_NONE;
 		if (f == FIELD_ANIMSEARCH) { s.animSearch = t; s.animScroll = 0; return; }
+		if (f == FIELD_PROPSEARCH) { s.propSearch = t; s.propScroll = 0; return; }
+		if (f == FIELD_PROPDIR) { s.propDir = t.empty() ? "models" : t; s.propFilesDir.clear(); s.propScroll = 0; return; }
+		if (f == FIELD_PROPKV || f == FIELD_PROPSET)
+		{
+			// "key value" (value may have spaces); "key" alone removes it
+			const size_t sp = t.find(' ');
+			const std::string k = t.substr(0, sp), v = sp == std::string::npos ? "" : t.substr(sp + 1);
+			if (k.empty()) return;
+			if (f == FIELD_PROPSET) { s.scene.SetPropKey(s.scene.selected, k, v); return; }
+			s.propKv.erase(std::remove_if(s.propKv.begin(), s.propKv.end(), [&](const std::pair<std::string, std::string>& p) { return p.first == k; }), s.propKv.end());
+			if (!v.empty()) s.propKv.emplace_back(k, v);
+			return;
+		}
+		if (f == FIELD_BOLT)
+		{
+			const Object* o = s.scene.Find(s.scene.selected);
+			if (o && o->type == ObjType::Prop && o->attachTo) s.scene.SetAttach(o->id, o->attachTo, t, o->attachOffset, o->attachAngles, false);
+			return;
+		}
 		if (t.empty()) return;
 		if (f == FIELD_NPCTYPE) { ReleasePreview(); s.scene.SetNpcType(s.scene.selected, t); s.animsEnt = -1; return; }
 		if (f == FIELD_NPC) { s.npcType = t; SpawnActor(t); }
@@ -668,9 +697,10 @@ namespace
 			const bool sel = s.scene.selected == o.id;
 			if (sel) Rect(x + 1, ry, w - 2, kRow, kSel);
 			else if (Inside(s.cx, s.cy, x, ry, w, kRow)) Rect(x + 1, ry, w - 2, kRow, kHover);
-			const bool cam = o.type == ObjType::Camera, evt = o.type == ObjType::Events;
-			Text(x + 4, ry + 1, cam ? "C" : (evt ? "E" : "A"), cam ? kCam : (evt ? kWarn : kAccent));
-			const bool missing = o.type == ObjType::Actor && o.entNum < 0;
+			const bool cam = o.type == ObjType::Camera, evt = o.type == ObjType::Events, prp = o.type == ObjType::Prop;
+			const vec4_t kPropCol = { 0.55f, 0.85f, 0.45f, 1 };
+			Text(x + 4, ry + 1, cam ? "C" : (evt ? "E" : (prp ? "P" : "A")), cam ? kCam : (evt ? kWarn : (prp ? kPropCol : kAccent)));
+			const bool missing = (o.type == ObjType::Actor || o.type == ObjType::Prop) && o.entNum < 0;
 			TextClip(x + 14, ry + 1, o.name + (missing ? "  (missing)" : ""), w - 18, missing ? kWarn : kTextCol);
 			if (TakeClick(x, ry, w, kRow))
 			{
@@ -1338,6 +1368,7 @@ namespace
 	bool ShownTransform(const Object& o, float org[3], float& yaw)
 	{
 		Studio& s = S();
+		if (o.type == ObjType::Prop) { float ang[3]; PropPose(o, s.scene.clock.timeUs, org, ang); yaw = ang[YAW]; return true; }
 		const int64_t t = s.scene.clock.timeUs;
 		const Take* tk = o.prop ? Scene::ActiveTake(o) : nullptr;
 		TakeSample x;
@@ -1367,7 +1398,21 @@ namespace
 			if (s.scene.SetKey(cid, k)) { s.keyObj = cid; s.keyUs = k.tUs; s.host.Log(0, o->name + ": camera key at " + s.scene.clock.Timecode()); }
 			return;
 		}
-		if (!o || o->type != ObjType::Actor) { s.host.Log(1, "Select an actor or a camera to key"); return; }
+		if (o && o->type == ObjType::Prop)
+		{
+			if (o->attachTo) { s.host.Log(1, o->name + " is held by an actor (NEXT to nobody to key it)"); return; }
+			TransformKey k;
+			const int64_t frameUs1 = 1'000'000 / s.scene.clock.fps;
+			k.tUs = s.scene.clock.timeUs / frameUs1 * frameUs1;
+			float ang[3];
+			PropPose(*o, k.tUs, k.origin, ang);
+			k.pitch = ang[PITCH]; k.yaw = ang[YAW]; k.roll = ang[ROLL];
+			for (auto& e : o->keys) if (e.tUs == k.tUs) k.interp = e.interp;
+			const int pid = o->id;
+			if (s.scene.SetKey(pid, k)) { s.keyObj = pid; s.keyUs = k.tUs; s.host.Log(0, o->name + ": key at " + s.scene.clock.Timecode()); }
+			return;
+		}
+		if (!o || o->type != ObjType::Actor) { s.host.Log(1, "Select an actor, camera or prop to key"); return; }
 		if (o->prop && Scene::ActiveTake(*o)) { s.host.Log(1, o->name + ": a take moves it (USE NONE on its takes to key it instead)"); return; }
 		TransformKey k;
 		const int64_t frameUs = 1'000'000 / s.scene.clock.fps;
@@ -1438,12 +1483,227 @@ namespace
 		return true;
 	}
 
+	// ---- Phase 7: props ----
+	void SpawnPropInFront()
+	{
+		Studio& s = S();
+		float org[3], yaw;
+		SpotInFront(org, yaw);
+		const float ang[3] = { 0, yaw + 180.0f, 0 };	// facing the camera
+		std::vector<std::pair<std::string, std::string>> kv = s.propKv;
+		std::string cls = s.propModels ? "cs_model" : s.propClass;
+		if (cls == "cs_model")
+		{
+			const std::string m = s.propModels ? s.propModel : "";
+			bool have = false;
+			for (auto& p : kv) have = have || p.first == "model";
+			if (!have && !m.empty()) kv.emplace_back("model", m);
+			if (!have && m.empty()) { s.host.Log(1, "Pick a model (MODELS list) or add a 'model' key"); return; }
+		}
+		const int id = s.scene.AddProp(cls, kv, org, ang);
+		if (id) { s.tab = TAB_SCENE; s.host.Log(0, "Spawned " + s.scene.Find(id)->name + " (" + cls + ")"); }
+	}
+
+	// where a prop is now: on its actor's bone, on its keys, or where it was put
+	bool PropPose(const Object& o, const int64_t t, float org[3], float ang[3])
+	{
+		Studio& s = S();
+		if (o.attachTo)
+		{
+			const Object* a = s.scene.Find(o.attachTo);
+			if (a && a->entNum >= 0 && AttachPose(a->entNum, o.bolt, o.attachOffset, o.attachAngles, org, ang)) return true;
+		}
+		float fov;
+		if (!o.keys.empty() && EvaluateCameraKeys(o.keys, t, org, ang, fov)) return true;
+		VectorCopy(o.origin, org);
+		VectorCopy(o.angles, ang);
+		return true;
+	}
+
+	// props a key or an actor moves, every frame
+	void EvaluateProps()
+	{
+		Studio& s = S();
+		ClearPropRenderPoses();
+		const int64_t t = s.scene.clock.timeUs;
+		for (auto& o : s.scene.objects)
+		{
+			if (o.type != ObjType::Prop || o.entNum < 0) continue;
+			if (!PropAlive(o.entNum)) { o.entNum = -1; continue; }		// broken, picked up, used up
+			if (!o.attachTo && o.keys.empty()) continue;
+			if (s.dragging && o.id == s.scene.selected && !o.attachTo) continue;
+			float org[3], ang[3];
+			PropPose(o, t, org, ang);
+			s.host.SetPropTransform(o.entNum, org, ang);
+			if (o.attachTo) SetPropRenderPose(o.entNum, org, ang);
+		}
+	}
+
+	void DrawPropInspector(const float x, float y, Object* o)
+	{
+		Studio& s = S();
+		const float w = kRightW - 12;
+		Label(x, y, "name", o->name); y += kRow;
+		if (Button(x + kRightW - 50, y - kRow, 38, 9, "RENAME")) BeginField(FIELD_RENAME, o->name);
+		if (s.field == FIELD_RENAME) { DrawField(x, y, w, FIELD_RENAME, o->name); y += 13; }
+		Label(x, y, "class", o->classname); y += kRow;
+		Label(x, y, "entity", o->entNum >= 0 ? Fmt("%d", o->entNum) : std::string("gone (broken / picked up)")); y += kRow;
+		float org[3], ang[3];
+		PropPose(*o, s.scene.clock.timeUs, org, ang);
+		Label(x, y, "position", Fmt("%.0f %.0f %.0f", org[0], org[1], org[2])); y += kRow;
+		Label(x, y, "angles", Fmt("%.0f %.0f %.0f", ang[0], ang[1], ang[2])); y += kRow + 2;
+		// its keys
+		Text(x, y, "KEYS (key value)", kAccent); y += 10;
+		int shown = 0;
+		for (auto& p : o->kv)
+		{
+			if (shown++ >= 5) { Text(x, y, Fmt("+%d more", static_cast<int>(o->kv.size()) - 5), kDim); y += kRow; break; }
+			TextClip(x, y + 1, p.first + "  " + p.second, w - 14, kTextCol);
+			if (Button(x + w - 12, y, 12, 9, "x")) { s.scene.SetPropKey(o->id, p.first, ""); return; }
+			y += kRow;
+		}
+		if (s.field == FIELD_PROPSET) { DrawField(x, y, w, FIELD_PROPSET, ""); y += 13; }
+		else if (Button(x, y, w, 10, "SET KEY (e.g. health 100)")) BeginField(FIELD_PROPSET, ""), y += 13;
+		else y += 12;
+		const float bw = (w - 4) / 3;
+		if (Button(x, y, bw, 11, "KEY (K)")) SetKeyAtPlayhead();
+		if (Button(x + bw + 2, y, bw, 11, "RESPAWN")) { Object a = *o; s.scene.SetPropKey(o->id, "cs_respawn", "1"); s.scene.SetPropKey(o->id, "cs_respawn", ""); }
+		if (Button(x + 2 * (bw + 2), y, bw, 11, "DUPLICATE")) s.scene.Duplicate(o->id);
+		y += 14;
+		// held by an actor
+		{
+			const Object* a = o->attachTo ? s.scene.Find(o->attachTo) : nullptr;
+			Label(x, y, "held by", a ? a->name : "(nobody)", w - 30);
+			if (Button(x + w - 28, y, 28, 9, "NEXT"))
+			{
+				int next = 0;
+				bool after = o->attachTo == 0;
+				for (auto& c : s.scene.objects)
+				{
+					if (c.type != ObjType::Actor) continue;
+					if (after) { next = c.id; break; }
+					if (c.id == o->attachTo) after = true;
+				}
+				const float zero[3] = { 0, 0, 0 };
+				s.scene.SetAttach(o->id, next, o->bolt.empty() ? "*r_hand" : o->bolt, next ? o->attachOffset : zero, next ? o->attachAngles : zero, false);
+				return;
+			}
+			y += kRow;
+			if (o->attachTo)
+			{
+				static const char* kBolts[] = { "*r_hand", "*l_hand", "*head_top", "*head_front", "*back", "*chestg", "*hip_r", "*hip_l", "*r_hand_cap_r_arm", "*l_hand_cap_l_arm" };
+				Label(x, y, "bone", o->bolt, w - 58);
+				if (Button(x + w - 56, y, 26, 9, "NEXT"))
+				{
+					int i = 0;
+					while (i < 10 && o->bolt != kBolts[i]) i++;
+					s.scene.SetAttach(o->id, o->attachTo, kBolts[(i + 1) % 10], o->attachOffset, o->attachAngles, false);
+					return;
+				}
+				if (Button(x + w - 28, y, 28, 9, "TYPE")) BeginField(FIELD_BOLT, o->bolt);
+				y += kRow;
+				if (s.field == FIELD_BOLT) { DrawField(x, y, w, FIELD_BOLT, o->bolt); y += 13; }
+				float off[3] = { o->attachOffset[0], o->attachOffset[1], o->attachOffset[2] };
+				float aoff[3] = { o->attachAngles[0], o->attachAngles[1], o->attachAngles[2] };
+				const float st = s.shift ? 8.0f : 1.0f, as = s.shift ? 45.0f : 15.0f;
+				bool ch = false;
+				Label(x, y, "offset", Fmt("%.0f %.0f %.0f", off[0], off[1], off[2]), w); y += kRow;
+				const char* axn[3] = { "X", "Y", "Z" };
+				for (int i = 0; i < 3; i++)
+				{
+					const float bx = x + i * (w / 3);
+					if (Button(bx, y, 12, 9, "-")) { off[i] -= st; ch = true; }
+					Text(bx + 14, y + 0.5f, axn[i], kDim);
+					if (Button(bx + 22, y, 12, 9, "+")) { off[i] += st; ch = true; }
+				}
+				y += kRow;
+				Label(x, y, "turn", Fmt("%.0f %.0f %.0f", aoff[0], aoff[1], aoff[2]), w); y += kRow;
+				const char* an[3] = { "P", "Y", "R" };
+				for (int i = 0; i < 3; i++)
+				{
+					const float bx = x + i * (w / 3);
+					if (Button(bx, y, 12, 9, "-")) { aoff[i] -= as; ch = true; }
+					Text(bx + 14, y + 0.5f, an[i], kDim);
+					if (Button(bx + 22, y, 12, 9, "+")) { aoff[i] += as; ch = true; }
+				}
+				y += kRow + 1;
+				if (ch) s.scene.SetAttach(o->id, o->attachTo, o->bolt, off, aoff, true);
+				if (!AttachPose(a ? a->entNum : -1, o->bolt, off, aoff, org, ang)) Text(x, y, "that bone isn't on this model", kWarn);
+			}
+		}
+	}
+
+	void DrawPropsPanel(const float x, const float y0, const float h)
+	{
+		Studio& s = S();
+		const float ix = x + 6, w = kRightW - 12;
+		float y = y0 + 2;
+		Text(ix, y, "PROPS: MAP OBJECTS", kAccent); y += 11;
+		if (Button(ix, y, w / 2 - 1, 10, "ENTITY CLASSES", !s.propModels)) { s.propModels = false; s.propScroll = 0; }
+		if (Button(ix + w / 2 + 1, y, w / 2 - 1, 10, "MODELS", s.propModels)) { s.propModels = true; s.propScroll = 0; }
+		y += 12;
+		std::vector<std::string> list;
+		if (!s.propModels)
+		{
+			if (s.propClasses.empty()) s.propClasses = ListSpawnClasses();
+			DrawField(ix, y, w, FIELD_PROPSEARCH, s.propSearch); y += 13;
+			for (auto& c : s.propClasses)
+				if (s.propSearch.empty() || Q_stristr(c.c_str(), s.propSearch.c_str())) list.push_back(c);
+		}
+		else
+		{
+			DrawField(ix, y, w, FIELD_PROPDIR, s.propDir); y += 13;
+			if (s.propFilesDir != s.propDir) { s.propFiles = ListModels(s.propDir); s.propFilesDir = s.propDir; }
+			list = s.propFiles;
+		}
+		// the list
+		const float listH = h - 118;
+		const int rows = std::max(1, static_cast<int>(listH / kRow));
+		if (Inside(s.cx, s.cy, x, y, kRightW, listH) && s.wheel) { s.propScroll -= static_cast<float>(s.wheel) * 3; s.wheel = 0; }
+		s.propScroll = std::max(0.0f, std::min(s.propScroll, static_cast<float>(std::max(0, static_cast<int>(list.size()) - rows))));
+		Rect(x + 2, y, kRightW - 4, rows * kRow, kPanelDark);
+		for (int i = 0; i < rows && static_cast<size_t>(i) + static_cast<size_t>(s.propScroll) < list.size(); i++)
+		{
+			const std::string& it = list[static_cast<size_t>(i) + static_cast<size_t>(s.propScroll)];
+			const float ry = y + i * kRow;
+			const bool sel = s.propModels ? it == s.propModel : it == s.propClass;
+			if (sel) Rect(x + 2, ry, kRightW - 4, kRow, kSel);
+			std::string shown = it;
+			if (s.propModels && shown.size() > s.propDir.size() + 1) shown = shown.substr(s.propDir.size() + 1);
+			TextClip(ix, ry + 0.5f, shown, w, it == "cs_model" ? kAccent : kTextCol);
+			if (TakeClick(x, ry, kRightW, kRow))
+			{
+				if (s.propModels) s.propModel = it; else s.propClass = it;
+				if (s.doubleClick) SpawnPropInFront();
+			}
+		}
+		if (list.empty()) Text(ix, y + 1, s.propModels ? "no .md3 / .glm files here" : "nothing matches", kDim);
+		y += rows * kRow + 3;
+		Label(ix, y, "spawn", s.propModels ? (s.propModel.empty() ? std::string("(pick a model)") : s.propModel) : s.propClass, w); y += kRow;
+		// extra keys for the spawn
+		std::string kvs;
+		for (auto& p : s.propKv) kvs += (kvs.empty() ? "" : ", ") + p.first + " " + p.second;
+		Label(ix, y, "with", kvs.empty() ? std::string("(no extra keys)") : kvs, w); y += kRow;
+		if (s.field == FIELD_PROPKV) { DrawField(ix, y, w, FIELD_PROPKV, ""); y += 13; }
+		else
+		{
+			if (Button(ix, y, w / 2 - 1, 10, "ADD KEY")) BeginField(FIELD_PROPKV, "");
+			if (Button(ix + w / 2 + 1, y, w / 2 - 1, 10, "CLEAR KEYS", false, !s.propKv.empty())) s.propKv.clear();
+			y += 12;
+		}
+		if (Button(ix, y, w, 12, "SPAWN IN FRONT OF VIEW")) SpawnPropInFront();
+		y += 14;
+		Text(ix, y, "double-click spawns; keys like 'model',", kDim, 0.34f); y += 9;
+		Text(ix, y, "'health', 'fxFile', 'spawnflags', 'target'", kDim, 0.34f);
+	}
+
 	// ---- moving actors with the mouse ----
 	bool SelectedActorTransform(float org[3], float& yaw, int& id)
 	{
 		Studio& s = S();
 		const Object* o = s.scene.Find(s.scene.selected);
-		if (!o || o->type != ObjType::Actor || o->entNum < 0) return false;
+		if (!o || (o->type != ObjType::Actor && o->type != ObjType::Prop) || o->entNum < 0) return false;
+		if (o->type == ObjType::Prop && o->attachTo) return false;	// held by an actor: offsets move it
 		ShownTransform(*o, org, yaw);
 		id = o->id;
 		return true;
@@ -1467,7 +1727,13 @@ namespace
 		float org[3], yaw;
 		int id;
 		EntInfo info;
-		if (!SelectedActorTransform(org, yaw, id) || !EntityInfo(s.scene.Find(id)->entNum, info)) return false;
+		if (!SelectedActorTransform(org, yaw, id)) return false;
+		if (s.scene.Find(id)->type == ObjType::Prop)
+		{
+			info = EntInfo();
+			if (!PropBounds(s.scene.Find(id)->entNum, info.mins, info.maxs)) return false;
+		}
+		else if (!EntityInfo(s.scene.Find(id)->entNum, info)) return false;
 		float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
 		int n = 0;
 		for (int c = 0; c < 8; c++)
@@ -1514,6 +1780,27 @@ namespace
 			org[1] = hit[1] + s.dragOff[1];
 		}
 		Object* o = s.scene.Find(id);
+		if (o->type == ObjType::Prop)
+		{
+			float full[3] = { o->angles[0], ang[YAW], o->angles[2] };
+			if (!o->keys.empty())
+			{
+				float kp[3], ka[3];
+				PropPose(*o, s.scene.clock.timeUs, kp, ka);
+				const int64_t frameUs = 1'000'000 / s.scene.clock.fps;
+				TransformKey k;
+				k.tUs = s.scene.clock.timeUs / frameUs * frameUs;
+				for (auto& e : o->keys) if (e.tUs == k.tUs) k = e;
+				VectorCopy(org, k.origin);
+				k.origin[2] = s.dragZ;
+				k.pitch = ka[PITCH]; k.yaw = ang[YAW]; k.roll = ka[ROLL];
+				s.scene.SetKey(id, k, true);
+				return;
+			}
+			if (fabsf(org[0] - o->origin[0]) > 0.01f || fabsf(org[1] - o->origin[1]) > 0.01f || fabsf(ang[YAW] - o->angles[YAW]) > 0.01f)
+				s.scene.SetTransform(id, org, full, true);
+			return;
+		}
 		const Take* tk = o->prop ? Scene::ActiveTake(*o) : nullptr;
 		if (tk)
 		{
@@ -1586,6 +1873,7 @@ namespace
 			if (DrawKeyEditor(ix, y)) break;
 			Text(ix, y, "INSPECTOR", kAccent); y += 12;
 			if (sel && sel->type == ObjType::Camera) DrawCameraInspector(ix, y, sel);
+			else if (sel && sel->type == ObjType::Prop) DrawPropInspector(ix, y, sel);
 			else if (sel && sel->type == ObjType::Events)
 			{
 				Label(ix, y, "name", sel->name); y += kRow;
@@ -1725,8 +2013,7 @@ namespace
 			Text(ix, y, "<file> <who>' (lip sync).", kDim);
 			break;
 		case TAB_PROPS:
-			Text(ix, y, "PROPS", kAccent); y += 12;
-			Text(ix, y, "Prop placement: Phase 7.", kDim);
+			DrawPropsPanel(x, y0, h);
 			break;
 		}
 	}
@@ -2073,7 +2360,7 @@ namespace
 				}
 			}
 			// position keys: diamonds along the bottom of the lane
-			if (o.type == ObjType::Actor || o.type == ObjType::Camera)
+			if (o.type == ObjType::Actor || o.type == ObjType::Camera || o.type == ObjType::Prop)
 				for (auto& k : o.keys)
 				{
 					const float kx = TimeToX(k.tUs, lx, lw);
@@ -2193,6 +2480,36 @@ namespace
 			const bool live = s.scene.ActiveCamera(now) == o.id;
 			Text(sx + 6, sy - 4, o.name + (live ? "  [LIVE]" : ""), sel ? kAccent : (live ? kRed : kCam), 0.36f);
 		}
+		// props: a small diamond and their name
+		for (auto& o : s.scene.objects)
+		{
+			if (o.type != ObjType::Prop || o.entNum < 0) continue;
+			float p[3], a[3], sx, sy;
+			PropPose(o, now, p, a);
+			if (!Project(p, sx, sy)) continue;
+			const bool sel = o.id == s.scene.selected;
+			const vec4_t pc = { 0.55f, 0.85f, 0.45f, sel ? 1.0f : 0.7f };
+			Rect(sx - 1.5f, sy - 1.5f, 3, 3, sel ? kAccent : pc);
+			if (sel || Inside(s.cx, s.cy, sx - 20, sy - 10, 40, 20)) Text(sx + 4, sy - 4, o.name, sel ? kAccent : pc, 0.34f);
+			if (sel)
+			{
+				float mn[3], mx[3];
+				if (PropBounds(o.entNum, mn, mx))
+				{
+					float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+					int nn = 0;
+					for (int c = 0; c < 8; c++)
+					{
+						const vec3_t q = { (c & 1) ? mx[0] : mn[0], (c & 2) ? mx[1] : mn[1], (c & 4) ? mx[2] : mn[2] };
+						float qx, qy;
+						if (!Project(q, qx, qy)) continue;
+						x0 = std::min(x0, qx); y0 = std::min(y0, qy); x1 = std::max(x1, qx); y1 = std::max(y1, qy);
+						nn++;
+					}
+					if (nn) Frame(x0, y0, x1 - x0, y1 - y0, kAccent);
+				}
+			}
+		}
 		// selection bracket around the selected character
 		int ent = -1;
 		if (const Object* o = s.scene.Find(s.scene.selected)) ent = o->type == ObjType::Actor ? o->entNum : -1;
@@ -2239,6 +2556,15 @@ namespace
 			if (o.type != ObjType::Camera || o.id == s.lookId) continue;
 			float sx, sy, pp[3], pa[3], pf;
 			CamPose(o, s.scene.clock.timeUs, pp, pa, pf, true);
+			if (!Project(pp, sx, sy)) continue;
+			const float d = hypotf(sx - s.clickX, sy - s.clickY);
+			if (d < best) { best = d; bestId = o.id; bestEnt = -1; }
+		}
+		for (auto& o : s.scene.objects)
+		{
+			if (o.type != ObjType::Prop || o.entNum < 0) continue;
+			float pp[3], pa[3], sx, sy;
+			PropPose(o, s.scene.clock.timeUs, pp, pa);
 			if (!Project(pp, sx, sy)) continue;
 			const float d = hypotf(sx - s.clickX, sy - s.clickY);
 			if (d < best) { best = d; bestId = o.id; bestEnt = -1; }
@@ -3054,6 +3380,7 @@ void CS_Frame()
 	if (s.open || s.rec != Studio::REC_IDLE)
 	{
 		EvaluateScene();
+		EvaluateProps();
 		// saber clashes with takes while the scene plays (recording: your attacks bounce off them)
 		if (s.clashes && s.scene.clock.playing && !s.takeEnts.empty()) DetectClashes(s.takeEnts, s.rec == Studio::REC_RECORDING);
 		SetCaptureSkip(s.takeEnts);

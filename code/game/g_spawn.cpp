@@ -1894,3 +1894,51 @@ void G_SpawnEntitiesFromString(const char* entity_string)
 		G_Error("Errors loading map, check the console for them.");
 	}
 }
+// ---------------------------------------------------------------------------------------------
+// Cinematic Studio (Phase 7): spawn any map entity at runtime from key / value pairs, as the level
+// loader does. Returns the entity, or nullptr when the class is unknown or the entity removed itself
+// (misc_model, for one, only exists in the compiled map).
+// ---------------------------------------------------------------------------------------------
+gentity_t* CS_SpawnMapEntity(const char* const* keys, const char* const* values, const int n)
+{
+	numSpawnVars = 0;
+	numSpawnVarChars = 0;
+	for (int i = 0; i < n && numSpawnVars < MAX_SPAWN_VARS; i++)
+	{
+		if (!keys[i] || !keys[i][0] || !values[i]) continue;
+		if (numSpawnVarChars + static_cast<int>(strlen(keys[i]) + strlen(values[i])) + 2 > MAX_SPAWN_VARS_CHARS) break;
+		AddSpawnField(keys[i], values[i]);
+	}
+	const qboolean was = spawning;
+	spawning = qtrue;
+	gentity_t* ent = G_Spawn();
+	for (int i = 0; i < numSpawnVars; i++) G_ParseField(spawnVars[i][0], spawnVars[i][1], ent);
+	VectorCopy(ent->s.origin, ent->s.pos.trBase);
+	VectorCopy(ent->s.origin, ent->currentOrigin);
+	const int num = ent->s.number;
+	const qboolean ok = ent->classname ? G_CallSpawn(ent) : qfalse;
+	spawning = was;
+	numSpawnVars = 0;
+	numSpawnVarChars = 0;
+	if (!ok)
+	{
+		if (ent->inuse) G_FreeEntity(ent);
+		return nullptr;
+	}
+	if (!ent->inuse || ent->s.number != num) return nullptr;
+	if (Quake3Game()->ValidEntity(ent))
+	{
+		Quake3Game()->InitEntity(ent);
+		if (ent->classname && Q_strncmp("NPC_", ent->classname, 4) != 0) G_ActivateBehavior(ent, BSET_SPAWN);
+	}
+	return ent;
+}
+
+// every class name the game can spawn (map entities and items)
+int CS_ListSpawnClasses(const char** out, const int max)
+{
+	int n = 0;
+	for (const spawn_t* s = spawns; s->name && n < max; s++) out[n++] = s->name;
+	for (const gitem_t* item = bg_itemlist + 1; item->classname && n < max; item++) out[n++] = item->classname;
+	return n;
+}

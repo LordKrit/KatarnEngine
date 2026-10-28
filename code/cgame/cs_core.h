@@ -21,7 +21,7 @@ namespace cs
 	constexpr int kProjectSchemaOld = 1;	// bump when the file layout changes; readers accept <= this
 	constexpr const char* kProjectRoot = "CinematicStudio/Projects";
 
-	enum class ObjType { Actor, Camera, Events };
+	enum class ObjType { Actor, Camera, Events, Prop };
 
 	enum AnimParts { PARTS_LEGS = 1, PARTS_TORSO = 2, PARTS_BOTH = 3 };
 
@@ -177,6 +177,14 @@ namespace cs
 		int lookAt = 0;			// actor it aims at (0 = its own angles)
 		float shake = 0;		// handheld shake, 0-10
 
+		// prop (ObjType::Prop, Phase 7): any map entity class with its key / values ("cs_model" = just a model)
+		std::string classname;
+		std::vector<std::pair<std::string, std::string>> kv;	// spawn keys (origin / angles come from the object)
+		std::string Value(const std::string& key) const;
+		int attachTo = 0;			// actor id it's held by / attached to (0 = free)
+		std::string bolt;			// bone or tag on that actor ("*r_hand"...)
+		float attachOffset[3] = { 0, 0, 0 }, attachAngles[3] = { 0, 0, 0 };
+
 		// events track (ObjType::Events): starts at eventsStartUs on the scene clock
 		int64_t eventsStartUs = 0;
 		std::shared_ptr<EventData> events = std::make_shared<EventData>();
@@ -199,6 +207,10 @@ namespace cs
 		// force: skip the skeleton checks
 		virtual bool SetActorProfile(int ent, const std::string& profile, std::string& why, bool force) = 0;
 		virtual void SetActorProp(int ent, bool on) = 0;	// animated prop mode (see Object::prop)
+		// map entities (Phase 7): returns the entity number or -1; moved with all three angles
+		virtual int SpawnProp(const std::string& classname, const std::vector<std::pair<std::string, std::string>>& kv,
+			const float origin[3], const float angles[3]) = 0;
+		virtual void SetPropTransform(int ent, const float origin[3], const float angles[3]) = 0;
 		virtual std::string MapName() = 0;
 		// files, relative to the game's write directory
 		virtual bool WriteFile(const std::string& path, const std::string& data) = 0;
@@ -258,6 +270,10 @@ namespace cs
 		int AdoptActor(int ent, const std::string& npcType, const std::string& name);
 		int AddCamera(const float origin[3], const float angles[3], float fov);
 		int AddEvents(const std::string& name, int64_t startUs, std::vector<WorldEvent> events);	// a world-events track
+		// props (undoable): a map entity of any class; changing its class or keys spawns it again
+		int AddProp(const std::string& classname, const std::vector<std::pair<std::string, std::string>>& kv, const float origin[3], const float angles[3]);
+		bool SetPropKey(int id, const std::string& key, const std::string& value);	// "" removes the key
+		bool SetAttach(int id, int actorId, const std::string& bolt, const float offset[3], const float angles[3], bool coalesce);
 		bool SetEventsStart(int id, int64_t startUs, bool coalesce);
 		bool SetVisible(int id, bool on);	// events tracks: off = not played
 		bool Remove(int id);

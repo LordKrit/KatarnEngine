@@ -26,6 +26,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "cg_headers.h"
 
 #include "cg_media.h"
+#include "cs_studio.h"
 #include "../game/g_functions.h"
 #include "../ghoul2/G2.h"
 #include "FxScheduler.h"
@@ -2982,6 +2983,7 @@ static void CG_AddCEntity(centity_t* cent)
 
 	// calculate the current origin
 	CG_CalcEntityLerpPositions(cent);
+	CS_PropRenderPose(cent);	// Cinematic Studio: a prop held on an actor's bone
 
 	// add automatic effects
 	CG_EntityEffects(cent);

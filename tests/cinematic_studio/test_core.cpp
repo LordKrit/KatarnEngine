@@ -13,7 +13,8 @@ static int g_fail = 0, g_pass = 0;
 class FakeHost : public Host
 {
 public:
-	struct Ent { std::string npc, name; float o[3], a[3]; bool ai = false; bool alive = true; std::string profile; bool prop = false; };
+	struct Ent { std::string npc, name; float o[3], a[3]; bool ai = false; bool alive = true; std::string profile; bool prop = false;
+		std::string cls; std::vector<std::pair<std::string, std::string>> kv; };
 	std::map<int, Ent> ents;
 	std::map<std::string, std::string> files;
 	std::string map = "md_test";
@@ -49,6 +50,19 @@ public:
 		return true;
 	}
 	void SetActorProp(int ent, bool on) override { ents[ent].prop = on; }
+	int SpawnProp(const std::string& cls, const std::vector<std::pair<std::string, std::string>>& kv, const float o[3], const float a[3]) override
+	{
+		if (cls == "misc_model") return -1;		// removes itself in the game
+		for (auto& p : kv) if (p.second == "bad") return -1;
+		Ent e; e.cls = cls; e.kv = kv; e.alive = false;
+		for (int i = 0; i < 3; i++) { e.o[i] = o[i]; e.a[i] = a[i]; }
+		ents[nextEnt] = e;
+		return nextEnt++;
+	}
+	void SetPropTransform(int ent, const float o[3], const float a[3]) override
+	{
+		for (int i = 0; i < 3; i++) { ents[ent].o[i] = o[i]; ents[ent].a[i] = a[i]; }
+	}
 	std::string MapName() override { return map; }
 	bool WriteFile(const std::string& p, const std::string& d) override { files[p] = d; return true; }
 	bool ReadFile(const std::string& p, std::string& out) override
@@ -624,8 +638,65 @@ static void TestPhase6()
 	CHECK(l.Find(c2)->fov == 5 && l.ActiveCamera(5'000'000) == c1);
 }
 
+static void TestPhase7()
+{
+	FakeHost h;
+	Scene s(&h);
+	const float o[3] = { 10, 20, 30 }, a[3] = { 15, 90, 5 };
+	const int v = s.AddActor("md_vader", o, a);
+	CHECK(!s.AddProp("misc_model", {}, o, a) && !s.AddProp("", {}, o, a));
+	const int p = s.AddProp("cs_model", { { "model", "models/map_objects/imperial/crate.md3" } }, o, a);
+	CHECK(p && s.Find(p)->type == ObjType::Prop && s.Find(p)->name == "crate 01" && s.Find(p)->Value("model") == "models/map_objects/imperial/crate.md3");
+	int ent = s.Find(p)->entNum;
+	CHECK(h.ents[ent].cls == "cs_model" && h.ents[ent].a[0] == 15 && h.ents[ent].a[2] == 5);		// all three angles
+	const int b = s.AddProp("misc_model_breakable", { { "model", "models/map_objects/barrel.md3" }, { "health", "50" } }, o, a);
+	CHECK(b && s.Find(b)->name == "misc_model_breakable 01");
+
+	// moving it (transform undo) keeps the entity; new keys spawn it again
+	const float o2[3] = { 0, 0, 0 };
+	CHECK(s.SetTransform(p, o2, a, false) && s.Find(p)->entNum == ent && h.ents[ent].o[0] == 0);
+	CHECK(s.SetPropKey(p, "modelscale", "2") && s.Find(p)->entNum != ent && !h.ents.count(ent));
+	ent = s.Find(p)->entNum;
+	CHECK(h.ents[ent].kv.size() == 2 && s.Find(p)->Value("modelscale") == "2" && h.ents[ent].o[0] == 0);
+	CHECK(!s.SetPropKey(p, "modelscale", "bad") && s.Find(p)->Value("modelscale") == "2" && s.Find(p)->entNum >= 0);	// kept
+	CHECK(!s.SetPropKey(p, "classname", "x"));
+	CHECK(s.SetPropKey(p, "modelscale", "") && s.Find(p)->kv.size() == 1);	// removed
+	CHECK(s.Undo() && s.Find(p)->Value("modelscale") == "2" && h.ents[s.Find(p)->entNum].kv.size() == 2);
+
+	// attach to an actor's bone
+	const float off[3] = { 1, 2, 3 }, ang[3] = { 0, 90, 0 };
+	CHECK(!s.SetAttach(p, b, "*r_hand", off, ang, false));		// only to actors
+	CHECK(s.SetAttach(p, v, "*r_hand", off, ang, false) && s.Find(p)->attachTo == v && s.Find(p)->bolt == "*r_hand");
+	CHECK(s.SetAttach(p, 0, "*r_hand", off, ang, false) && s.Find(p)->bolt.empty() && s.Undo() && s.Find(p)->attachTo == v);
+
+	// keys move props too (with pitch / roll)
+	TransformKey k; k.tUs = 0; k.pitch = 30;
+	CHECK(s.SetKey(p, k) && s.Find(p)->keys.size() == 1);
+
+	// remove / undo respawns it; duplicate; clear removes them
+	const int e0 = s.Find(b)->entNum;
+	CHECK(s.Remove(b) && !h.ents.count(e0) && s.Undo() && s.Find(b) && h.ents.count(s.Find(b)->entNum));
+	const int d = s.Duplicate(p);
+	CHECK(d && s.Find(d)->classname == "cs_model" && s.Find(d)->entNum != s.Find(p)->entNum);
+	CHECK(s.Undo());
+
+	CHECK(s.Save("P7"));
+	CHECK(h.files["CinematicStudio/Projects/P7/project.json"].find("model:models/map_objects/barrel.md3") != std::string::npos);
+	Scene l(&h);
+	std::vector<std::string> warn;
+	CHECK(l.Load("P7", false, false, warn) && warn.empty());
+	const Object* lp = l.Find(p);
+	CHECK(lp && lp->classname == "cs_model" && lp->kv == s.Find(p)->kv && lp->attachTo == v && lp->bolt == "*r_hand");
+	CHECK(lp->attachOffset[2] == 3 && lp->attachAngles[1] == 90 && lp->keys == s.Find(p)->keys && lp->entNum >= 0);
+	CHECK(l.Find(b)->Value("health") == "50");
+	const size_t before = h.ents.size();
+	l.Clear();
+	CHECK(h.ents.size() == before - 3);	// vader + 2 props
+}
+
 int main()
 {
+	TestPhase7();
 	TestPhase6();
 	TestPhase5();
 	TestPhase4();

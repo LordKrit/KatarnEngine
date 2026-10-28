@@ -11,7 +11,13 @@ namespace cs
 {
 	const char* ObjTypeName(const ObjType t)
 	{
-		return t == ObjType::Camera ? "camera" : (t == ObjType::Events ? "events" : "actor");
+		switch (t)
+		{
+		case ObjType::Camera: return "camera";
+		case ObjType::Events: return "events";
+		case ObjType::Prop: return "prop";
+		default: return "actor";
+		}
 	}
 
 	// ------------------------------------------------------------------------------------------
@@ -98,8 +104,20 @@ namespace cs
 		}
 	}
 
+	std::string Object::Value(const std::string& key) const
+	{
+		for (auto& p : kv) if (p.first == key) return p.second;
+		return "";
+	}
+
 	bool Scene::Spawn(Object& o)
 	{
+		if (o.type == ObjType::Prop)
+		{
+			o.entNum = host_->SpawnProp(o.classname, o.kv, o.origin, o.angles);
+			if (o.entNum < 0) { host_->Log(1, "Couldn't spawn prop '" + o.name + "' (" + o.classname + ")"); return false; }
+			return true;
+		}
 		o.entNum = host_->SpawnActor(o.npcType, o.origin, o.angles, o.name);
 		if (o.entNum < 0)
 		{
@@ -195,6 +213,72 @@ namespace cs
 		Op op; op.kind = Op::Add; op.after = o; op.timeMs = host_->NowMs();
 		Push(op);
 		return o.id;
+	}
+
+	int Scene::AddProp(const std::string& classname, const std::vector<std::pair<std::string, std::string>>& kv, const float origin[3], const float angles[3])
+	{
+		if (classname.empty()) return 0;
+		Object o;
+		o.id = nextId_++;
+		o.type = ObjType::Prop;
+		o.classname = classname;
+		o.kv = kv;
+		std::string base = classname;
+		if (classname == "cs_model")
+		{
+			base = o.Value("model");
+			const size_t sl = base.find_last_of('/'), dot = base.find_last_of('.');
+			base = base.substr(sl == std::string::npos ? 0 : sl + 1, dot == std::string::npos || dot < sl + 1 ? std::string::npos : dot - (sl == std::string::npos ? 0 : sl + 1));
+			if (base.empty()) base = "model";
+		}
+		o.name = NewName(base);
+		std::copy(origin, origin + 3, o.origin);
+		std::copy(angles, angles + 3, o.angles);
+		if (!Spawn(o)) return 0;
+		objects.push_back(o);
+		Op op; op.kind = Op::Add; op.after = o; op.timeMs = host_->NowMs();
+		Push(op);
+		selected = o.id;
+		return o.id;
+	}
+
+	bool Scene::SetPropKey(const int id, const std::string& key, const std::string& value)
+	{
+		const Object* o = Find(id);
+		if (!o || o->type != ObjType::Prop || key.empty() || key == "classname") return false;
+		Object after = *o;
+		bool found = false;
+		for (auto& p : after.kv) if (p.first == key) { p.second = value; found = true; }
+		if (!found && !value.empty()) after.kv.emplace_back(key, value);
+		after.kv.erase(std::remove_if(after.kv.begin(), after.kv.end(), [](const std::pair<std::string, std::string>& p) { return p.second.empty(); }), after.kv.end());
+		if (after.kv == o->kv) return false;
+		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = host_->NowMs();
+		Apply(after, true);
+		const Object* n = Find(id);
+		if (!n || n->entNum < 0)
+		{
+			Apply(op.before, true);	// the new keys don't spawn: keep the old ones
+			host_->Log(1, "'" + key + "' = '" + value + "' doesn't spawn; kept the old keys");
+			return false;
+		}
+		op.after = *n;
+		op.after.entNum = -1;
+		Push(op);
+		return true;
+	}
+
+	bool Scene::SetAttach(const int id, const int actorId, const std::string& bolt, const float offset[3], const float angles[3], const bool coalesce)
+	{
+		const Object* o = Find(id);
+		if (!o || o->type != ObjType::Prop) return false;
+		const Object* a = actorId ? Find(actorId) : nullptr;
+		if (actorId && (!a || a->type != ObjType::Actor)) return false;
+		Object after = *o;
+		after.attachTo = actorId;
+		after.bolt = actorId ? bolt : "";
+		std::copy(offset, offset + 3, after.attachOffset);
+		std::copy(angles, angles + 3, after.attachAngles);
+		return Change(after, coalesce, "attach");
 	}
 
 	bool Scene::SetEventsStart(const int id, const int64_t startUs, const bool coalesce)
@@ -338,7 +422,7 @@ namespace cs
 		o.entNum = -1;
 		o.adopted = false;
 		if (o.type == ObjType::Actor && o.npcType.empty()) return 0;
-		if (o.type == ObjType::Actor && !Spawn(o)) return 0;
+		if ((o.type == ObjType::Actor || o.type == ObjType::Prop) && !Spawn(o)) return 0;
 		objects.push_back(o);
 		Op op; op.kind = Op::Add; op.after = o; op.timeMs = host_->NowMs();
 		Push(op);
@@ -838,7 +922,7 @@ namespace cs
 	bool Scene::SetKey(const int id, const TransformKey& key, const bool coalesce)
 	{
 		const Object* o = Find(id);
-		if (!o || (o->type != ObjType::Actor && o->type != ObjType::Camera)) return false;
+		if (!o || (o->type != ObjType::Actor && o->type != ObjType::Camera && o->type != ObjType::Prop)) return false;
 		Object after = *o;
 		TransformKey k = key;
 		k.tUs = std::max<int64_t>(0, k.tUs);
@@ -877,7 +961,7 @@ namespace cs
 	bool Scene::ReplaceKeys(const int id, const int64_t fromUs, const int64_t toUs, const std::vector<TransformKey>& keys)
 	{
 		const Object* o = Find(id);
-		if (!o || (o->type != ObjType::Actor && o->type != ObjType::Camera)) return false;
+		if (!o || (o->type != ObjType::Actor && o->type != ObjType::Camera && o->type != ObjType::Prop)) return false;
 		Object after = *o;
 		after.keys.erase(std::remove_if(after.keys.begin(), after.keys.end(), [&](const TransformKey& k) { return k.tUs >= fromUs && k.tUs <= toUs; }), after.keys.end());
 		for (auto k : keys)
@@ -981,6 +1065,7 @@ namespace cs
 		if (!exists)
 		{
 			if (!cur) return;
+			if (cur->type == ObjType::Prop && cur->entNum >= 0) host_->RemoveActor(cur->entNum);
 			if (cur->type == ObjType::Actor && cur->entNum >= 0)
 			{
 				// adopted level NPCs are only released (kept in the level), studio actors are removed
@@ -992,13 +1077,29 @@ namespace cs
 		if (!cur)
 		{
 			Object o = state;
-			if (o.type == ObjType::Actor && !(o.adopted && host_->ActorAlive(o.entNum)))
+			if (o.type == ObjType::Prop) Spawn(o);
+			else if (o.type == ObjType::Actor && !(o.adopted && host_->ActorAlive(o.entNum)))
 			{
 				o.adopted = false;
 				Spawn(o);
 			}
 			objects.push_back(o);
 			nextId_ = std::max(nextId_, o.id + 1);
+			return;
+		}
+		if (cur->type == ObjType::Prop)
+		{
+			const bool respawn = cur->classname != state.classname || cur->kv != state.kv || cur->entNum < 0;
+			const int ent = cur->entNum;
+			*cur = state;
+			cur->entNum = ent;
+			if (respawn)
+			{
+				if (ent >= 0) host_->RemoveActor(ent);
+				cur->entNum = -1;
+				Spawn(*cur);
+			}
+			else host_->SetPropTransform(cur->entNum, cur->origin, cur->angles);
 			return;
 		}
 		const int ent = cur->entNum;
@@ -1075,7 +1176,7 @@ namespace cs
 	void Scene::Clear()
 	{
 		for (auto& o : objects)
-			if (o.type == ObjType::Actor && o.entNum >= 0 && !o.adopted) host_->RemoveActor(o.entNum);
+			if ((o.type == ObjType::Actor && !o.adopted) || o.type == ObjType::Prop) { if (o.entNum >= 0) host_->RemoveActor(o.entNum); }
 		objects.clear();
 		undo_.clear();
 		redo_.clear();
@@ -1251,6 +1352,21 @@ namespace cs
 				if (!o.takes.empty()) j.set("takes", takes);
 				if (!o.keys.empty()) j.set("keys", KeysToJson(o.keys));
 			}
+			else if (o.type == ObjType::Prop)
+			{
+				j.set("classname", o.classname);
+				Json kv = Json::MakeObject();
+				for (auto& p : o.kv) kv.set(p.first, p.second);
+				j.set("keys_kv", kv);
+				if (!o.keys.empty()) j.set("keys", KeysToJson(o.keys));
+				if (o.attachTo)
+				{
+					j.set("attachTo", o.attachTo);
+					j.set("bolt", o.bolt);
+					j.set("attachOffset", Vec(o.attachOffset));
+					j.set("attachAngles", Vec(o.attachAngles));
+				}
+			}
 			else if (o.type == ObjType::Events)
 			{
 				j.set("startUs", static_cast<double>(o.eventsStartUs));
@@ -1324,6 +1440,13 @@ namespace cs
 				for (size_t i = 0; i < assets.size(); i++) seen = seen || assets[i].asString() == "npc:" + o.npcType;
 				if (!seen) assets.push("npc:" + o.npcType);
 			}
+		for (auto& o : objects)
+			if (o.type == ObjType::Prop && !o.Value("model").empty() && o.Value("model")[0] != '*')
+			{
+				bool seen = false;
+				for (size_t i = 0; i < assets.size(); i++) seen = seen || assets[i].asString() == "model:" + o.Value("model");
+				if (!seen) assets.push("model:" + o.Value("model"));
+			}
 		p.set("requires", assets);
 		const std::string dir = ProjectDir(name);
 		if (!host_->WriteFile(dir + "/project.json", p.dump()) || !host_->WriteFile(dir + "/scenes/scene_01.json", ToJson().dump()))
@@ -1382,7 +1505,7 @@ namespace cs
 			o.id = j.get("id").asInt(nextId_);
 			if (Find(o.id)) o.id = nextId_;
 			const std::string ty = j.get("type").asString();
-			o.type = ty == "camera" ? ObjType::Camera : (ty == "events" ? ObjType::Events : ObjType::Actor);
+			o.type = ty == "camera" ? ObjType::Camera : (ty == "events" ? ObjType::Events : (ty == "prop" ? ObjType::Prop : ObjType::Actor));
 			o.name = j.get("name").asString(NewName(ObjTypeName(o.type)));
 			ReadVec(j.get("origin"), o.origin);
 			ReadVec(j.get("angles"), o.angles);
@@ -1397,6 +1520,19 @@ namespace cs
 				o.cuts.erase(std::unique(o.cuts.begin(), o.cuts.end()), o.cuts.end());
 				o.lookAt = j.get("lookAt").asInt(0);
 				o.shake = static_cast<float>(j.get("shake").asNumber(0));
+			}
+			else if (o.type == ObjType::Prop)
+			{
+				o.classname = j.get("classname").asString();
+				const Json& kv = j.get("keys_kv");
+				for (auto& k : kv.keys()) o.kv.emplace_back(k, kv.get(k).asString());
+				KeysFromJson(j.get("keys"), o.keys);
+				o.attachTo = j.get("attachTo").asInt(0);
+				o.bolt = j.get("bolt").asString();
+				ReadVec(j.get("attachOffset"), o.attachOffset);
+				ReadVec(j.get("attachAngles"), o.attachAngles);
+				if (o.classname.empty()) { warnings.push_back(o.name + ": prop without a class"); continue; }
+				if (!Spawn(o)) warnings.push_back(o.name + ": '" + o.classname + "' didn't spawn (missing model / pk3?)");
 			}
 			else if (o.type == ObjType::Events)
 			{
