@@ -72,7 +72,12 @@ namespace cs
 	void SetHidden(int ent, bool hide);			// not drawn, not solid (an actor being re-recorded)
 	void SetGhost(int ent, float alpha);		// drawn see-through (1 = solid)
 	void SetSabers(int ent, int takeFlags);		// TAKE_SABER1/2 on or off
-	bool SamplePlayer(Take& take, TakeSample& out);	// the player's state now (adds animation names to the take)
+	bool SampleEntity(int ent, Take& take, TakeSample& out);	// a character's state now (adds animation names to the take)
+	bool CharacterAlive(int ent);
+	void SetTakeBody(int ent, const float origin[3], const float velocity[3], float yaw, float pitch);
+	bool PlayAnimAt(int ent, int anim, int parts, float frame, float speed, bool loop, int blendMs);	// speed = engine speed
+	bool LiveFrame(int ent, int parts, int anim, float& rel);
+	void SetSolid(int ent, bool solid);			// a prop your saber can hit (still can't be hurt)
 }
 
 // called from the cgame

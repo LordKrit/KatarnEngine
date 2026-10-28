@@ -317,7 +317,8 @@ namespace cs
 
 	bool TakeSample::operator==(const TakeSample& o) const
 	{
-		return tUs == o.tUs && origin[0] == o.origin[0] && origin[1] == o.origin[1] && origin[2] == o.origin[2] &&
+		for (int i = 0; i < 3; i++) if (origin[i] != o.origin[i] || velocity[i] != o.velocity[i]) return false;
+		return tUs == o.tUs && legsSpeed == o.legsSpeed && torsoSpeed == o.torsoSpeed &&
 			yaw == o.yaw && pitch == o.pitch && legs == o.legs && torso == o.torso && legsFrame == o.legsFrame &&
 			torsoFrame == o.torsoFrame && flags == o.flags && weapon == o.weapon;
 	}
@@ -325,15 +326,22 @@ namespace cs
 	bool Take::operator==(const Take& o) const
 	{
 		return id == o.id && name == o.name && startUs == o.startUs && profile == o.profile && performer == o.performer &&
-			anims == o.anims && samples == o.samples;
+			Anims() == o.Anims() && Samples() == o.Samples();
+	}
+
+	TakeData& Take::Edit()
+	{
+		if (data.use_count() > 1) data = std::make_shared<TakeData>(*data);
+		return *data;
 	}
 
 	int Take::AnimIndex(const std::string& n)
 	{
 		if (n.empty()) return -1;
-		for (size_t i = 0; i < anims.size(); i++) if (anims[i] == n) return static_cast<int>(i);
-		anims.push_back(n);
-		return static_cast<int>(anims.size()) - 1;
+		const auto& an = data->anims;
+		for (size_t i = 0; i < an.size(); i++) if (an[i] == n) return static_cast<int>(i);
+		Edit().anims.push_back(n);
+		return static_cast<int>(data->anims.size()) - 1;
 	}
 
 	static float LerpAngle(const float a, const float b, const float f)
@@ -346,6 +354,7 @@ namespace cs
 
 	bool Take::Evaluate(int64_t t, TakeSample& out) const
 	{
+		const auto& samples = data->samples;
 		if (samples.empty()) return false;
 		if (t <= samples.front().tUs) { out = samples.front(); out.tUs = t; return true; }
 		if (t >= samples.back().tUs) { out = samples.back(); out.tUs = t; return true; }
@@ -356,7 +365,11 @@ namespace cs
 		const float f = b.tUs > a.tUs ? static_cast<float>(static_cast<double>(t - a.tUs) / static_cast<double>(b.tUs - a.tUs)) : 0.0f;
 		out = a;
 		out.tUs = t;
-		for (int i = 0; i < 3; i++) out.origin[i] = a.origin[i] + (b.origin[i] - a.origin[i]) * f;
+		for (int i = 0; i < 3; i++)
+		{
+			out.origin[i] = a.origin[i] + (b.origin[i] - a.origin[i]) * f;
+			out.velocity[i] = a.velocity[i] + (b.velocity[i] - a.velocity[i]) * f;
+		}
 		out.yaw = LerpAngle(a.yaw, b.yaw, f);
 		out.pitch = LerpAngle(a.pitch, b.pitch, f);
 		// the same animation playing forward: in between frames; a new animation or a loop: the earlier sample's
@@ -403,7 +416,7 @@ namespace cs
 	int Scene::AddTake(const int id, Take take, const bool makeActive)
 	{
 		const Object* o = Find(id);
-		if (!o || o->type != ObjType::Actor || take.samples.size() < 2) return 0;
+		if (!o || o->type != ObjType::Actor || take.Samples().size() < 2) return 0;
 		Object after = *o;
 		int top = 0;
 		for (auto& t : after.takes) top = std::max(top, t.id);
@@ -640,6 +653,16 @@ namespace cs
 		return true;
 	}
 
+	bool Scene::Respawn(const int id)
+	{
+		Object* o = Find(id);
+		if (!o || o->type != ObjType::Actor) return false;
+		if (o->entNum >= 0 && !o->adopted) host_->RemoveActor(o->entNum);
+		o->entNum = -1;
+		o->adopted = false;
+		return Spawn(*o);
+	}
+
 	void Scene::Clear()
 	{
 		for (auto& o : objects)
@@ -757,18 +780,19 @@ namespace cs
 					k.set("profile", t.profile);
 					k.set("performer", t.performer);
 					Json an = Json::MakeArray();
-					for (auto& a : t.anims) an.push(a);
+					for (auto& a : t.Anims()) an.push(a);
 					k.set("anims", an);
-					// samples flattened, kTakeFields numbers each (see TakeFields below)
+					// samples flattened, kTakeFields numbers each, in the order of sampleFields
 					Json sm = Json::MakeArray();
-					for (auto& x : t.samples)
+					for (auto& x : t.Samples())
 					{
-						const double v[] = { static_cast<double>(x.tUs), x.origin[0], x.origin[1], x.origin[2], x.yaw, x.pitch,
-							static_cast<double>(x.legs), x.legsFrame, static_cast<double>(x.torso), x.torsoFrame,
+						const double v[kTakeFields] = { static_cast<double>(x.tUs), x.origin[0], x.origin[1], x.origin[2],
+							x.velocity[0], x.velocity[1], x.velocity[2], x.yaw, x.pitch,
+							static_cast<double>(x.legs), x.legsFrame, x.legsSpeed, static_cast<double>(x.torso), x.torsoFrame, x.torsoSpeed,
 							static_cast<double>(x.flags), static_cast<double>(x.weapon) };
 						for (const double d : v) sm.push(Json(d));
 					}
-					k.set("sampleFields", "tUs x y z yaw pitch legs legsFrame torso torsoFrame flags weapon");
+					k.set("sampleFields", "tUs x y z vx vy vz yaw pitch legs legsFrame legsSpeed torso torsoFrame torsoSpeed flags weapon");
 					k.set("samples", sm);
 					takes.push(k);
 				}
@@ -902,31 +926,45 @@ namespace cs
 					t.profile = tj.get("profile").asString();
 					t.performer = tj.get("performer").asString();
 					const Json& an = tj.get("anims");
-					for (size_t a = 0; a < an.size(); a++) t.anims.push_back(an[a].asString());
+					for (size_t q = 0; q < an.size(); q++) t.AnimIndex(an[q].asString());
 					const Json& sm = tj.get("samples");
-					constexpr size_t kF = 12;
-					const int na = static_cast<int>(t.anims.size());
+					// 12 fields: the first Phase 3 build (no velocity or speeds)
+					const bool old12 = tj.get("sampleFields").asString() == "tUs x y z yaw pitch legs legsFrame torso torsoFrame flags weapon";
+					const size_t kF = old12 ? 12 : kTakeFields;
+					const int na = static_cast<int>(t.Anims().size());
+					auto& out = t.Edit().samples;
 					for (size_t b = 0; b + kF <= sm.size(); b += kF)
 					{
 						TakeSample x;
+						const auto n = [&](const size_t i) { return static_cast<float>(sm[b + i].asNumber()); };
 						x.tUs = static_cast<int64_t>(sm[b].asNumber());
-						for (int i = 0; i < 3; i++) x.origin[i] = static_cast<float>(sm[b + 1 + i].asNumber());
-						x.yaw = static_cast<float>(sm[b + 4].asNumber());
-						x.pitch = static_cast<float>(sm[b + 5].asNumber());
-						x.legs = sm[b + 6].asInt(-1);
-						x.legsFrame = static_cast<float>(sm[b + 7].asNumber());
-						x.torso = sm[b + 8].asInt(-1);
-						x.torsoFrame = static_cast<float>(sm[b + 9].asNumber());
-						x.flags = sm[b + 10].asInt(0);
-						x.weapon = sm[b + 11].asInt(0);
+						for (int i = 0; i < 3; i++) x.origin[i] = n(1 + i);
+						size_t i = 4;
+						if (!old12) { for (int v = 0; v < 3; v++) x.velocity[v] = n(i++); }
+						x.yaw = n(i++);
+						x.pitch = n(i++);
+						x.legs = sm[b + i++].asInt(-1);
+						x.legsFrame = n(i++);
+						if (!old12) x.legsSpeed = n(i++);
+						x.torso = sm[b + i++].asInt(-1);
+						x.torsoFrame = n(i++);
+						if (!old12) x.torsoSpeed = n(i++);
+						x.flags = sm[b + i++].asInt(0);
+						x.weapon = sm[b + i++].asInt(0);
 						if (x.legs >= na) x.legs = -1;
 						if (x.torso >= na) x.torso = -1;
-						if (!t.samples.empty() && x.tUs < t.samples.back().tUs) continue;	// keep them sorted
-						t.samples.push_back(x);
+						if (!out.empty() && x.tUs < out.back().tUs) continue;	// keep them sorted
+						out.push_back(x);
 					}
+					if (old12)	// estimate the velocity from the positions
+						for (size_t q = 0; q + 1 < out.size(); q++)
+						{
+							const double dt = static_cast<double>(out[q + 1].tUs - out[q].tUs) / 1e6;
+							for (int v = 0; v < 3 && dt > 0; v++) out[q].velocity[v] = static_cast<float>((out[q + 1].origin[v] - out[q].origin[v]) / dt);
+						}
 					bool dup = false;
 					for (auto& u : o.takes) dup = dup || u.id == t.id;
-					if (t.samples.size() >= 2 && !dup) o.takes.push_back(t);
+					if (t.Samples().size() >= 2 && !dup) o.takes.push_back(t);
 					else warnings.push_back(o.name + ": take '" + t.name + "' is empty or damaged, skipped");
 				}
 				o.activeTake = j.get("activeTake").asInt(0);

@@ -558,47 +558,133 @@ namespace cs
 
 	namespace
 	{
-		// relative frame of the animation a bone is playing
-		float BoneFrame(gentity_t* e, const int bone, const int anim)
+		// what a bone is playing: the animation's relative frame, the engine speed and whether it loops
+		bool BoneState(gentity_t* e, const int bone, const int anim, float& rel, float& speed, bool& loop)
 		{
+			rel = 0; speed = 1; loop = false;
 			const animFileSet_t* set = Set(e);
-			if (!set || bone == -1 || anim < 0 || anim >= MAX_ANIMATIONS) return 0;
+			if (!set || bone == -1 || anim < 0 || anim >= MAX_ANIMATIONS) return false;
 			const animation_t& a = set->animations[anim];
 			float cur = 0, sp = 0;
 			int sf = 0, ef = 0, fl = 0, ml = 0;
-			if (!gi.G2API_GetBoneAnimIndex(&e->ghoul2[e->playerModel], bone, AnimTime(), &cur, &sf, &ef, &fl, &sp, &ml)) return 0;
-			const float rel = cur - static_cast<float>(a.firstFrame);
-			return std::max(0.0f, std::min(rel, static_cast<float>(std::max(0, a.numFrames - 1))));
+			if (!gi.G2API_GetBoneAnimIndex(&e->ghoul2[e->playerModel], bone, AnimTime(), &cur, &sf, &ef, &fl, &sp, &ml)) return false;
+			rel = std::max(0.0f, std::min(cur - static_cast<float>(a.firstFrame), static_cast<float>(std::max(0, a.numFrames - 1))));
+			speed = sp;
+			loop = (fl & BONE_ANIM_OVERRIDE_LOOP) != 0;
+			return true;
 		}
 	}
 
-	bool SamplePlayer(Take& take, TakeSample& out)
+	bool SampleEntity(const int ent, Take& take, TakeSample& out)
 	{
-		gentity_t* e = Actor(0);
+		gentity_t* e = Actor(ent);
 		if (!e) return false;
 		const playerState_t& ps = e->client->ps;
-		VectorCopy(ps.origin, out.origin);
+		VectorCopy(ent == 0 ? ps.origin : e->currentOrigin, out.origin);
+		VectorCopy(ps.velocity, out.velocity);
 		out.yaw = ps.viewangles[YAW];
 		out.pitch = ps.viewangles[PITCH];
 		const auto name = [](const int a) { return (a >= 0 && a < MAX_ANIMATIONS && animTable[a].name) ? std::string(animTable[a].name) : std::string(); };
 		out.legs = take.AnimIndex(name(ps.legsAnim));
 		out.torso = take.AnimIndex(name(ps.torsoAnim));
-		out.legsFrame = BoneFrame(e, e->rootBone, ps.legsAnim);
-		out.torsoFrame = BoneFrame(e, e->lowerLumbarBone, ps.torsoAnim);
-		out.flags = 0;
+		bool ll = false, tl = false;
+		BoneState(e, e->rootBone, ps.legsAnim, out.legsFrame, out.legsSpeed, ll);
+		BoneState(e, e->lowerLumbarBone, ps.torsoAnim, out.torsoFrame, out.torsoSpeed, tl);
+		out.flags = (ll ? TAKE_LEGS_LOOP : 0) | (tl ? TAKE_TORSO_LOOP : 0);
 		if (ps.weapon == WP_SABER)
 		{
 			if (ps.saber[0].Active()) out.flags |= TAKE_SABER1;
 			if (ps.dualSabers && ps.saber[1].Active()) out.flags |= TAKE_SABER2;
 		}
 		out.weapon = ps.weapon;
-		if (take.samples.empty())
+		if (take.Samples().empty())
 		{
 			const animFileSet_t* set = Set(e);
 			take.profile = set ? set->filename : "";
 			take.performer = e->NPC_type && e->NPC_type[0] ? e->NPC_type : "player";
 		}
 		return true;
+	}
+
+	bool CharacterAlive(const int ent)
+	{
+		const gentity_t* e = Actor(ent);
+		return e && e->health > 0;
+	}
+
+	// a performer's body: where it is, how it's moving (the legs turn and swing from the velocity), where it looks
+	void SetTakeBody(const int ent, const float origin[3], const float velocity[3], const float yaw, const float pitch)
+	{
+		gentity_t* e = Actor(ent);
+		if (!e || ent == 0) return;
+		vec3_t o = { origin[0], origin[1], origin[2] };
+		vec3_t a = { pitch, yaw, 0 };
+		G_SetOrigin(e, o);
+		VectorCopy(o, e->client->ps.origin);
+		VectorCopy(velocity, e->client->ps.velocity);
+		SetClientViewAngle(e, a);
+		if (e->NPC)
+		{
+			e->NPC->desiredYaw = e->NPC->lockedDesiredYaw = yaw;
+			e->NPC->desiredPitch = pitch;
+		}
+		gi.linkentity(e);
+	}
+
+	// play an animation on the legs or torso at the engine speed it was recorded with
+	bool PlayAnimAt(const int ent, const int anim, const int parts, const float frame, const float speed, const bool loop, const int blendMs)
+	{
+		gentity_t* e = Actor(ent);
+		int first, num, lerp, gla; bool loops;
+		if (!e || !Resolve(e, anim, first, num, lerp, loops, gla)) return false;
+		const int s0 = first, s1 = first + num;
+		int flags = loop ? BONE_ANIM_OVERRIDE_LOOP : BONE_ANIM_OVERRIDE_FREEZE;
+		if (blendMs > 0) flags |= BONE_ANIM_BLEND;
+		const float setFrame = std::max(static_cast<float>(s0), std::min(static_cast<float>(s1) - 0.001f, first + frame));
+		const int t = AnimTime();
+		CGhoul2Info* g = &e->ghoul2[e->playerModel];
+		gi.G2API_SetAnimIndex(g, gla + CS_GlaOffset(e));
+		const bool extra = anim >= MAX_ANIMATIONS;
+		if ((parts & PARTS_TORSO) && e->lowerLumbarBone != -1)
+		{
+			gi.G2API_SetBoneAnimIndex(g, e->lowerLumbarBone, s0, s1, flags, speed, t, setFrame, blendMs);
+			if (e->motionBone != -1) gi.G2API_SetBoneAnimIndex(g, e->motionBone, s0, s1, flags, speed, t, setFrame, blendMs);
+			if (!extra) e->client->ps.torsoAnim = anim;
+			e->client->ps.torsoAnimTimer = 100000000;
+		}
+		if ((parts & PARTS_LEGS) && e->rootBone != -1)
+		{
+			gi.G2API_SetBoneAnimIndex(g, e->rootBone, s0, s1, flags, speed, t, setFrame, blendMs);
+			if (!extra) e->client->ps.legsAnim = anim;
+			e->client->ps.legsAnimTimer = 100000000;
+			g_csExtraCur[e->s.number] = extra ? anim : 0;
+		}
+		return true;
+	}
+
+	// the frame the engine is showing on the legs or torso, relative to `anim` (false if it plays something else)
+	bool LiveFrame(const int ent, const int parts, const int anim, float& rel)
+	{
+		gentity_t* e = Actor(ent);
+		int first, num, lerp, gla; bool loops;
+		if (!e || !Resolve(e, anim, first, num, lerp, loops, gla)) return false;
+		const int bone = parts == PARTS_TORSO ? e->lowerLumbarBone : e->rootBone;
+		if (bone == -1) return false;
+		float cur = 0, sp = 0;
+		int sf = 0, ef = 0, fl = 0, ml = 0;
+		if (!gi.G2API_GetBoneAnimIndex(&e->ghoul2[e->playerModel], bone, AnimTime(), &cur, &sf, &ef, &fl, &sp, &ml)) return false;
+		if (sf != first || ef != first + num) return false;
+		rel = cur - static_cast<float>(first);
+		return true;
+	}
+
+	// a prop that can be hit (your saber lands on it) but still can't be hurt, pushed or moved by the game
+	void SetSolid(const int ent, const bool solid)
+	{
+		gentity_t* e = Actor(ent);
+		if (!e || ent == 0 || !e->client->noclip) return;
+		e->contents = solid ? CONTENTS_BODY : 0;
+		gi.linkentity(e);
 	}
 
 	bool GameHost::SetActorProfile(const int ent, const std::string& profile, std::string& why, const bool force)

@@ -290,7 +290,7 @@ static Take MakeTake()
 	Take t;
 	t.performer = "player";
 	const int stand = t.AnimIndex("BOTH_STAND1"), walk = t.AnimIndex("BOTH_WALK1");
-	CHECK(t.AnimIndex("BOTH_STAND1") == stand && t.anims.size() == 2);
+	CHECK(t.AnimIndex("BOTH_STAND1") == stand && t.Anims().size() == 2);
 	for (int i = 0; i <= 10; i++)
 	{
 		TakeSample x;
@@ -302,7 +302,10 @@ static Take MakeTake()
 		x.torso = stand;
 		x.torsoFrame = static_cast<float>(i == 8 ? 0 : i);	// loops back at 8
 		x.flags = i >= 3 ? TAKE_SABER1 : 0;
-		t.samples.push_back(x);
+		x.velocity[0] = 100;
+		x.velocity[1] = static_cast<float>(i * 10);
+		x.legsSpeed = 0.5f;
+		t.Add(x);
 	}
 	return t;
 }
@@ -323,8 +326,14 @@ static void TestPhase3()
 	CHECK(t.Evaluate(550'000, x) && x.legs == 0 && std::fabs(x.legsFrame - 10) < 1e-4);	// new animation next: hold
 	CHECK(t.Evaluate(750'000, x) && std::fabs(x.torsoFrame - 7) < 1e-4);					// looping back: hold
 	CHECK(t.Evaluate(350'000, x) && x.flags == TAKE_SABER1);
+	CHECK(t.Evaluate(150'000, x) && std::fabs(x.velocity[1] - 15) < 1e-4 && x.velocity[0] == 100 && x.legsSpeed == 0.5f);
 	Take empty;
 	CHECK(!empty.Evaluate(0, x));
+	// copies share the recorded data until one is changed
+	Take c1 = t;
+	CHECK(&c1.Samples() == &t.Samples());
+	c1.Add(TakeSample());
+	CHECK(&c1.Samples() != &t.Samples() && t.Samples().size() == 11 && c1.Samples().size() == 12);
 
 	// prop mode
 	const int v = s.AddActor("md_vader", o, a);
@@ -339,7 +348,7 @@ static void TestPhase3()
 	const int t1 = s.AddTake(v, t, true);
 	CHECK(t1 == 1 && s.Find(v)->activeTake == 1 && s.Find(v)->prop && h.ents[ent].prop && s.selectedTake == 1);
 	CHECK(s.Find(v)->takes[0].name == "Take 1");
-	Take tooShort; tooShort.samples.resize(1);
+	Take tooShort; tooShort.Add(TakeSample());
 	CHECK(!s.AddTake(v, tooShort, true));
 	const int t2 = s.AddTake(v, t, false);
 	CHECK(t2 == 2 && s.Find(v)->activeTake == 1);
@@ -380,6 +389,27 @@ static void TestPhase3()
 	Scene e(&h);
 	warn.clear();
 	CHECK(e.Load("P3", false, false, warn));
+
+	// a take saved by the first Phase 3 build (12 numbers per sample, no velocity) still loads
+	std::string sj = h.files["CinematicStudio/Projects/P3/scenes/scene_01.json"];
+	const std::string oldTake = "{\"id\": 7, \"name\": \"Old\", \"startUs\": 0, \"anims\": [\"BOTH_STAND1\"], "
+		"\"sampleFields\": \"tUs x y z yaw pitch legs legsFrame torso torsoFrame flags weapon\", "
+		"\"samples\": [0, 0, 0, 0, 90, 0, 0, 1, 0, 1, 1, 2,  500000, 50, 0, 0, 90, 0, 0, 3, 0, 3, 1, 2]}";
+	const size_t tk = sj.find("\"takes\": [");
+	CHECK(tk != std::string::npos);
+	sj.insert(tk + 10, oldTake + ",");
+	h.files["CinematicStudio/Projects/P3/scenes/scene_01.json"] = sj;
+	Scene f(&h);
+	warn.clear();
+	CHECK(f.Load("P3", true, false, warn));
+	Object* fo = f.Find(v);
+	const Take* old = fo ? Scene::FindTake(*fo, 7) : nullptr;
+	CHECK(old && old->Samples().size() == 2 && old->Samples()[1].legsFrame == 3 && old->Samples()[1].flags == 1 && old->Samples()[1].weapon == 2);
+	CHECK(old && std::fabs(old->Samples()[0].velocity[0] - 100) < 1e-3 && old->Samples()[0].yaw == 90);	// estimated from positions
+
+	// respawn (an actor that died in a recorded fight)
+	const int was = fo->entNum;
+	CHECK(f.Respawn(v) && fo->entNum >= 0 && fo->entNum != was && !h.ents.count(was) && h.ents[fo->entNum].prop);
 }
 
 int main()

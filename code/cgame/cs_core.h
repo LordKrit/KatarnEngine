@@ -8,6 +8,7 @@ builds and is unit-tested outside the engine (tests/cinematic_studio).
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -44,20 +45,31 @@ namespace cs
 	const char* ObjTypeName(ObjType t);
 
 	// ---- Phase 3: recorded performances ----
-	// One sample of a performer: where it was, where it looked, and the exact frame of the legs and
-	// torso animations (named through Take::anims, so a take plays on any skeleton that has them).
+	// One sample of a performer: where it was, how it moved and looked, and the exact frame and speed of
+	// the legs and torso animations (named through the take's anims, so a take plays on any skeleton
+	// that has them).
 	struct TakeSample
 	{
 		int64_t tUs = 0;			// time into the take
 		float origin[3] = { 0, 0, 0 };
+		float velocity[3] = { 0, 0, 0 };	// the game turns and swings the legs from this
 		float yaw = 0, pitch = 0;	// view angles
-		int legs = -1, torso = -1;	// index into Take::anims (-1 = none)
+		int legs = -1, torso = -1;	// index into the take's anims (-1 = none)
 		float legsFrame = 0, torsoFrame = 0;	// relative frames
-		int flags = 0;				// TAKE_SABER1 | TAKE_SABER2
+		float legsSpeed = 1, torsoSpeed = 1;	// the engine's playback speed of each (frames per 50 ms)
+		int flags = 0;				// TakeFlags
 		int weapon = 0;
 		bool operator==(const TakeSample& o) const;
 	};
-	enum TakeFlags { TAKE_SABER1 = 1, TAKE_SABER2 = 2 };
+	enum TakeFlags { TAKE_SABER1 = 1, TAKE_SABER2 = 2, TAKE_LEGS_LOOP = 4, TAKE_TORSO_LOOP = 8 };
+	constexpr int kTakeFields = 17;	// numbers per sample in a project file (12 in the first Phase 3 build)
+
+	// the recorded data; shared between copies of a take (undo snapshots copy takes a lot)
+	struct TakeData
+	{
+		std::vector<std::string> anims;
+		std::vector<TakeSample> samples;	// sorted by tUs, first at 0
+	};
 
 	struct Take
 	{
@@ -66,15 +78,19 @@ namespace cs
 		int64_t startUs = 0;		// scene time the take starts
 		std::string profile;		// animation set the performer had (for information)
 		std::string performer;		// NPC type / "player"
-		std::vector<std::string> anims;
-		std::vector<TakeSample> samples;	// sorted by tUs, first at 0
 
-		int64_t LengthUs() const { return samples.empty() ? 0 : samples.back().tUs; }
+		const std::vector<TakeSample>& Samples() const { return data->samples; }
+		const std::vector<std::string>& Anims() const { return data->anims; }
+		TakeData& Edit();				// the data, copied first if another take shares it
+		void Add(const TakeSample& s) { Edit().samples.push_back(s); }
+		int64_t LengthUs() const { return data->samples.empty() ? 0 : data->samples.back().tUs; }
 		int AnimIndex(const std::string& name);	// adds it if new
-		// the performance at a time into the take (clamped to the take): positions and angles are
+		// the performance at a time into the take (clamped to the take): positions, velocity and angles are
 		// interpolated; an animation frame is interpolated while the same animation keeps playing forward
 		bool Evaluate(int64_t localUs, TakeSample& out) const;
 		bool operator==(const Take& o) const;
+	private:
+		std::shared_ptr<TakeData> data = std::make_shared<TakeData>();
 	};
 
 	struct Object
@@ -207,6 +223,7 @@ namespace cs
 		// The clip that drives an actor at scene time t: the latest one that started at or before t.
 		// local = time into the clip; holding = past the end of a non-looping clip (show its last frame).
 		static const AnimClip* ActiveClip(const Object& o, int64_t t, int64_t& localUs, bool& holding);
+		bool Respawn(int id);		// spawns the actor again (e.g. it died in a recorded fight); not undoable
 		void Clear();				// empties the scene (removes spawned actors), not undoable
 		void Forget();				// empties the scene without touching the world (the level is gone)
 

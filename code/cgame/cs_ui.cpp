@@ -19,6 +19,7 @@ Layout in the 640x480 virtual screen:
 #include <cstdarg>
 #include <cstdio>
 #include <deque>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -189,9 +190,15 @@ namespace
 		int recCountdownEnd = 0;	// ms
 		int64_t recPunchUs = 0;		// scene time the take starts
 		int64_t recLastUs = -1;
+		struct Performer { int ent = -1; int objId = 0; std::string npcType; Take take; bool gone = false; };
+		std::vector<Performer> recPerf;	// [0] = the player
+		int recNpcs = 2;			// also record NPCs: 0 no, 1 scene actors with AI on, 2 every NPC nearby with AI
+		bool recSolidTakes = true;	// earlier takes can be hit while recording over them
+		std::vector<int> solidEnts;
+		int takeBlendMs = 100;		// blend into each new animation of a take during playback
+		std::map<int, std::pair<int, int>> liveAnims;	// per entity: legs, torso animation the engine is playing for a take
 		double recOldSpeed = 1.0;
 		bool recOldLoop = false;
-		Take recTake;
 		int recCountdownSec = 3;
 		bool recGhostOthers = true;	// show the other takes see-through while recording
 		std::vector<int> hiddenEnts;	// hidden while recording
@@ -660,6 +667,7 @@ namespace
 				y += kRow;
 			}
 			if (o->takes.empty()) { Text(x, y, "RECORD TAKE: perform it yourself", kDim); y += kRow; }
+			else if (!o->prop) { Text(x, y, "PROP OFF: the game drives it (AI ON to fight)", kDim, 0.36f); y += kRow; }
 			y += 2;
 			Text(x, y, "drag in view: move  CTRL+drag: turn", kDim); y += kRow;
 			Text(x, y, "arrows/PgUp/PgDn, Q/E (SHIFT/CTRL)", kDim);
@@ -717,6 +725,7 @@ namespace
 		Studio& s = S();
 		for (const int e : s.heldEnts) ReleaseAnim(e);
 		s.heldEnts.clear();
+		s.liveAnims.clear();
 		s.previewEnt = -1;
 	}
 
@@ -802,26 +811,60 @@ namespace
 	{
 		Studio& s = S();
 		for (size_t i = 0; i < s.heldEnts.size(); i++)
-			if (s.heldEnts[i] == ent) { ReleaseAnim(ent); s.heldEnts.erase(s.heldEnts.begin() + static_cast<long>(i)); return; }
+			if (s.heldEnts[i] == ent) { ReleaseAnim(ent); s.heldEnts.erase(s.heldEnts.begin() + static_cast<long>(i)); s.liveAnims.erase(ent); return; }
 	}
 
-	// a take drives its actor: position, facing, legs and torso frames, sabers
+	// a take drives its actor: position, motion, facing and aim, legs and torso animations, sabers.
+	// While the scene plays, the engine plays (and blends) the recorded animations at their recorded
+	// speed and the studio only corrects it when it drifts, so attacks flow like they did in the game.
+	// Paused or scrubbing, every frame is posed exactly.
 	void DriveTake(const Object& o, const Take& tk, const int64_t t)
 	{
 		Studio& s = S();
 		TakeSample x;
 		if (!tk.Evaluate(t - tk.startUs, x)) return;
-		const float ang[3] = { 0, x.yaw, 0 };
-		s.host.SetActorTransform(o.entNum, x.origin, ang);
-		const auto pose = [&](const int idx, const float frame, const int parts)
+		SetTakeBody(o.entNum, x.origin, x.velocity, x.yaw, x.pitch);
+		const Clock& c = s.scene.clock;
+		const bool live = c.playing && c.speed > 0 && !s.scrubbing;
+		auto& state = s.liveAnims[o.entNum];
+		const auto drive = [&](const int idx, const float frame, const float speed, const bool loop, const int parts)
 		{
-			if (idx < 0 || idx >= static_cast<int>(tk.anims.size())) return;
+			int& cur = parts == PARTS_TORSO ? state.second : state.first;
+			if (idx < 0 || idx >= static_cast<int>(tk.Anims().size())) return;
 			AnimInfo ai;
-			if (!AnimInfoFor(o.entNum, AnimByName(tk.anims[static_cast<size_t>(idx)]), ai)) return;	// skeleton lacks it
-			PoseAnim(o.entNum, ai.anim, parts, std::min(frame, static_cast<float>(ai.numFrames - 1)), 0.0f, false, 0, -1, 0);
+			if (!AnimInfoFor(o.entNum, AnimByName(tk.Anims()[static_cast<size_t>(idx)]), ai)) return;	// skeleton lacks it
+			const float f = std::min(frame, static_cast<float>(ai.numFrames - 1));
+			if (!live)
+			{
+				PlayAnimAt(o.entNum, ai.anim, parts, f, 0.0f, false, 0);
+				cur = -1;
+				if (parts == PARTS_BOTH) state.first = state.second = -1;
+				return;
+			}
+			const float sp = speed * static_cast<float>(c.speed);
+			float rel = 0;
+			const bool same = cur == ai.anim && LiveFrame(o.entNum, parts == PARTS_BOTH ? PARTS_LEGS : parts, ai.anim, rel);
+			if (!same)
+			{
+				PlayAnimAt(o.entNum, ai.anim, parts, f, sp, loop, s.takeBlendMs);	// a new animation: blend into it
+			}
+			else
+			{
+				float d = fabsf(rel - f);
+				if (loop) d = std::min(d, fabsf(static_cast<float>(ai.numFrames) - d));	// across the loop point
+				if (d > 2.5f) PlayAnimAt(o.entNum, ai.anim, parts, f, sp, loop, 0);	// drifted: put it back
+				else return;
+			}
+			cur = ai.anim;
+			if (parts == PARTS_BOTH) state.first = state.second = ai.anim;
 		};
-		if (x.legs == x.torso && fabsf(x.legsFrame - x.torsoFrame) < 0.01f) pose(x.legs, x.legsFrame, PARTS_BOTH);
-		else { pose(x.legs, x.legsFrame, PARTS_LEGS); pose(x.torso, x.torsoFrame, PARTS_TORSO); }
+		if (x.legs == x.torso && fabsf(x.legsFrame - x.torsoFrame) < 0.01f)
+			drive(x.legs, x.legsFrame, x.legsSpeed, (x.flags & TAKE_LEGS_LOOP) != 0, PARTS_BOTH);
+		else
+		{
+			drive(x.legs, x.legsFrame, x.legsSpeed, (x.flags & TAKE_LEGS_LOOP) != 0, PARTS_LEGS);
+			drive(x.torso, x.torsoFrame, x.torsoSpeed, (x.flags & TAKE_TORSO_LOOP) != 0, PARTS_TORSO);
+		}
 		SetSabers(o.entNum, x.flags);
 		Hold(o.entNum);
 	}
@@ -1069,7 +1112,7 @@ namespace
 		if (Button(x + w - 14, y, 12, 9, "+")) { s.scene.SetTakeStart(id, tid, t->startUs + step, true); return true; }
 		y += kRow;
 		Label(x, y, "length", Fmt("%.2fs", static_cast<double>(t->LengthUs()) / 1e6), w); y += kRow;
-		Label(x, y, "samples", Fmt("%d  (%d animations)", static_cast<int>(t->samples.size()), static_cast<int>(t->anims.size())), w); y += kRow + 1;
+		Label(x, y, "samples", Fmt("%d  (%d animations)", static_cast<int>(t->Samples().size()), static_cast<int>(t->Anims().size())), w); y += kRow + 1;
 		const bool act = o->activeTake == tid;
 		if (Button(x, y, 50, 10, act ? "ACTIVE" : "USE", act)) { s.scene.SetActiveTake(id, act ? 0 : tid); return true; }
 		if (Button(x + 52, y, 50, 10, "RE-RECORD", false, s.rec == Studio::REC_IDLE))
@@ -1266,7 +1309,15 @@ namespace
 			y += 9;
 			if (Button(ix, y, 80, 10, Fmt("COUNTDOWN %ds", s.recCountdownSec))) s.recCountdownSec = (s.recCountdownSec + 1) % 6;
 			if (Button(ix + 82, y, kRightW - 94, 10, "GHOST OTHERS", s.recGhostOthers)) s.recGhostOthers = !s.recGhostOthers;
-			y += 15;
+			y += 12;
+			{
+				static const char* kNpcModes[] = { "RECORD NPCS: NO", "RECORD NPCS: SCENE AI", "RECORD NPCS: ALL NEARBY" };
+				if (Button(ix, y, 98, 10, kNpcModes[s.recNpcs], s.recNpcs > 0)) s.recNpcs = (s.recNpcs + 1) % 3;
+				if (Button(ix + 100, y, kRightW - 112, 10, "SOLID TAKES", s.recSolidTakes)) s.recSolidTakes = !s.recSolidTakes;
+				y += 12;
+				if (Button(ix, y, 98, 10, Fmt("TAKE BLEND %d ms", s.takeBlendMs))) s.takeBlendMs = s.takeBlendMs >= 200 ? 0 : s.takeBlendMs + 50;
+				y += 15;
+			}
 			Text(ix, y, "LEVEL CHARACTERS", kAccent); y += 12;
 			int ents[64];
 			const int n = ListCharacters(ents, 64);
@@ -1675,7 +1726,8 @@ namespace
 
 	void Open();
 
-	// record the player into a take for `target` (0 = a new actor), starting at the playhead
+	// Record the player into a take for `target` (0 = a new actor), starting at the playhead, and
+	// (recNpcs) every NPC fighting you, each into a take of its own.
 	void StartRecording(const int target)
 	{
 		Studio& s = S();
@@ -1688,15 +1740,49 @@ namespace
 		s.recTarget = target;
 		s.recPunchUs = c.timeUs;
 		s.recLastUs = -1;
-		s.recTake = Take();
 		s.recOldSpeed = c.speed;
 		s.recOldLoop = c.loop;
 		c.Pause();
+		s.recPerf.clear();
+		Studio::Performer me;
+		me.ent = 0;
+		me.objId = target;
+		s.recPerf.push_back(me);
 		if (o && o->entNum >= 0) { SetHidden(o->entNum, true); Unhold(o->entNum); s.hiddenEnts.push_back(o->entNum); }
+
+		// NPCs that fight: anything with AI on that isn't played back by a take
+		EntInfo pi;
+		EntityInfo(0, pi);
+		int ents[64];
+		const int n = s.recNpcs ? ListCharacters(ents, 64) : 0;
+		for (int i = 0; i < n; i++)
+		{
+			const int e = ents[i];
+			EntInfo info;
+			if (e == 0 || !EntityInfo(e, info) || !CharacterAlive(e) || !info.ai) continue;
+			const Object* so = s.scene.FindByEntity(e);
+			if (so && (so->prop || so->id == target)) continue;
+			if (!so && s.recNpcs < 2) continue;
+			const float dx = info.origin[0] - pi.origin[0], dy = info.origin[1] - pi.origin[1], dz = info.origin[2] - pi.origin[2];
+			if (!so && dx * dx + dy * dy + dz * dz > 2000.0f * 2000.0f) continue;	// level NPCs only nearby
+			Studio::Performer p;
+			p.ent = e;
+			p.objId = so ? so->id : 0;
+			p.npcType = info.npcType;
+			s.recPerf.push_back(p);
+		}
+		// earlier takes can be hit while you fight them
+		if (s.recSolidTakes)
+			for (auto& so : s.scene.objects)
+				if (so.type == ObjType::Actor && so.entNum >= 0 && so.prop && Scene::ActiveTake(so) && so.id != target)
+					SetSolid(so.entNum, true), s.solidEnts.push_back(so.entNum);
+
 		Close();			// the game gets the keyboard and mouse back; the scene keeps playing
 		s.rec = Studio::REC_COUNTDOWN;
 		s.recCountdownEnd = NowMs() + s.recCountdownSec * 1000;
-		s.host.Log(0, "Recording " + (o ? "a take for " + o->name : std::string("a new performer")) + " from " + c.Timecode() +
+		const int npcs = static_cast<int>(s.recPerf.size()) - 1;
+		s.host.Log(0, "Recording " + (o ? "a take for " + o->name : std::string("you")) +
+			(npcs ? " and " + std::to_string(npcs) + " NPC(s)" : std::string()) + " from " + c.Timecode() +
 			" in " + std::to_string(s.recCountdownSec) + " s. F10 stops.");
 	}
 
@@ -1704,12 +1790,67 @@ namespace
 	{
 		Studio& s = S();
 		const int64_t t = s.scene.clock.timeUs - s.recPunchUs;
-		TakeSample x;
-		if (t < 0 || !SamplePlayer(s.recTake, x)) return;
-		if (!s.recTake.samples.empty() && t <= s.recTake.samples.back().tUs) return;
-		x.tUs = s.recTake.samples.empty() ? 0 : t;		// a take starts at 0
-		s.recTake.samples.push_back(x);
+		if (t < 0) return;
+		for (auto& p : s.recPerf)
+		{
+			if (p.gone) continue;
+			TakeSample x;
+			if (!SampleEntity(p.ent, p.take, x)) { p.gone = !p.take.Samples().empty(); continue; }	// removed from the level
+			if (!p.take.Samples().empty() && t <= p.take.Samples().back().tUs) continue;
+			x.tUs = p.take.Samples().empty() ? 0 : t;		// a take starts at 0
+			p.take.Add(x);
+		}
 		s.recLastUs = t;
+	}
+
+	void EndRecordingState()
+	{
+		Studio& s = S();
+		Clock& c = s.scene.clock;
+		s.rec = Studio::REC_IDLE;
+		c.Pause();
+		c.speed = s.recOldSpeed;
+		c.loop = s.recOldLoop;
+		for (const int e : s.hiddenEnts) SetHidden(e, false);
+		for (const int e : s.solidEnts) SetSolid(e, false);
+		s.hiddenEnts.clear();
+		s.solidEnts.clear();
+		ClearGhosts();
+	}
+
+	// put one performer's take on its actor; returns the actor id
+	int KeepPerformance(Studio::Performer& p)
+	{
+		Studio& s = S();
+		Take& tk = p.take;
+		tk.startUs = s.recPunchUs;
+		const TakeSample& first = tk.Samples()[0];
+		const float ang[3] = { 0, first.yaw, 0 };
+		int id = p.objId && s.scene.Find(p.objId) ? p.objId : 0;
+		if (p.ent == 0)
+		{
+			// you: the chosen actor, or a new one of your NPC type where you started
+			if (!id)
+			{
+				const std::string type = tk.performer.empty() || tk.performer == "player" ? s.npcType : tk.performer;
+				id = s.scene.AddActor(type, first.origin, ang);
+				if (!id) { s.host.Log(2, "Couldn't spawn '" + type + "' for your take (set the NPC type in ACTORS)"); return 0; }
+			}
+		}
+		else if (id)
+		{
+			// a scene actor: if it died in the fight, a fresh one plays the take (death and all)
+			Object* o = s.scene.Find(id);
+			if (o->entNum < 0 || !CharacterAlive(o->entNum)) s.scene.Respawn(id);
+		}
+		else if (CharacterAlive(p.ent))
+			id = s.scene.AdoptActor(p.ent, p.npcType, "");		// a level NPC joins the scene
+		else
+		{
+			id = s.scene.AddActor(p.npcType, first.origin, ang);	// it died: a new one plays it
+			if (!id) { s.host.Log(1, "Couldn't spawn '" + p.npcType + "' for its take"); return 0; }
+		}
+		return s.scene.AddTake(id, tk, true) ? id : 0;
 	}
 
 	void StopRecording(const bool keep)
@@ -1719,45 +1860,40 @@ namespace
 		Clock& c = s.scene.clock;
 		const bool wasRecording = s.rec == Studio::REC_RECORDING;
 		if (wasRecording) SampleNow();
-		s.rec = Studio::REC_IDLE;
-		c.Pause();
-		c.speed = s.recOldSpeed;
-		c.loop = s.recOldLoop;
-		for (const int e : s.hiddenEnts) SetHidden(e, false);
-		s.hiddenEnts.clear();
-		ClearGhosts();
+		EndRecordingState();
 		Open();
-		Take tk = s.recTake;
-		s.recTake = Take();
-		if (!keep || !wasRecording || tk.samples.size() < 2)
+		std::vector<Studio::Performer> perf;
+		perf.swap(s.recPerf);
+		c.timeUs = s.recPunchUs;
+		if (!keep || !wasRecording || perf.empty() || perf[0].take.Samples().size() < 2)
 		{
-			c.timeUs = s.recPunchUs;
 			s.host.Log(1, keep ? "Nothing recorded (stopped before the countdown ended)" : "Recording discarded");
 			return;
 		}
-		tk.startUs = s.recPunchUs;
-		int id = s.recTarget;
-		if (!id || !s.scene.Find(id))
+		int64_t end = 0;
+		int kept = 0, mine = 0;
+		std::string names;
+		for (auto& p : perf)
 		{
-			// a new actor of the performer's type where the performance starts
-			const std::string type = tk.performer.empty() || tk.performer == "player" ? s.npcType : tk.performer;
-			const float ang[3] = { 0, tk.samples[0].yaw, 0 };
-			id = s.scene.AddActor(type, tk.samples[0].origin, ang);
-			if (!id) { s.host.Log(2, "Couldn't spawn '" + type + "' for the take (set the NPC type in ACTORS and record again)"); return; }
+			if (p.take.Samples().size() < 2) continue;
+			const int id = KeepPerformance(p);
+			if (!id) continue;
+			if (p.ent == 0) mine = id;
+			kept++;
+			end = std::max(end, s.recPunchUs + p.take.LengthUs());
+			if (const Object* o = s.scene.Find(id)) names += (names.empty() ? "" : ", ") + o->name;
 		}
-		const int takeId = s.scene.AddTake(id, tk, true);
-		s.scene.selected = id;
-		s.lastSel = id;
-		s.scene.selectedClip = -1;
-		s.scene.selectedTake = takeId;
-		const int64_t end = tk.startUs + tk.LengthUs();
 		if (end > c.lengthUs) c.lengthUs = (end + 999'999) / 1'000'000 * 1'000'000;
-		c.timeUs = s.recPunchUs;
+		if (mine)
+		{
+			Object* o = s.scene.Find(mine);
+			s.scene.selected = mine;
+			s.lastSel = mine;
+			s.scene.selectedClip = -1;
+			s.scene.selectedTake = o ? o->activeTake : 0;
+		}
 		s.tab = TAB_SCENE;
-		Object* o = s.scene.Find(id);
-		const Take* nt = o ? Scene::FindTake(*o, takeId) : nullptr;
-		s.host.Log(0, Fmt("%s: %s recorded (%.1f s, %d samples)", o ? o->name.c_str() : "?", nt ? nt->name.c_str() : "take",
-			static_cast<double>(tk.LengthUs()) / 1e6, static_cast<int>(tk.samples.size())));
+		s.host.Log(0, Fmt("%d take(s) recorded, %.1f s: %s", kept, static_cast<double>(perf[0].take.LengthUs()) / 1e6, names.c_str()));
 	}
 
 	// runs every frame from CS_Frame
@@ -1778,7 +1914,7 @@ namespace
 		if (c.timeUs > c.lengthUs - 500'000) c.lengthUs += 5'000'000;
 		if (!c.playing) c.Play();
 		const int64_t t = c.timeUs - s.recPunchUs;
-		if (s.recLastUs < 0 || t - s.recLastUs >= 1'000'000 / 30) SampleNow();	// 30 samples a second
+		if (s.recLastUs < 0 || t - s.recLastUs >= 1'000'000 / 30) SampleNow();	// 30 samples a second (playback blends between)
 	}
 
 	void DrawRecordingOverlay()
@@ -1874,6 +2010,9 @@ void CS_Init()
 	s.rec = Studio::REC_IDLE;	// a level change ends a recording (it's lost)
 	s.hiddenEnts.clear();
 	s.ghostEnts.clear();
+	s.solidEnts.clear();
+	s.recPerf.clear();
+	s.liveAnims.clear();
 	s.levelSel = -1;
 	PlayerView();
 	cgi_Cvar_Set("cs_active", "0");

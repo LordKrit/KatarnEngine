@@ -85,3 +85,29 @@ An actor becomes a prop automatically when it gets its first take. PROP: OFF giv
 ## Next (Phase 4: Timeline)
 Typed tracks with keys and interpolation (position/rotation offsets for actors and takes, camera paths
 prep), clip blending, trim/split/razor, multiple selection, snapping.
+
+## Phase 3.1 (after the first in-game test: "acts like a robot")
+**Why it looked robotic:** playback posed every frame by hand with no blending, and the actor stood still
+as far as the game knew (zero velocity), and the game turns and swings the legs from the velocity. Aim
+pitch wasn't replayed either.
+
+**Now:**
+- Takes also record velocity and each animation's engine speed and looping. During playback the engine
+  plays the recorded animations itself at that speed and **blends into each new one** (ACTORS tab:
+  TAKE BLEND, 100 ms by default, 0-200). The studio only puts an animation back when it drifts more than
+  2.5 frames from the recording. Paused or scrubbing, frames are still posed exactly.
+- Velocity and aim (pitch) are replayed, so legs turn and swing and torso and head aim like yours did.
+- **Recording NPCs:** while you record, NPCs fighting you are recorded too, each into its own take
+  (ACTORS tab: RECORD NPCS: SCENE AI = scene actors with AI on; ALL NEARBY = also level NPCs within 2000
+  units; NO). A level NPC joins the scene. An NPC that died gets a fresh actor that plays the take, death included.
+- **Fighting your copies:** earlier takes are **solid** while you record over them (SOLID TAKES), so your
+  saber lands on them; they still can't be hurt or pushed.
+- **Letting a copy fight back:** PROP: OFF + AI: ON on one of your copies hands it to the game. It fights
+  you live and, with RECORD NPCS on, its new moves are recorded as its next take. Takes only drive props.
+- Takes are shared between undo snapshots instead of copied (a long session with many takes could have
+  used a lot of memory).
+- Projects saved with the first Phase 3 build load; their velocity is estimated from the positions.
+
+**Still not replayed:** weapon changes, force powers, sounds, hit effects, damage. An NPC's take shows
+what it did, but if you re-record yourself against its playback, it won't react to you again (hand it back
+to AI for that).
