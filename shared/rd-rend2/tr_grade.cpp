@@ -28,7 +28,7 @@ static gradeVar_t gradeVars[] = {
 	{ "r_ssrStrength",      "1"      , nullptr },
 	{ "r_ssrGloss",         "1"      , nullptr },
 	{ "r_ssrRough",         "1"      , nullptr },
-	{ "r_atmosDensity",     "0.00012", nullptr },
+	{ "r_atmosDensity",     "0"      , nullptr }, // off unless a map .grade or you set it (was 0.00012)
 	{ "r_atmosFalloff",     "0.0012" , nullptr },
 	{ "r_atmosStart",       "256"    , nullptr },
 	{ "r_atmosColor",       "0.55 0.6 0.7", nullptr },

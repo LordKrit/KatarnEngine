@@ -149,6 +149,7 @@ cvar_t* r_depthPrepass;
 cvar_t* r_ssao;
 cvar_t* r_ssr;
 cvar_t* r_atmos;
+cvar_t* r_reshadeDepth;
 cvar_t* r_atmosDensity;
 cvar_t* r_atmosFalloff;
 cvar_t* r_atmosStart;
@@ -1634,7 +1635,8 @@ static void R_Register(void)
 
 	r_depthPrepass = ri_Cvar_Get_NoComm("r_depthPrepass", "1", CVAR_ARCHIVE, "");
 	r_atmos = ri_Cvar_Get_NoComm("r_atmos", "1", CVAR_ARCHIVE, "Height haze and sun shafts (needs r_hdr 1)");
-	r_atmosDensity = ri_Cvar_Get_NoComm("r_atmosDensity", "0.00012", CVAR_ARCHIVE, "haze per game unit");
+	r_reshadeDepth = ri_Cvar_Get_NoComm("r_reshadeDepth", "1", CVAR_ARCHIVE, "copy the world depth to the window for ReShade depth effects (DOF, AO, fog)");
+	r_atmosDensity = ri_Cvar_Get_NoComm("r_atmosDensity", "0", CVAR_ARCHIVE, "haze per game unit (0 = off; try 0.00012)");
 	r_atmosFalloff = ri_Cvar_Get_NoComm("r_atmosFalloff", "0.0012", CVAR_ARCHIVE, "how fast haze thins with height");
 	r_atmosStart = ri_Cvar_Get_NoComm("r_atmosStart", "256", CVAR_ARCHIVE, "haze starts this far from the camera");
 	r_atmosColor = ri_Cvar_Get_NoComm("r_atmosColor", "0.55 0.6 0.7", CVAR_ARCHIVE, "haze colour (HDR)");

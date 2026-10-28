@@ -174,6 +174,7 @@ extern cvar_t* r_depthPrepass;
 extern cvar_t* r_ssao;
 extern cvar_t* r_ssr;
 extern cvar_t* r_atmos;
+extern cvar_t* r_reshadeDepth;
 extern cvar_t* r_atmosDensity;
 extern cvar_t* r_atmosFalloff;
 extern cvar_t* r_atmosStart;

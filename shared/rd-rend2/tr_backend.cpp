@@ -3099,6 +3099,19 @@ static const void* RB_SwapBuffers(const void* data) {
 		}
 	}
 
+	// ReShade (and other OpenGL post-process injectors) only see the window's own depth buffer; rend2 draws the
+	// world into its own framebuffer, so give them a copy of its depth (r_reshadeDepth 0 to skip)
+	if (r_reshadeDepth->integer && tr.renderFbo && tr.renderFbo->frameBuffer)
+	{
+		qglBindFramebuffer(GL_READ_FRAMEBUFFER, tr.renderFbo->frameBuffer);
+		qglBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		qglBlitFramebuffer(0, 0, tr.renderFbo->width, tr.renderFbo->height, 0, 0, glConfig.vidWidth, glConfig.vidHeight,
+			GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+		while (qglGetError() != GL_NO_ERROR) {}	// formats can differ on some drivers: then ReShade just has no depth
+		qglBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glState.currentFBO = NULL;
+	}
+
 	if (tr.numFramesToCapture > 0)
 	{
 		tr.numFramesToCapture--;
