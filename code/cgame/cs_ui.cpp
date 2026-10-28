@@ -20,6 +20,7 @@ Layout in the 640x480 virtual screen:
 #include <cstdio>
 #include <deque>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -243,7 +244,14 @@ namespace
 		float eyePitch = 0, eyeYaw = 0;
 		int eyeTarget = 0;
 		int audioSelObj = 0, audioSelIdx = -1;	// selected sound clip (object, index); -1 = none
-		int faceSelIdx = -1;					// selected expression clip of the selected actor
+		// ---- stacked lanes (voice / face / eyes under an actor) and NLA-style clip edges ----
+		std::set<int> lanesOpen;				// actors whose lanes are shown
+		int faceSelObj = 0, faceSelIdx = -1;	// selected expression clip
+		// dragging something on a lane: kind 0 sound, 1 expression, 2 eye key, 3 idle key, 4 animation clip's end
+		// mode 0 move (kinds 0-3) / repeat (kind 4), 1 resize (0, 1) / scale (4)
+		struct LaneDrag { int obj = 0, kind = -1, idx = -1, mode = 0; int64_t grab = 0, start0 = 0, len0 = 0; float speed0 = 1; } ld;
+		// live: the scene keeps playing (through the director's cuts) after the studio closes
+		bool live = false;
 		std::map<int, std::pair<std::string, float>> faceApplied;	// per entity: expression the studio set
 		std::map<int, int> idleApplied, eyeApplied;	// per entity: idle on (1) / off (0); eyes mode + 1
 		bool soundsStarted = false;				// the studio started sounds (stopped when playback stops)
@@ -317,10 +325,12 @@ namespace
 
 	int NowMs() { return cgi_Milliseconds(); }
 	void Close();
+	void SortLanes(Object& e);
 	void ReleasePreview();
 	void StartRecording(int target);
 	bool ShownTransform(const Object& o, float org[3], float& yaw);
 	void XfStart(int mode, int axis, bool gizmo, int plane);
+	void Close();
 	bool PropPose(const Object& o, int64_t t, float org[3], float ang[3]);
 	bool CamPose(const Object& cam, int64_t t, float org[3], float ang[3], float& fov, bool effects);
 	void CameraRecordFrame();
@@ -1950,6 +1960,28 @@ namespace
 					if (Button(ix + w - 12, y, 12, 9, "x")) { Object e = *o; e.faceClips.erase(e.faceClips.begin() + static_cast<long>(i)); s.scene.Edit(e, false); return; }
 					y += kRow;
 				}
+				// the expression picked on the face lane
+				if (s.faceSelObj == o->id && s.faceSelIdx >= 0 && s.faceSelIdx < static_cast<int>(o->faceClips.size()))
+				{
+					Object e = *o;
+					FaceClip& c = e.faceClips[static_cast<size_t>(s.faceSelIdx)];
+					bool ch = false;
+					Text(ix, y, "SELECTED (face lane)", kAccent, 0.36f); y += 10;
+					if (Button(ix, y, 12, 9, "<")) { c.pose = s.facePoses[(std::find(s.facePoses.begin(), s.facePoses.end(), c.pose) - s.facePoses.begin() + s.facePoses.size() - 1) % s.facePoses.size()]; ch = true; }
+					TextClip(ix + 15, y + 0.5f, c.pose, w - 32, kTextCol);
+					if (Button(ix + w - 12, y, 12, 9, ">")) { c.pose = s.facePoses[(std::find(s.facePoses.begin(), s.facePoses.end(), c.pose) - s.facePoses.begin() + 1) % s.facePoses.size()]; ch = true; }
+					y += kRow + 1;
+					Label(ix, y, "weight / blend", Fmt("%.0f%% / %d ms", c.weight * 100, c.blendMs), w - 60);
+					if (Button(ix + w - 56, y, 12, 9, "-")) { c.weight = std::max(0.1f, c.weight - 0.1f); ch = true; }
+					if (Button(ix + w - 42, y, 12, 9, "+")) { c.weight = std::min(1.0f, c.weight + 0.1f); ch = true; }
+					if (Button(ix + w - 28, y, 12, 9, "-")) { c.blendMs = std::max(0, c.blendMs - 50); ch = true; }
+					if (Button(ix + w - 14, y, 12, 9, "+")) { c.blendMs = std::min(2000, c.blendMs + 50); ch = true; }
+					y += kRow;
+					if (Button(ix, y, w / 2 - 1, 9, "DUPLICATE AFTER")) { FaceClip d = c; d.startUs = c.startUs + c.lengthUs; e.faceClips.push_back(d); SortLanes(e); ch = true; }
+					if (Button(ix + w / 2 + 1, y, w / 2 - 1, 9, "DELETE")) { e.faceClips.erase(e.faceClips.begin() + s.faceSelIdx); s.faceSelIdx = -1; ch = true; }
+					y += kRow + 2;
+					if (ch) { s.scene.Edit(e, true, "facesel"); return; }
+				}
 				// idle
 				const IdleKey* ik = IdleAt(o->idleKeys, t);
 				Label(ix, y, "idle", ik ? (ik->on ? "on" : "off") : "on (no keys)", w - 70);
@@ -1962,6 +1994,7 @@ namespace
 					IdleKey k; k.tUs = t; k.on = on;
 					e.idleKeys.erase(std::remove_if(e.idleKeys.begin(), e.idleKeys.end(), [&](const IdleKey& q) { return q.tUs == t; }), e.idleKeys.end());
 					e.idleKeys.push_back(k);
+					SortLanes(e);
 					s.scene.Edit(e, false);
 				}
 				y += kRow + 2;
@@ -2019,6 +2052,7 @@ namespace
 				k.pitch = s.eyePitch; k.yaw = s.eyeYaw;
 				e.eyeKeys.erase(std::remove_if(e.eyeKeys.begin(), e.eyeKeys.end(), [&](const EyeKey& q) { return q.tUs == t; }), e.eyeKeys.end());
 				e.eyeKeys.push_back(k);
+				SortLanes(e);
 				s.scene.Edit(e, false);
 			}
 			y += 12;
@@ -3440,6 +3474,203 @@ namespace
 		return bestD <= range ? best : t;
 	}
 
+	// one pass of an animation clip (its frame range at its speed), from the actor's skeleton; 0 = unknown
+	int64_t ClipCycleUs(const Object& o, const AnimClip& c)
+	{
+		AnimInfo ai;
+		if (o.entNum < 0 || !AnimInfoFor(o.entNum, AnimByName(c.anim), ai)) return 0;
+		int sf, ef;
+		ClipFrame(c, ai, 0, false, sf, ef);
+		return static_cast<int64_t>(static_cast<double>(ef - sf + 1) * ai.frameLerp * 1000.0 / std::max(0.05f, c.speed));
+	}
+
+	void SortLanes(Object& e)
+	{
+		std::stable_sort(e.sounds.begin(), e.sounds.end(), [](const SoundClip& a, const SoundClip& b) { return a.startUs < b.startUs; });
+		std::stable_sort(e.faceClips.begin(), e.faceClips.end(), [](const FaceClip& a, const FaceClip& b) { return a.startUs < b.startUs; });
+		std::stable_sort(e.eyeKeys.begin(), e.eyeKeys.end(), [](const EyeKey& a, const EyeKey& b) { return a.tUs < b.tUs; });
+		std::stable_sort(e.idleKeys.begin(), e.idleKeys.end(), [](const IdleKey& a, const IdleKey& b) { return a.tUs < b.tUs; });
+	}
+
+	void StartLaneDrag(const int obj, const int kind, const int idx, const int mode, const int64_t grab, const int64_t start0, const int64_t len0, const float speed0 = 1)
+	{
+		Studio& s = S();
+		s.ld.obj = obj; s.ld.kind = kind; s.ld.idx = idx; s.ld.mode = mode; s.ld.grab = grab; s.ld.start0 = start0; s.ld.len0 = len0; s.ld.speed0 = speed0;
+		s.scene.clock.Pause();
+	}
+
+	// lane drags: move / resize sounds and expressions, move eye / idle keys, repeat / scale animation clips
+	void UpdateLaneDrag(const float lx, const float lw)
+	{
+		Studio& s = S();
+		Studio::LaneDrag& d = s.ld;
+		if (d.kind < 0) return;
+		const Object* o = s.scene.Find(d.obj);
+		const int64_t frameUs = 1000000 / s.scene.clock.fps;
+		const auto snapF = [&](const int64_t t) { return std::max<int64_t>(0, (t + frameUs / 2) / frameUs * frameUs); };
+		if (!o || !s.lmb)
+		{
+			// let go: keep the lanes in time order (and the selection on what was dragged)
+			if (o && d.kind < 4)
+			{
+				Object e = *o;
+				FaceClip fsel; SoundClip ssel;
+				const bool hf = d.kind == 1 && d.idx < static_cast<int>(e.faceClips.size()), hs = d.kind == 0 && d.idx < static_cast<int>(e.sounds.size());
+				if (hf) fsel = e.faceClips[static_cast<size_t>(d.idx)];
+				if (hs) ssel = e.sounds[static_cast<size_t>(d.idx)];
+				SortLanes(e);
+				for (size_t i = 0; hf && i < e.faceClips.size(); i++) if (e.faceClips[i] == fsel) s.faceSelIdx = static_cast<int>(i);
+				for (size_t i = 0; hs && i < e.sounds.size(); i++) if (e.sounds[i] == ssel) s.audioSelIdx = static_cast<int>(i);
+				s.scene.Edit(e, true, "lane");
+			}
+			d.kind = -1;
+			return;
+		}
+		const int64_t at = XToTime(s.cx, lx, lw);
+		if (d.kind == 4)
+		{
+			if (d.idx >= static_cast<int>(o->clips.size())) { d.kind = -1; return; }
+			AnimClip c = o->clips[static_cast<size_t>(d.idx)];
+			const int64_t len = std::max(frameUs, snapF(at) - c.startUs);
+			if (d.mode == 1)
+			{
+				// scale: the same frames, played slower / faster to fill the new length
+				c.speed = std::max(0.05f, std::min(4.0f, d.speed0 * static_cast<float>(static_cast<double>(d.len0) / static_cast<double>(len))));
+				c.lengthUs = len;
+			}
+			else
+			{
+				// repeat: longer than one pass loops it
+				c.lengthUs = len;
+				AnimClip one = c; one.speed = d.speed0;
+				const int64_t cyc = ClipCycleUs(*o, one);
+				if (cyc > 0 && len > cyc + frameUs / 2) c.loop = true;
+			}
+			if (!(c == o->clips[static_cast<size_t>(d.idx)])) { s.scene.SetClip(o->id, d.idx, c, true); d.idx = s.scene.selectedClip; }
+			return;
+		}
+		Object e = *o;
+		bool ch = false;
+		const auto moveLen = [&](int64_t& start, int64_t& len)
+		{
+			if (d.mode == 0) { const int64_t ns = snapF(at - d.grab); if (ns != start) { start = ns; ch = true; } }
+			else { const int64_t nl = std::max(frameUs, snapF(at) - start); if (nl != len) { len = nl; ch = true; } }
+		};
+		if (d.kind == 0 && d.idx < static_cast<int>(e.sounds.size())) moveLen(e.sounds[static_cast<size_t>(d.idx)].startUs, e.sounds[static_cast<size_t>(d.idx)].lengthUs);
+		else if (d.kind == 1 && d.idx < static_cast<int>(e.faceClips.size())) moveLen(e.faceClips[static_cast<size_t>(d.idx)].startUs, e.faceClips[static_cast<size_t>(d.idx)].lengthUs);
+		else if (d.kind == 2 && d.idx < static_cast<int>(e.eyeKeys.size())) { const int64_t n = snapF(at); if (n != e.eyeKeys[static_cast<size_t>(d.idx)].tUs) { e.eyeKeys[static_cast<size_t>(d.idx)].tUs = n; ch = true; } }
+		else if (d.kind == 3 && d.idx < static_cast<int>(e.idleKeys.size())) { const int64_t n = snapF(at); if (n != e.idleKeys[static_cast<size_t>(d.idx)].tUs) { e.idleKeys[static_cast<size_t>(d.idx)].tUs = n; ch = true; } }
+		else { d.kind = -1; return; }
+		if (ch) s.scene.Edit(e, true, "lane");
+	}
+
+	// a lane under an actor: 1 voice lines, 2 expressions, 3 eyes and face idle
+	void DrawLane(const Object& o, const int lane, const float yy, const float lx, const float lw)
+	{
+		Studio& s = S();
+		const vec4_t vc = { 0.30f, 0.85f, 0.85f, 0.85f }, fcol = { 0.95f, 0.45f, 0.75f, 0.85f }, ec = { 0.75f, 0.65f, 1.0f, 0.95f };
+		static const char* const names[] = { "", "voice", "face", "eyes / idle" };
+		Rect(14, yy + kRow * 0.5f - 0.3f, 4, 0.6f, kLine);
+		Text(20, yy + 1, names[lane], lane == 1 ? vc : (lane == 2 ? fcol : ec), 0.34f);
+		const vec4_t laneBg = { 1, 1, 1, 0.025f };
+		Rect(lx, yy + 1, lw, kRow - 2, laneBg);
+		const bool hoverRow = Inside(s.cx, s.cy, lx, yy, lw, kRow);
+		const auto block = [&](const int kind, const int idx, const int64_t start, const int64_t len, const std::string& label,
+			const float* col, const bool sel, const float rampL, const float rampR)
+		{
+			const float a0 = TimeToX(start, lx, lw), a1 = std::max(a0 + 3, TimeToX(start + len, lx, lw));
+			if (a1 < lx || a0 > lx + lw) return;
+			Rect(a0, yy + 1, a1 - a0, kRow - 2, col);
+			// blend in / out: darker ends
+			const vec4_t ramp = { 0, 0, 0, 0.25f };
+			if (rampL > 0) Rect(a0, yy + 1, std::min(rampL, (a1 - a0) / 2), kRow - 2, ramp);
+			if (rampR > 0) Rect(a1 - std::min(rampR, (a1 - a0) / 2), yy + 1, std::min(rampR, (a1 - a0) / 2), kRow - 2, ramp);
+			const bool hEdge = hoverRow && Inside(s.cx, s.cy, a1 - 3, yy, 5, kRow);
+			const vec4_t edge = { 1, 1, 1, hEdge ? 0.9f : 0.35f };
+			Rect(a1 - 1.2f, yy + 1, 1.2f, kRow - 2, edge);
+			if (sel) Frame(a0, yy + 1, a1 - a0, kRow - 2, kAccent);
+			TextClip(a0 + 2, yy + 1.5f, label, std::max(0.0f, a1 - a0 - 5), kTextCol);
+			if (s.clicked && Inside(s.clickX, s.clickY, a0, yy, a1 - a0 + 2, kRow))
+			{
+				s.clicked = false;
+				s.scene.selected = o.id; s.lastSel = o.id; s.levelSel = -1;
+				if (kind == 0) { s.audioSelObj = o.id; s.audioSelIdx = idx; }
+				else { s.faceSelObj = o.id; s.faceSelIdx = idx; }
+				s.tab = TAB_AUDIO;
+				const bool resize = s.clickX >= a1 - 3;
+				StartLaneDrag(o.id, kind, idx, resize ? 1 : 0, XToTime(s.clickX, lx, lw) - start, start, len);
+			}
+		};
+		if (lane == 1)
+		{
+			for (size_t i = 0; i < o.sounds.size(); i++)
+			{
+				const SoundClip& c = o.sounds[i];
+				std::string nm = c.path;
+				const size_t sl = nm.find_last_of('/');
+				if (sl != std::string::npos) nm = nm.substr(sl + 1);
+				block(0, static_cast<int>(i), c.startUs, c.lengthUs, nm, vc, s.audioSelObj == o.id && s.audioSelIdx == static_cast<int>(i), 0, 0);
+			}
+			if (o.sounds.empty()) Text(lx + 3, yy + 1.5f, "voice lines: AUDIO tab > ADD VOICE LINE (lip sync from its .lip file)", kDim, 0.32f);
+		}
+		else if (lane == 2)
+		{
+			const double pxPerUs = lw / std::max(1.0, static_cast<double>(std::max<int64_t>(1, [&] { int64_t a, b; ViewRange(a, b); return b; }())));
+			for (size_t i = 0; i < o.faceClips.size(); i++)
+			{
+				const FaceClip& c = o.faceClips[i];
+				const float ramp = static_cast<float>(c.blendMs * 1000.0 * pxPerUs);
+				block(1, static_cast<int>(i), c.startUs, c.lengthUs, c.weight < 0.99f ? Fmt("%s %.0f%%", c.pose.c_str(), c.weight * 100) : c.pose,
+					fcol, s.faceSelObj == o.id && s.faceSelIdx == static_cast<int>(i), ramp, ramp);
+			}
+			if (o.faceClips.empty()) Text(lx + 3, yy + 1.5f, "expressions: AUDIO tab > FACE > ADD EXPRESSION AT PLAYHEAD", kDim, 0.32f);
+		}
+		else
+		{
+			// idle on / off: a bar from each key to the next
+			for (size_t i = 0; i < o.idleKeys.size(); i++)
+			{
+				const IdleKey& k = o.idleKeys[i];
+				const int64_t e = i + 1 < o.idleKeys.size() ? o.idleKeys[i + 1].tUs : s.scene.clock.lengthUs;
+				const float a0 = TimeToX(k.tUs, lx, lw), a1 = TimeToX(e, lx, lw);
+				if (a1 >= lx && a0 <= lx + lw)
+				{
+					const vec4_t bar = { k.on ? 0.3f : 0.8f, k.on ? 0.8f : 0.3f, 0.4f, 0.35f };
+					Rect(std::max(lx, a0), yy + kRow - 4, std::min(lx + lw, a1) - std::max(lx, a0), 2.5f, bar);
+					Rect(a0 - 0.6f, yy + kRow - 6, 1.2f, 5, k.on ? vc : kRed);
+				}
+				if (s.clicked && Inside(s.clickX, s.clickY, a0 - 3, yy + kRow - 7, 6, 7))
+				{
+					s.clicked = false;
+					s.scene.selected = o.id; s.lastSel = o.id; s.tab = TAB_AUDIO;
+					StartLaneDrag(o.id, 3, static_cast<int>(i), 0, 0, k.tUs, 0);
+				}
+			}
+			static const char* const modes[] = { "free", "look", "aim" };
+			for (size_t i = 0; i < o.eyeKeys.size(); i++)
+			{
+				const EyeKey& k = o.eyeKeys[i];
+				const float kx = TimeToX(k.tUs, lx, lw);
+				if (kx < lx - 3 || kx > lx + lw + 3) continue;
+				const bool hv = hoverRow && Inside(s.cx, s.cy, kx - 3, yy, 6, kRow - 5);
+				Rect(kx - 2, yy + 1.5f, 4, 4, hv ? kAccent : ec);
+				std::string lab = modes[k.mode];
+				if (k.mode == EyeKey::LookAt) { const Object* t = s.scene.Find(k.target); lab = "look " + (t ? t->name : std::string("?")); }
+				else if (k.mode == EyeKey::Aim) lab = Fmt("aim %.0f %.0f", k.pitch, k.yaw);
+				const float nx = i + 1 < o.eyeKeys.size() ? TimeToX(o.eyeKeys[i + 1].tUs, lx, lw) : lx + lw;
+				TextClip(kx + 3, yy + 0.5f, lab, std::max(0.0f, nx - kx - 5), kDim);
+				if (s.clicked && Inside(s.clickX, s.clickY, kx - 3, yy, 6, kRow - 5))
+				{
+					s.clicked = false;
+					s.scene.selected = o.id; s.lastSel = o.id; s.tab = TAB_AUDIO;
+					StartLaneDrag(o.id, 2, static_cast<int>(i), 0, 0, k.tUs, 0);
+					s.scene.clock.timeUs = k.tUs;
+				}
+			}
+			if (o.eyeKeys.empty() && o.idleKeys.empty()) Text(lx + 3, yy + 1.5f, "eye keys and face idle: AUDIO tab > EYES / IDLE", kDim, 0.32f);
+		}
+	}
+
 	void DrawTransport()
 	{
 		Studio& s = S();
@@ -3456,6 +3687,7 @@ namespace
 		if (B(14, ">")) c.Step(1);
 		if (B(18, ">|")) c.SetFrame(c.FrameCount()), c.Pause();
 		if (B(30, "STOP")) c.Stop();
+		if (B(28, "LIVE")) { c.Play(); s.host.Log(0, "Live: the scene plays on with the studio closed (F10 to come back)"); Close(); }
 		x += 8;
 		if (B(40, Fmt("%d FPS", c.fps))) c.SetFps(c.fps == 24 ? 30 : (c.fps == 30 ? 60 : 24));
 		static const double speeds[] = { 0.1, 0.25, 0.5, 1.0, 2.0 };
@@ -3511,6 +3743,7 @@ namespace
 			Rect(ix1 - 1, y0, 1, kRulerH, edge);
 		}
 
+		UpdateLaneDrag(lx, lw);
 		// dragging a clip along its lane (whole frames)
 		if (s.clipDragIndex >= 0)
 		{
@@ -3667,14 +3900,29 @@ namespace
 			else s.timelineScroll -= static_cast<float>(s.wheel);
 			s.wheel = 0;
 		}
-		const int count = static_cast<int>(s.scene.objects.size());
+		// rows: each object, and under an actor with its lanes open, voice / face / eyes
+		std::vector<std::pair<int, int>> rows;
+		for (int i = 0; i < static_cast<int>(s.scene.objects.size()); i++)
+		{
+			rows.emplace_back(i, 0);
+			const Object& q = s.scene.objects[static_cast<size_t>(i)];
+			if (q.type == ObjType::Actor && s.lanesOpen.count(q.id)) for (int l = 1; l <= 3; l++) rows.emplace_back(i, l);
+		}
+		const int count = static_cast<int>(rows.size());
 		s.timelineScroll = std::max(0.0f, std::min(s.timelineScroll, static_cast<float>(std::max(0, count - (maxRows - 1)))));
 		int row = 0;
-		for (int i = static_cast<int>(s.timelineScroll); i < count && row < maxRows - 1; i++, row++)
+		for (int ri = static_cast<int>(s.timelineScroll); ri < count && row < maxRows - 1; ri++, row++)
 		{
+			const int i = rows[static_cast<size_t>(ri)].first, lane = rows[static_cast<size_t>(ri)].second;
 			Object& o = s.scene.objects[static_cast<size_t>(i)];
 			const float yy = ry + kRow * static_cast<float>(row + 1);
+			if (lane) { DrawLane(o, lane, yy, lx, lw); continue; }
+			const bool lanes = o.type == ObjType::Actor && s.lanesOpen.count(o.id) > 0;
 			if (o.id == s.scene.selected) Rect(0, yy, kW, kRow, kSel);
+			if (o.type == ObjType::Actor && Button(2, yy + 1, 10, kRow - 2, lanes ? "-" : "+", lanes))
+			{
+				if (lanes) s.lanesOpen.erase(o.id); else s.lanesOpen.insert(o.id);
+			}
 			TextClip(14, yy + 1, o.name, kLeftW - 18, o.type == ObjType::Camera ? kCam : (o.type == ObjType::Events ? kWarn : kTextCol));
 			Rect(lx, yy + 1, lw, kRow - 2, kLane);
 			if (o.type == ObjType::Actor)
@@ -3710,7 +3958,8 @@ namespace
 						s.keyObj = 0;
 					}
 				}
-			// voice lines (teal, top) and expressions (pink, bottom) on actors; sound clips on audio tracks
+			// voice lines (teal, top) and expressions (pink, bottom) on actors (when their lanes are closed); sound clips on audio tracks
+			if (!lanes)
 			{
 				const vec4_t vc = { 0.30f, 0.85f, 0.85f, 0.9f }, fc = { 0.95f, 0.45f, 0.75f, 0.85f };
 				const bool audio = o.type == ObjType::Audio;
@@ -3828,8 +4077,35 @@ namespace
 					const vec4_t tail = { 0.30f, 0.62f, 0.38f, 0.25f };
 					if (cxn > cxl) Rect(cxl, yy + 2, cxn - cxl, kRow - 4, tail);
 					Rect(cx0, yy + 1, std::max(2.0f, cxl - cx0), kRow - 2, body);
+					// loops: a mark where each pass starts again (like an NLA strip's repeats)
+					const int64_t cyc = c.loop ? ClipCycleUs(o, c) : 0;
+					int reps = 0;
+					if (cyc > 0)
+					{
+						const vec4_t mk = { 0, 0, 0, 0.45f };
+						for (int64_t t2 = c.startUs + cyc - c.animOffsetUs % cyc; t2 < c.startUs + c.lengthUs && reps < 400; t2 += cyc, reps++)
+						{
+							const float mx = TimeToX(t2, lx, lw);
+							if (mx > cx0 + 1 && mx < cxl - 1) Rect(mx - 0.4f, yy + 2, 0.8f, kRow - 4, mk);
+						}
+					}
+					const bool hEdge = Inside(s.cx, s.cy, cxl - 3, yy, 5, kRow);
+					const vec4_t edgeC = { 1, 1, 1, hEdge ? 0.9f : 0.35f };
+					Rect(cxl - 1.2f, yy + 1, 1.2f, kRow - 2, edgeC);
 					if (csel) Frame(cx0, yy + 1, std::max(2.0f, cxl - cx0), kRow - 2, kAccent);
-					TextClip(cx0 + 2, yy + 1.5f, c.anim, std::max(0.0f, cxl - cx0 - 3), kTextCol);
+					TextClip(cx0 + 2, yy + 1.5f, (c.loop && cyc > 0 ? Fmt("%s  x%.1f", c.anim.c_str(), static_cast<double>(c.lengthUs) / static_cast<double>(cyc)) : c.anim)
+						+ (c.speed != 1.0f ? Fmt("  %.2fx", c.speed) : std::string()), std::max(0.0f, cxl - cx0 - 5), kTextCol);
+					if (hEdge && s.ld.kind < 0) Text(s.cx + 6, yy - 8, "drag: repeat (loop)   SHIFT+drag: scale (speed)", kAccent, 0.32f);
+					if (s.clicked && Inside(s.clickX, s.clickY, cxl - 3, yy, 5, kRow))
+					{
+						s.clicked = false;
+						s.scene.selected = o.id; s.lastSel = o.id; s.levelSel = -1;
+						s.scene.selectedClip = static_cast<int>(ci);
+						s.scene.selectedTake = 0;
+						s.tab = TAB_SCENE;
+						s.keyObj = 0;
+						StartLaneDrag(o.id, 4, static_cast<int>(ci), s.shift ? 1 : 0, 0, c.startUs, c.lengthUs, c.speed);
+					}
 					if (s.clicked && Inside(s.clickX, s.clickY, cx0, yy, std::max(4.0f, cxl - cx0), kRow))
 					{
 						s.clicked = false;
@@ -3850,6 +4126,19 @@ namespace
 			if (TakeClick(0, yy, kLeftW, kRow)) { s.scene.selected = o.id; s.levelSel = -1; }
 		}
 		if (!count) Text(14, ry + kRow + 1, "no objects", kDim);
+
+		if (s.ld.kind == 4)
+		{
+			const Object* o = s.scene.Find(s.ld.obj);
+			if (o && s.ld.idx >= 0 && s.ld.idx < static_cast<int>(o->clips.size()))
+			{
+				const AnimClip& c2 = o->clips[static_cast<size_t>(s.ld.idx)];
+				const int64_t cyc = ClipCycleUs(*o, c2);
+				Text(lx + 4, y0 + 1, s.ld.mode == 1 ? Fmt("SCALE  speed %.2fx  length %.2fs", c2.speed, static_cast<double>(c2.lengthUs) / 1e6)
+					: Fmt("REPEAT  x%.2f  length %.2fs%s", cyc > 0 ? static_cast<double>(c2.lengthUs) / static_cast<double>(cyc) : 1.0,
+						static_cast<double>(c2.lengthUs) / 1e6, c2.loop ? "  (loops)" : ""), kAccent, 0.36f);
+			}
+		}
 
 		// playhead
 		const float px = TimeToX(c.timeUs, lx, lw);
@@ -4487,6 +4776,7 @@ namespace
 		Studio& s = S();
 		if (s.open) return;
 		s.open = true;
+		s.live = false;		// the studio takes over again (the scene keeps playing)
 		s.panels = true;
 		cgi_Cvar_Set("cs_active", "1");
 		LoadHotkeys();
@@ -4499,6 +4789,8 @@ namespace
 	{
 		Studio& s = S();
 		if (!s.open) return;
+		// still playing: the scene plays on with the studio closed (live), through the director's cuts if it has any
+		s.live = s.scene.clock.playing && s.rec == Studio::REC_IDLE && s.render == Studio::RENDER_IDLE;
 		if (s.render != Studio::RENDER_IDLE) EndRender(false);
 		s.previewing = false;
 		XfEnd(true);
@@ -4562,6 +4854,7 @@ void CS_Init()
 		}
 	s.initMap = map;
 	s.open = false;
+	s.live = false;
 	s.rec = Studio::REC_IDLE;	// a level change ends a recording (it's lost)
 	s.hiddenEnts.clear();
 	s.ghostEnts.clear();
@@ -4670,6 +4963,13 @@ void CS_Command_f()
 	if (!Q_stricmp(sub, "camera")) { AddCameraFromView(); return; }
 	if (!Q_stricmp(sub, "play")) { s.scene.clock.Play(); return; }
 	if (!Q_stricmp(sub, "pause")) { s.scene.clock.Pause(); return; }
+	if (!Q_stricmp(sub, "live"))
+	{
+		// play from the playhead with the studio closed
+		s.scene.clock.Play();
+		if (s.open) Close(); else s.live = true;
+		return;
+	}
 	if (!Q_stricmp(sub, "stop")) { s.scene.clock.Stop(); return; }
 	if (!Q_stricmp(sub, "fps")) { s.scene.clock.SetFps(atoi(a2.c_str())); return; }
 	if (!Q_stricmp(sub, "undo")) { s.scene.Undo(); return; }
@@ -4859,7 +5159,13 @@ void CS_Frame()
 	}
 	RecorderFrame();
 	InstantReplayFrame();
-	if (s.open || s.rec != Studio::REC_IDLE)
+	if (s.live && !s.open && !s.scene.clock.playing)
+	{
+		s.live = false;		// the end of the scene (or 'studio stop')
+		StopStudioSounds();
+		PlayerView();
+	}
+	if (s.open || s.rec != Studio::REC_IDLE || s.live)
 	{
 		EvaluateScene();
 		EvaluateProps();
@@ -4912,8 +5218,16 @@ void CS_Frame()
 
 bool CS_ApplyView()
 {
-	if (g_s && g_s->open && g_s->director && !g_s->camActive && g_s->scene.ActiveCamera(g_s->scene.clock.timeUs)) g_s->camActive = true;
-	if (!g_s || !g_s->open || !g_s->camActive) return false;
+	if (g_s && g_s->live && !g_s->open)
+	{
+		// live: the director's cuts when the scene has any, else the normal game view
+		if (!g_s->scene.ActiveCamera(g_s->scene.clock.timeUs)) return false;
+		g_s->director = true;
+		g_s->pilotId = 0;
+		g_s->camActive = true;
+	}
+	else if (g_s && g_s->open && g_s->director && !g_s->camActive && g_s->scene.ActiveCamera(g_s->scene.clock.timeUs)) g_s->camActive = true;
+	if (!g_s || !(g_s->open || g_s->live) || !g_s->camActive) return false;
 	Studio& s = S();
 	const int64_t t = s.scene.clock.timeUs;
 	if (s.director && !s.pilotId)
