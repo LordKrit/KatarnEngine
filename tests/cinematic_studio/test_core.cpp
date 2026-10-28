@@ -285,6 +285,8 @@ static void TestPhase2()
 	CHECK(h.ents[lo->entNum].profile == "_humanoid_vader");
 }
 
+static float AngleWrap(float a) { while (a > 180) a -= 360; while (a <= -180) a += 360; return a; }
+
 static Take MakeTake()
 {
 	Take t;
@@ -412,8 +414,98 @@ static void TestPhase3()
 	CHECK(f.Respawn(v) && fo->entNum >= 0 && fo->entNum != was && !h.ents.count(was) && h.ents[fo->entNum].prop);
 }
 
+static void TestPhase4()
+{
+	FakeHost h;
+	Scene s(&h);
+	const float o[3] = { 0, 0, 0 }, a[3] = { 0, 0, 0 };
+	const int v = s.AddActor("md_vader", o, a);
+
+	// take trims and offsets
+	Take t = MakeTake();		// 1 s, x = 10 per 100 ms, yaw 170 / -170
+	t.trimInUs = 200'000;
+	t.trimOutUs = 300'000;
+	CHECK(t.RecordedUs() == 1'000'000 && t.LengthUs() == 500'000);
+	TakeSample x;
+	CHECK(t.Evaluate(0, x) && std::fabs(x.origin[0] - 20) < 1e-4);			// starts 200 ms in
+	CHECK(t.Evaluate(900'000, x) && std::fabs(x.origin[0] - 70) < 1e-4);	// clamped to the trimmed end
+	t.trimInUs = t.trimOutUs = 0;
+	t.offset[2] = 8;
+	t.yawOffset = 90;
+	CHECK(t.Evaluate(500'000, x) && std::fabs(x.origin[0]) < 1e-3 && std::fabs(x.origin[1] - 50) < 1e-3 && x.origin[2] == 8);
+	CHECK(std::fabs(x.velocity[0] + 50) < 1e-3 && std::fabs(x.velocity[1] - 100) < 1e-3);	// velocity turned too
+	CHECK(std::fabs(AngleWrap(x.yaw) - AngleWrap(-170 + 90)) < 1e-3);
+	t.offset[2] = 0; t.yawOffset = 0;
+
+	const int tid = s.AddTake(v, t, true);
+	Take e = *Scene::FindTake(*s.Find(v), tid);
+	e.trimInUs = 5'000'000;		// clamped
+	CHECK(s.SetTake(v, e, false) && Scene::FindTake(*s.Find(v), tid)->trimInUs == 999'000);
+	CHECK(s.Undo() && Scene::FindTake(*s.Find(v), tid)->trimInUs == 0);
+
+	// split a take: two takes sharing one recording, end to end
+	const int t2 = s.SplitTake(v, tid, 400'000);
+	CHECK(t2 && s.Find(v)->takes.size() == 2 && s.selectedTake == t2);
+	const Take* p1 = Scene::FindTake(*s.Find(v), tid);
+	const Take* p2 = Scene::FindTake(*s.Find(v), t2);
+	CHECK(p1->LengthUs() == 400'000 && p2->startUs == 400'000 && p2->LengthUs() == 600'000 && &p1->Samples() == &p2->Samples());
+	CHECK(p2->Evaluate(0, x) && std::fabs(x.origin[0] - 40) < 1e-4 && p2->name == "Take 1 b");
+	CHECK(!s.SplitTake(v, tid, 400'000) && !s.SplitTake(v, tid, 0));		// at an edge: nothing to split
+	CHECK(s.Undo() && s.Find(v)->takes.size() == 1);
+
+	// split a clip: the second half carries on from the same point in the animation
+	AnimClip c;
+	c.anim = "BOTH_WALK1";
+	c.startUs = 1'000'000;
+	c.lengthUs = 2'000'000;
+	CHECK(s.AddClip(v, c) == 0);
+	const int ci = s.SplitClip(v, 0, 1'500'000);
+	CHECK(ci == 1 && s.Find(v)->clips.size() == 2);
+	CHECK(s.Find(v)->clips[0].lengthUs == 500'000 && s.Find(v)->clips[1].startUs == 1'500'000 && s.Find(v)->clips[1].animOffsetUs == 500'000);
+	CHECK(s.Find(v)->clips[1].lengthUs == 1'500'000 && s.Find(v)->clips[1].blendMs == 0 && s.Find(v)->clips[0].blendMs == 100);
+	CHECK(s.SplitClip(v, 0, 1'000'000) < 0);
+
+	// keys
+	const int w = s.AddActor("md_obiwan", o, a);
+	CHECK(!s.Find(w)->prop);
+	TransformKey k0; k0.tUs = 0; k0.yaw = 170; k0.interp = Interp::Linear;
+	TransformKey k1; k1.tUs = 1'000'000; k1.origin[0] = 100; k1.yaw = -170; k1.interp = Interp::Step;
+	TransformKey k2; k2.tUs = 2'000'000; k2.origin[0] = 100; k2.origin[1] = 100;
+	CHECK(s.SetKey(w, k1) && s.SetKey(w, k0) && s.SetKey(w, k2) && s.Find(w)->prop);	// keys make it a prop
+	CHECK(s.Find(w)->keys.size() == 3 && s.Find(w)->keys[0].tUs == 0);
+	float org[3], yaw, vel[3];
+	const auto& ks = s.Find(w)->keys;
+	CHECK(EvaluateKeys(ks, 500'000, org, yaw, vel) && std::fabs(org[0] - 50) < 1e-3 && std::fabs(AngleWrap(yaw) - 180) < 1e-3);
+	CHECK(std::fabs(vel[0] - 100) < 0.5f);								// 100 units per second
+	CHECK(EvaluateKeys(ks, 1'500'000, org, yaw, vel) && org[1] == 0 && vel[1] == 0);	// step: holds
+	CHECK(EvaluateKeys(ks, 9'000'000, org, yaw, vel) && org[1] == 100);
+	CHECK(s.SetKeyInterp(w, 1'000'000, Interp::Smooth) && EvaluateKeys(s.Find(w)->keys, 1'250'000, org, yaw, vel));
+	CHECK(std::fabs(org[1] - 100 * 0.15625f) < 1e-3);					// smoothstep(0.25)
+	CHECK(s.SetKeyInterp(w, 1'000'000, Interp::CatmullRom) && EvaluateKeys(s.Find(w)->keys, 1'500'000, org, yaw, vel));
+	CHECK(org[1] > 40 && org[1] < 60 && org[0] > 100);					// a curve through the keys, overshooting a bit
+	TransformKey k1b = k1; k1b.origin[0] = 120;
+	CHECK(s.SetKey(w, k1b) && s.Find(w)->keys.size() == 3 && s.Find(w)->keys[1].origin[0] == 120);	// same time: replaced
+	CHECK(!s.MoveKey(w, 1'000'000, 2'000'000, false));					// one key per time
+	CHECK(s.MoveKey(w, 1'000'000, 1'200'000, true) && s.MoveKey(w, 1'200'000, 1'400'000, true));
+	CHECK(s.Undo() && s.Find(w)->keys[1].tUs == 1'000'000);				// one drag, one undo
+	CHECK(s.RemoveKey(w, 0) && s.Find(w)->keys.size() == 2 && !s.RemoveKey(w, 0));
+	std::vector<TransformKey> none;
+	CHECK(!EvaluateKeys(none, 0, org, yaw, vel));
+
+	// saved and loaded
+	Take e2 = *Scene::FindTake(*s.Find(v), tid);
+	e2.trimInUs = 100'000; e2.offset[0] = 5; e2.yawOffset = 45;
+	CHECK(s.SetTake(v, e2, false));
+	CHECK(s.Save("P4"));
+	Scene l(&h);
+	std::vector<std::string> warn;
+	CHECK(l.Load("P4", false, false, warn) && warn.empty());
+	CHECK(l.Find(w)->keys == s.Find(w)->keys && l.Find(v)->clips == s.Find(v)->clips && l.Find(v)->takes[0] == s.Find(v)->takes[0]);
+}
+
 int main()
 {
+	TestPhase4();
 	TestPhase3();
 	TestPhase2();
 	TestJson();

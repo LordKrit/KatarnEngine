@@ -75,9 +75,13 @@ namespace cs
 	bool SampleEntity(int ent, Take& take, TakeSample& out);	// a character's state now (adds animation names to the take)
 	bool CharacterAlive(int ent);
 	void SetTakeBody(int ent, const float origin[3], const float velocity[3], float yaw, float pitch);
-	bool PlayAnimAt(int ent, int anim, int parts, float frame, float speed, bool loop, int blendMs);	// speed = engine speed
-	bool LiveFrame(int ent, int parts, int anim, float& rel);
-	void SetSolid(int ent, bool solid);			// a prop your saber can hit (still can't be hurt)
+	// speed = engine speed; startFrame / endFrame: a range of the animation (relative, -1 = to its end)
+	bool PlayAnimAt(int ent, int anim, int parts, float frame, float speed, bool loop, int blendMs, int startFrame = 0, int endFrame = -1);
+	bool LiveFrame(int ent, int parts, int anim, float& rel, int startFrame = 0, int endFrame = -1);
+	void SetSolid(int ent, bool solid);
+	// saber clashes between take-driven actors and any other blade (sparks, sound, flash); bounceLive:
+	// knock back the attacks of characters the game drives (you, while recording). Returns how many.
+	int DetectClashes(const std::vector<int>& takeEnts, bool bounceLive);			// a prop your saber can hit (still can't be hurt)
 }
 
 // called from the cgame

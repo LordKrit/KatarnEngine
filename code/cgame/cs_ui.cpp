@@ -67,7 +67,7 @@ namespace
 	{
 		ACT_CLOSE, ACT_PANELS, ACT_PLAY, ACT_STOP, ACT_STEP_BACK, ACT_STEP_FWD, ACT_UNDO, ACT_REDO, ACT_SAVE,
 		ACT_DELETE, ACT_FOCUS, ACT_FREEZE, ACT_LEFT, ACT_RIGHT, ACT_FWD, ACT_BACK, ACT_UP, ACT_DOWN, ACT_TURN_L, ACT_TURN_R,
-		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_COUNT
+		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_COUNT
 	};
 	struct Hotkey { const char* name; int key; bool ctrl; };
 	Hotkey g_keys[ACT_COUNT] = {
@@ -79,7 +79,7 @@ namespace
 		{ "nudge_forward", A_CURSOR_UP, false }, { "nudge_back", A_CURSOR_DOWN, false },
 		{ "nudge_up", A_PAGE_UP, false }, { "nudge_down", A_PAGE_DOWN, false },
 		{ "turn_left", A_LOW_Q, false }, { "turn_right", A_LOW_E, false }, { "player_view", A_LOW_V, false },
-		{ "duplicate", A_LOW_D, true },
+		{ "duplicate", A_LOW_D, true }, { "split", A_LOW_B, true }, { "set_key", A_LOW_K, false }, { "snap", A_LOW_N, false },
 	};
 
 	struct KeyName { const char* n; int k; };
@@ -196,7 +196,8 @@ namespace
 		bool recSolidTakes = true;	// earlier takes can be hit while recording over them
 		std::vector<int> solidEnts;
 		int takeBlendMs = 100;		// blend into each new animation of a take during playback
-		std::map<int, std::pair<int, int>> liveAnims;	// per entity: legs, torso animation the engine is playing for a take
+		std::map<int, std::pair<int, int>> liveAnims;
+		std::vector<int> takeEnts;	// actors a take drives this frame (for saber clashes)	// per entity: legs, torso animation the engine is playing for a take
 		double recOldSpeed = 1.0;
 		bool recOldLoop = false;
 		int recCountdownSec = 3;
@@ -207,6 +208,16 @@ namespace
 		// take dragging on the timeline
 		int takeDragObj = 0, takeDragId = 0;
 		int64_t takeDragGrabUs = 0;
+
+		// ---- Phase 4 ----
+		bool snap = true;			// timeline drags snap to the playhead and other edges
+		int64_t viewStartUs = 0, viewLenUs = 0;	// visible part of the timeline (0 = all of it)
+		int keyObj = 0;				// selected position key: object and time (keyObj 0 = none)
+		int64_t keyUs = 0;
+		bool keyDrag = false;
+		bool clashes = true;		// saber clashes with takes
+		// viewport drag of an actor a take or keys drive
+		float dragTakeOff[3] = { 0, 0, 0 }, dragTakeYaw = 0, dragOrgStart[3] = { 0, 0, 0 };
 	};
 
 	Studio* g_s = nullptr;
@@ -220,6 +231,7 @@ namespace
 	void Close();
 	void ReleasePreview();
 	void StartRecording(int target);
+	void SetKeyAtPlayhead();
 
 	// ------------------------------------------------------------------------------------------
 	// drawing helpers
@@ -646,7 +658,8 @@ namespace
 			if (s.field == FIELD_NPCTYPE) { DrawField(x, y, kRightW - 12, FIELD_NPCTYPE, o->npcType); y += 13; }
 			else if (Button(x, y, kRightW - 12, 11, "CHANGE NPC TYPE", false, !o->adopted)) BeginField(FIELD_NPCTYPE, o->npcType), y += 13;
 			else y += 13;
-			if (Button(x, y, kRightW - 12, 11, "ANIMATIONS...")) s.tab = TAB_ANIMS;
+			if (Button(x, y, kRightW - 60, 11, "ANIMATIONS...")) s.tab = TAB_ANIMS;
+			if (Button(x + kRightW - 58, y, 46, 11, "KEY (K)")) SetKeyAtPlayhead();
 			y += 13;
 			if (Button(x, y, bw, 11, o->prop ? "PROP: ON" : "PROP: OFF", o->prop, true)) s.scene.SetProp(o->id, !o->prop);
 			if (Button(x + bw + 2, y, bw, 11, "GHOST", o->ghost)) s.scene.SetGhost(o->id, !o->ghost);
@@ -801,7 +814,7 @@ namespace
 		ef = c.endFrame < 0 ? ai.numFrames - 1 : std::max(sf, std::min(c.endFrame, ai.numFrames - 1));
 		const float frames = static_cast<float>(ef - sf + 1);
 		if (holding) return static_cast<float>(ef);
-		float f = static_cast<float>(static_cast<double>(localUs) / 1000.0 * c.speed / ai.frameLerp);
+		float f = static_cast<float>(static_cast<double>(localUs + c.animOffsetUs) / 1000.0 * c.speed / ai.frameLerp);
 		if (c.loop) f = fmodf(f, frames);
 		else f = std::min(f, frames - 1);
 		return static_cast<float>(sf) + std::max(0.0f, f);
@@ -814,49 +827,50 @@ namespace
 			if (s.heldEnts[i] == ent) { ReleaseAnim(ent); s.heldEnts.erase(s.heldEnts.begin() + static_cast<long>(i)); s.liveAnims.erase(ent); return; }
 	}
 
-	// a take drives its actor: position, motion, facing and aim, legs and torso animations, sabers.
-	// While the scene plays, the engine plays (and blends) the recorded animations at their recorded
-	// speed and the studio only corrects it when it drifts, so attacks flow like they did in the game.
-	// Paused or scrubbing, every frame is posed exactly.
-	void DriveTake(const Object& o, const Take& tk, const int64_t t)
+	// Plays an animation on the legs / torso / both for the studio. While the scene plays, the engine
+	// plays (and blends into) the animation at `speed` and the studio only corrects it when it drifts,
+	// so movement flows like in the game. Paused or scrubbing, the frame is posed exactly.
+	void DriveAnim(const int ent, const AnimInfo& ai, const int parts, const float frame, const float speed, const bool loop,
+		const int blendMs, const int sf = 0, const int ef = -1)
 	{
 		Studio& s = S();
-		TakeSample x;
-		if (!tk.Evaluate(t - tk.startUs, x)) return;
-		SetTakeBody(o.entNum, x.origin, x.velocity, x.yaw, x.pitch);
 		const Clock& c = s.scene.clock;
 		const bool live = c.playing && c.speed > 0 && !s.scrubbing;
-		auto& state = s.liveAnims[o.entNum];
+		auto& state = s.liveAnims[ent];
+		int& cur = parts == PARTS_TORSO ? state.second : state.first;
+		const float f = std::min(frame, static_cast<float>(ai.numFrames - 1));
+		const auto mark = [&](const int v) { cur = v; if (parts == PARTS_BOTH) state.first = state.second = v; };
+		if (!live)
+		{
+			PlayAnimAt(ent, ai.anim, parts, f, 0.0f, false, 0, sf, ef);
+			mark(-1);
+			return;
+		}
+		const float sp = speed * static_cast<float>(c.speed);
+		float rel = 0;
+		const bool same = cur == ai.anim && LiveFrame(ent, parts == PARTS_BOTH ? PARTS_LEGS : parts, ai.anim, rel, sf, ef);
+		if (same)
+		{
+			float d = fabsf(rel - f);
+			const int last = ef < 0 ? ai.numFrames - 1 : std::min(ef, ai.numFrames - 1);
+			if (loop) d = std::min(d, fabsf(static_cast<float>(last - sf + 1) - d));	// across the loop point
+			if (d <= 2.5f) return;
+			PlayAnimAt(ent, ai.anim, parts, f, sp, loop, 0, sf, ef);	// drifted: put it back
+		}
+		else PlayAnimAt(ent, ai.anim, parts, f, sp, loop, blendMs, sf, ef);	// a new animation: blend into it
+		mark(ai.anim);
+	}
+
+	// a take's animations and sabers at a time (its body is placed separately)
+	void DriveTakeAnim(const Object& o, const TakeSample& x, const Take& tk)
+	{
+		Studio& s = S();
 		const auto drive = [&](const int idx, const float frame, const float speed, const bool loop, const int parts)
 		{
-			int& cur = parts == PARTS_TORSO ? state.second : state.first;
 			if (idx < 0 || idx >= static_cast<int>(tk.Anims().size())) return;
 			AnimInfo ai;
 			if (!AnimInfoFor(o.entNum, AnimByName(tk.Anims()[static_cast<size_t>(idx)]), ai)) return;	// skeleton lacks it
-			const float f = std::min(frame, static_cast<float>(ai.numFrames - 1));
-			if (!live)
-			{
-				PlayAnimAt(o.entNum, ai.anim, parts, f, 0.0f, false, 0);
-				cur = -1;
-				if (parts == PARTS_BOTH) state.first = state.second = -1;
-				return;
-			}
-			const float sp = speed * static_cast<float>(c.speed);
-			float rel = 0;
-			const bool same = cur == ai.anim && LiveFrame(o.entNum, parts == PARTS_BOTH ? PARTS_LEGS : parts, ai.anim, rel);
-			if (!same)
-			{
-				PlayAnimAt(o.entNum, ai.anim, parts, f, sp, loop, s.takeBlendMs);	// a new animation: blend into it
-			}
-			else
-			{
-				float d = fabsf(rel - f);
-				if (loop) d = std::min(d, fabsf(static_cast<float>(ai.numFrames) - d));	// across the loop point
-				if (d > 2.5f) PlayAnimAt(o.entNum, ai.anim, parts, f, sp, loop, 0);	// drifted: put it back
-				else return;
-			}
-			cur = ai.anim;
-			if (parts == PARTS_BOTH) state.first = state.second = ai.anim;
+			DriveAnim(o.entNum, ai, parts, frame, speed, loop, s.takeBlendMs);
 		};
 		if (x.legs == x.torso && fabsf(x.legsFrame - x.torsoFrame) < 0.01f)
 			drive(x.legs, x.legsFrame, x.legsSpeed, (x.flags & TAKE_LEGS_LOOP) != 0, PARTS_BOTH);
@@ -866,41 +880,59 @@ namespace
 			drive(x.torso, x.torsoFrame, x.torsoSpeed, (x.flags & TAKE_TORSO_LOOP) != 0, PARTS_TORSO);
 		}
 		SetSabers(o.entNum, x.flags);
-		Hold(o.entNum);
 	}
 
 	bool Contains(const std::vector<int>& v, const int e) { return std::find(v.begin(), v.end(), e) != v.end(); }
 
-	// takes and timeline clips drive their actors (exactly, frame by frame) while the studio is open
-	// or recording. A clip that is playing wins over the take; otherwise the active take drives
-	// (holding its first/last pose outside its range); otherwise a held clip; otherwise the game.
+	// Takes, keys and timeline clips drive their actors while the studio is open or recording.
+	// Body (position, facing): the active take; else the position keys. Animation: a clip that is playing;
+	// else the active take; else a clip holding its last frame; else the game. Takes and keys only drive
+	// props (PROP OFF hands the actor to the game).
 	void EvaluateScene()
 	{
 		Studio& s = S();
 		const int64_t t = s.scene.clock.timeUs;
 		std::vector<int> ghosts;
+		s.takeEnts.clear();
 		for (auto& o : s.scene.objects)
 		{
 			if (o.type != ObjType::Actor || o.entNum < 0) continue;
 			const bool recordingOver = s.rec != Studio::REC_IDLE && o.id == s.recTarget;
-			const Take* tk = Scene::ActiveTake(o);
+			const Take* tk = o.prop ? Scene::ActiveTake(o) : nullptr;
 			const bool ghost = o.ghost || (s.rec != Studio::REC_IDLE && s.recGhostOthers && tk && !recordingOver);
 			if (ghost) { SetGhost(o.entNum, 0.4f); ghosts.push_back(o.entNum); }
 			if (o.entNum == s.previewEnt || recordingOver) continue;
+
+			// body
+			TakeSample x;
+			const bool haveTake = tk && tk->Evaluate(t - tk->startUs, x);
+			if (haveTake)
+			{
+				SetTakeBody(o.entNum, x.origin, x.velocity, x.yaw, x.pitch);
+				s.takeEnts.push_back(o.entNum);
+			}
+			else if (o.prop && !o.keys.empty() && !(s.dragging && o.id == s.scene.selected))
+			{
+				float org[3], yaw, vel[3];
+				EvaluateKeys(o.keys, t, org, yaw, vel);
+				const bool live = s.scene.clock.playing && !s.scrubbing;
+				const float still[3] = { 0, 0, 0 };
+				SetTakeBody(o.entNum, org, live ? vel : still, yaw, 0);
+			}
+
+			// animation
 			int64_t local = 0;
 			bool holding = false;
 			const AnimClip* c = o.clips.empty() ? nullptr : Scene::ActiveClip(o, t, local, holding);
-			if (tk && (!c || holding))
-			{
-				DriveTake(o, *tk, t);
-				continue;
-			}
+			if (haveTake && (!c || holding)) { DriveTakeAnim(o, x, *tk); Hold(o.entNum); continue; }
 			if (!c) { Unhold(o.entNum); continue; }	// before the first clip the game animates the actor
 			AnimInfo ai;
 			if (!AnimInfoFor(o.entNum, AnimByName(c->anim), ai)) continue;	// this skeleton lacks the animation
 			int sf, ef;
 			const float f = ClipFrame(*c, ai, local, holding, sf, ef);
-			PoseAnim(o.entNum, ai.anim, c->parts, f, 0.0f, false, sf, ef, 0);
+			const float engineSpeed = 50.0f / static_cast<float>(std::max(1, ai.frameLerp)) * c->speed;
+			if (holding) DriveAnim(o.entNum, ai, c->parts, f, 0.0f, false, 0, sf, ef);
+			else DriveAnim(o.entNum, ai, c->parts, f, engineSpeed, c->loop, c->blendMs, sf, ef);
 			Hold(o.entNum);
 		}
 		for (const int e : s.ghostEnts) if (!Contains(ghosts, e)) SetGhost(e, 1.0f);
@@ -1091,6 +1123,8 @@ namespace
 	}
 
 	// the selected timeline clip, edited in the SCENE inspector
+	void SplitAtPlayhead();
+	void SetKeyAtPlayhead();
 	bool DrawTakeEditor(const float x, float y)
 	{
 		Studio& s = S();
@@ -1111,7 +1145,33 @@ namespace
 		if (Button(x + w - 28, y, 12, 9, "-")) { s.scene.SetTakeStart(id, tid, t->startUs - step, true); return true; }
 		if (Button(x + w - 14, y, 12, 9, "+")) { s.scene.SetTakeStart(id, tid, t->startUs + step, true); return true; }
 		y += kRow;
-		Label(x, y, "length", Fmt("%.2fs", static_cast<double>(t->LengthUs()) / 1e6), w); y += kRow;
+		Label(x, y, "length", Fmt("%.2fs of %.2fs", static_cast<double>(t->LengthUs()) / 1e6, static_cast<double>(t->RecordedUs()) / 1e6), w); y += kRow;
+		{
+			Take e = *t;
+			bool ch = false;
+			Label(x, y, "trim in", Fmt("%.2fs", static_cast<double>(t->trimInUs) / 1e6), w);
+			if (Button(x + w - 28, y, 12, 9, "-")) { e.trimInUs -= step; e.startUs -= step; ch = true; }
+			if (Button(x + w - 14, y, 12, 9, "+")) { e.trimInUs += step; e.startUs += step; ch = true; }	// the rest stays put
+			y += kRow;
+			Label(x, y, "trim out", Fmt("%.2fs", static_cast<double>(t->trimOutUs) / 1e6), w);
+			if (Button(x + w - 28, y, 12, 9, "-")) { e.trimOutUs -= step; ch = true; }
+			if (Button(x + w - 14, y, 12, 9, "+")) { e.trimOutUs += step; ch = true; }
+			y += kRow;
+			Label(x, y, "offset", Fmt("%.0f %.0f %.0f  turn %.0f", t->offset[0], t->offset[1], t->offset[2], t->yawOffset), w);
+			y += kRow;
+			const float bw4 = (w - 6) / 4;
+			if (Button(x, y, bw4, 9, "UP")) { e.offset[2] += s.shift ? 16.0f : 1.0f; ch = true; }
+			if (Button(x + bw4 + 2, y, bw4, 9, "DOWN")) { e.offset[2] -= s.shift ? 16.0f : 1.0f; ch = true; }
+			if (Button(x + 2 * (bw4 + 2), y, bw4, 9, "RESET")) { e.offset[0] = e.offset[1] = e.offset[2] = 0; e.yawOffset = 0; ch = true; }
+			if (Button(x + 3 * (bw4 + 2), y, bw4, 9, "SPLIT")) { SplitAtPlayhead(); return true; }
+			y += kRow + 1;
+			if (ch)
+			{
+				if (e.trimInUs < 0) { e.startUs -= e.trimInUs; e.trimInUs = 0; }
+				s.scene.SetTake(id, e, true);
+				return true;
+			}
+		}
 		Label(x, y, "samples", Fmt("%d  (%d animations)", static_cast<int>(t->Samples().size()), static_cast<int>(t->Anims().size())), w); y += kRow + 1;
 		const bool act = o->activeTake == tid;
 		if (Button(x, y, 50, 10, act ? "ACTIVE" : "USE", act)) { s.scene.SetActiveTake(id, act ? 0 : tid); return true; }
@@ -1123,8 +1183,8 @@ namespace
 		}
 		if (Button(x + w - 48, y, 48, 10, "DELETE")) { s.scene.RemoveTake(id, tid); return true; }
 		y += 13;
-		Text(x, y, "drag takes on the timeline; SHIFT = 1s", kDim); y += kRow;
-		Text(x, y, "a playing clip overrides the take", kDim);
+		Text(x, y, "drag on timeline; drag actor: move take", kDim); y += kRow;
+		Text(x, y, "CTRL+drag actor: turn take  SHIFT = 1s", kDim);
 		return true;
 	}
 
@@ -1157,14 +1217,97 @@ namespace
 		if (Button(x + w - 14, y, 12, 9, "+")) { c.speed = std::min(4.0f, c.speed + 0.05f); changed = true; }
 		y += kRow;
 		Label(x, y, "frames", Fmt("%d - %s", c.startFrame, c.endFrame < 0 ? "end" : std::to_string(c.endFrame).c_str()), w);
+		y += kRow;
+		Label(x, y, "blend in", Fmt("%d ms", c.blendMs), w);
+		if (Button(x + w - 28, y, 12, 9, "-")) { c.blendMs = std::max(0, c.blendMs - 50); changed = true; }
+		if (Button(x + w - 14, y, 12, 9, "+")) { c.blendMs = std::min(1000, c.blendMs + 50); changed = true; }
 		y += kRow + 1;
 		const char* pn = c.parts == PARTS_LEGS ? "LEGS" : (c.parts == PARTS_TORSO ? "TORSO" : "BOTH");
 		if (Button(x, y, 50, 10, pn)) { c.parts = c.parts == PARTS_BOTH ? PARTS_LEGS : (c.parts == PARTS_LEGS ? PARTS_TORSO : PARTS_BOTH); changed = true; }
 		if (Button(x + 52, y, 40, 10, "LOOP", c.loop)) { c.loop = !c.loop; changed = true; }
+		if (Button(x + 94, y, 30, 10, "SPLIT")) { SplitAtPlayhead(); return true; }
 		if (Button(x + w - 48, y, 48, 10, "DELETE")) { s.scene.RemoveClip(o->id, idx); return true; }
 		y += 13;
-		Text(x, y, "drag clips on the timeline; SHIFT = 1s", kDim);
+		Text(x, y, "drag on timeline; CTRL+B split; SHIFT=1s", kDim);
 		if (changed) s.scene.SetClip(o->id, idx, c, true);
+		return true;
+	}
+
+	// ---- Phase 4 helpers ----
+	// where the actor is now (a take or keys may be moving it)
+	bool ShownTransform(const Object& o, float org[3], float& yaw)
+	{
+		Studio& s = S();
+		const int64_t t = s.scene.clock.timeUs;
+		const Take* tk = o.prop ? Scene::ActiveTake(o) : nullptr;
+		TakeSample x;
+		if (tk && tk->Evaluate(t - tk->startUs, x)) { VectorCopy(x.origin, org); yaw = x.yaw; return true; }
+		float vel[3];
+		if (o.prop && EvaluateKeys(o.keys, t, org, yaw, vel)) return true;
+		VectorCopy(o.origin, org);
+		yaw = o.angles[YAW];
+		return true;
+	}
+
+	void SetKeyAtPlayhead()
+	{
+		Studio& s = S();
+		const Object* o = s.scene.Find(s.scene.selected);
+		if (!o || o->type != ObjType::Actor) { s.host.Log(1, "Select an actor to key"); return; }
+		if (o->prop && Scene::ActiveTake(*o)) { s.host.Log(1, o->name + ": a take moves it (USE NONE on its takes to key it instead)"); return; }
+		TransformKey k;
+		const int64_t frameUs = 1'000'000 / s.scene.clock.fps;
+		k.tUs = s.scene.clock.timeUs / frameUs * frameUs;
+		ShownTransform(*o, k.origin, k.yaw);
+		for (auto& e : o->keys) if (e.tUs == k.tUs) k.interp = e.interp;
+		const int id = o->id;
+		if (s.scene.SetKey(id, k)) { s.keyObj = id; s.keyUs = k.tUs; s.host.Log(0, o->name + ": key at " + s.scene.clock.Timecode()); }
+	}
+
+	void SplitAtPlayhead()
+	{
+		Studio& s = S();
+		const int id = s.scene.selected;
+		const int64_t t = s.scene.clock.timeUs;
+		if (s.scene.selectedClip >= 0) { if (s.scene.SplitClip(id, s.scene.selectedClip, t) < 0) s.host.Log(1, "Put the playhead inside the clip to split it"); return; }
+		if (s.scene.selectedTake) { if (!s.scene.SplitTake(id, s.scene.selectedTake, t)) s.host.Log(1, "Put the playhead inside the take to split it"); return; }
+		s.host.Log(1, "Select a clip or a take to split (CTRL+B)");
+	}
+
+	bool DrawKeyEditor(const float x, float y)
+	{
+		Studio& s = S();
+		Object* o = s.scene.Find(s.keyObj);
+		const TransformKey* k = nullptr;
+		if (o && o->id == s.scene.selected) for (auto& e : o->keys) if (e.tUs == s.keyUs) k = &e;
+		if (!k) { s.keyObj = 0; return false; }
+		const float w = kRightW - 12;
+		Text(x, y, "POSITION KEY", kAccent);
+		if (Button(x + w - 40, y - 1, 40, 10, "CLOSE")) { s.keyObj = 0; return false; }
+		y += 11;
+		Label(x, y, "actor", o->name, w); y += kRow;
+		Label(x, y, "time", Fmt("%.3fs", static_cast<double>(k->tUs) / 1e6), w); y += kRow;
+		Label(x, y, "position", Fmt("%.0f %.0f %.0f", k->origin[0], k->origin[1], k->origin[2]), w); y += kRow;
+		Label(x, y, "yaw", Fmt("%.0f", k->yaw), w); y += kRow + 1;
+		const int id = o->id;
+		const int64_t at = k->tUs;
+		static const Interp kOrder[] = { Interp::Smooth, Interp::Linear, Interp::CatmullRom, Interp::Step };
+		int cur = 0;
+		for (int i = 0; i < 4; i++) if (kOrder[i] == k->interp) cur = i;
+		if (Button(x, y, 70, 10, std::string("TO NEXT: ") + InterpName(k->interp))) { s.scene.SetKeyInterp(id, at, kOrder[(cur + 1) % 4]); return true; }
+		if (Button(x + 72, y, 46, 10, "GO TO")) { s.scene.clock.Pause(); s.scene.clock.timeUs = at; }
+		if (Button(x + w - 40, y, 40, 10, "DELETE")) { s.scene.RemoveKey(id, at); s.keyObj = 0; return true; }
+		y += 12;
+		if (Button(x, y, w, 10, "SET FROM WHERE IT IS NOW"))
+		{
+			TransformKey nk = *k;
+			EntInfo info;
+			if (EntityInfo(o->entNum, info)) { VectorCopy(info.origin, nk.origin); nk.yaw = info.yaw; s.scene.SetKey(id, nk); }
+			return true;
+		}
+		y += 13;
+		Text(x, y, "K: key at playhead  drag keys in time", kDim); y += kRow;
+		Text(x, y, "drag the actor at a key's time to move it", kDim);
 		return true;
 	}
 
@@ -1174,8 +1317,7 @@ namespace
 		Studio& s = S();
 		const Object* o = s.scene.Find(s.scene.selected);
 		if (!o || o->type != ObjType::Actor || o->entNum < 0) return false;
-		VectorCopy(o->origin, org);
-		yaw = o->angles[YAW];
+		ShownTransform(*o, org, yaw);
 		id = o->id;
 		return true;
 	}
@@ -1215,6 +1357,12 @@ namespace
 		s.dragZ = org[2];
 		s.dragStartX = s.clickX;
 		s.dragStartYaw = yaw;
+		VectorCopy(org, s.dragOrgStart);
+		{
+			Object* o = s.scene.Find(id);
+			const Take* tk = o && o->prop ? Scene::ActiveTake(*o) : nullptr;
+			if (tk) { VectorCopy(tk->offset, s.dragTakeOff); s.dragTakeYaw = tk->yawOffset; }
+		}
 		float hit[3];
 		if (RayToPlane(s.clickX, s.clickY, s.dragZ, hit)) { s.dragOff[0] = org[0] - hit[0]; s.dragOff[1] = org[1] - hit[1]; }
 		else s.dragOff[0] = s.dragOff[1] = 0;
@@ -1238,8 +1386,32 @@ namespace
 			org[0] = hit[0] + s.dragOff[0];
 			org[1] = hit[1] + s.dragOff[1];
 		}
-		if (fabsf(org[0] - s.scene.Find(id)->origin[0]) > 0.01f || fabsf(org[1] - s.scene.Find(id)->origin[1]) > 0.01f ||
-			fabsf(ang[YAW] - yaw) > 0.01f)
+		Object* o = s.scene.Find(id);
+		const Take* tk = o->prop ? Scene::ActiveTake(*o) : nullptr;
+		if (tk)
+		{
+			// a take moves it: move / turn the whole take
+			Take e = *tk;
+			if (s.dragTurn) e.yawOffset = AngleNormalize180(s.dragTakeYaw + (ang[YAW] - s.dragStartYaw));
+			else for (int i = 0; i < 2; i++) e.offset[i] = s.dragTakeOff[i] + (org[i] - s.dragOrgStart[i]);
+			s.scene.SetTake(id, e, true);
+			return;
+		}
+		if (o->prop && !o->keys.empty())
+		{
+			// keys move it: key it where it's dropped, at the playhead
+			const int64_t frameUs = 1'000'000 / s.scene.clock.fps;
+			TransformKey k;
+			k.tUs = s.scene.clock.timeUs / frameUs * frameUs;
+			for (auto& e : o->keys) if (e.tUs == k.tUs) k = e;
+			VectorCopy(org, k.origin);
+			k.origin[2] = s.dragZ;
+			k.yaw = ang[YAW];
+			s.scene.SetKey(id, k, true);
+			s.host.SetActorTransform(o->entNum, k.origin, ang);
+			return;
+		}
+		if (fabsf(org[0] - o->origin[0]) > 0.01f || fabsf(org[1] - o->origin[1]) > 0.01f || fabsf(ang[YAW] - yaw) > 0.01f)
 			s.scene.SetTransform(id, org, ang, true);
 	}
 
@@ -1284,6 +1456,7 @@ namespace
 		default:
 			if (DrawClipEditor(ix, y)) break;
 			if (DrawTakeEditor(ix, y)) break;
+			if (DrawKeyEditor(ix, y)) break;
 			Text(ix, y, "INSPECTOR", kAccent); y += 12;
 			if (sel && sel->type == ObjType::Camera) DrawCameraInspector(ix, y, sel);
 			else if (sel) DrawActorInspector(ix, y, sel, -1);
@@ -1409,10 +1582,51 @@ namespace
 		}
 	}
 
+	// the visible part of the timeline
+	void ViewRange(int64_t& start, int64_t& len)
+	{
+		Studio& s = S();
+		const int64_t total = std::max<int64_t>(1, s.scene.clock.lengthUs);
+		len = s.viewLenUs > 0 ? std::min(s.viewLenUs, total) : total;
+		start = std::max<int64_t>(0, std::min(s.viewStartUs, total - len));
+	}
+
 	float TimeToX(const int64_t us, const float x0, const float w)
 	{
-		const Clock& c = S().scene.clock;
-		return x0 + (c.lengthUs > 0 ? static_cast<float>(static_cast<double>(us) / static_cast<double>(c.lengthUs)) : 0.0f) * w;
+		int64_t vs, vl;
+		ViewRange(vs, vl);
+		return x0 + static_cast<float>(static_cast<double>(us - vs) / static_cast<double>(vl)) * w;
+	}
+
+	int64_t XToTime(const float x, const float x0, const float w)
+	{
+		int64_t vs, vl;
+		ViewRange(vs, vl);
+		return vs + static_cast<int64_t>(static_cast<double>((x - x0) / w) * static_cast<double>(vl));
+	}
+
+	// snap a time to the playhead and the edges of clips, takes and keys within 5 pixels (skip: the dragged item)
+	int64_t Snap(int64_t t, const float lw, const int skipObj, const int skipClip, const int skipTake, const int64_t skipKey = -1)
+	{
+		Studio& s = S();
+		if (!s.snap || s.shift) return t;	// SHIFT: free
+		int64_t vs, vl;
+		ViewRange(vs, vl);
+		const int64_t range = static_cast<int64_t>(5.0 / lw * static_cast<double>(vl));
+		int64_t best = t, bestD = range + 1;
+		const auto tryT = [&](const int64_t c) { const int64_t d = c > t ? c - t : t - c; if (d < bestD) { bestD = d; best = c; } };
+		tryT(s.scene.clock.timeUs);
+		tryT(0);
+		for (auto& o : s.scene.objects)
+		{
+			for (size_t i = 0; i < o.clips.size(); i++)
+				if (!(o.id == skipObj && static_cast<int>(i) == skipClip)) { tryT(o.clips[i].startUs); tryT(o.clips[i].startUs + o.clips[i].lengthUs); }
+			for (auto& tk : o.takes)
+				if (!(o.id == skipObj && tk.id == skipTake)) { tryT(tk.startUs); tryT(tk.EndUs()); }
+			for (auto& k : o.keys)
+				if (!(o.id == skipObj && k.tUs == skipKey)) tryT(k.tUs);
+		}
+		return bestD <= range ? best : t;
 	}
 
 	void DrawTransport()
@@ -1441,7 +1655,9 @@ namespace
 			c.speed = speeds[i % 5];
 		}
 		if (B(30, "LOOP", c.loop)) c.loop = !c.loop;
-		x += 8;
+		if (B(30, "SNAP", s.snap)) s.snap = !s.snap;
+		if (B(36, "CLASH", s.clashes)) s.clashes = !s.clashes;
+		x += 4;
 		Text(x, y + 4, Fmt("length %ds", static_cast<int>(c.lengthUs / 1000000)), kDim);
 		x += 52;
 		if (B(12, "-") && c.lengthUs > 1000000) { c.lengthUs -= 1000000; if (c.timeUs > c.lengthUs) c.timeUs = c.lengthUs; s.scene.dirty = true; }
@@ -1458,18 +1674,22 @@ namespace
 
 		// ruler
 		Rect(lx, y0, lw, kRulerH, kPanelDark);
-		const double secs = static_cast<double>(c.lengthUs) / 1e6;
-		const int every = secs <= 20 ? 1 : (secs <= 60 ? 5 : (secs <= 300 ? 15 : 60));
-		for (int sec = 0; sec <= static_cast<int>(secs); sec += every)
+		int64_t vs, vl;
+		ViewRange(vs, vl);
+		const double secs = static_cast<double>(vl) / 1e6;
+		const double every = secs <= 2 ? 0.25 : (secs <= 5 ? 0.5 : (secs <= 20 ? 1 : (secs <= 60 ? 5 : (secs <= 300 ? 15 : 60))));
+		for (double sec = std::floor(static_cast<double>(vs) / 1e6 / every) * every; sec <= static_cast<double>(vs + vl) / 1e6; sec += every)
 		{
-			const float tx = TimeToX(static_cast<int64_t>(sec) * 1000000, lx, lw);
+			if (sec < 0) continue;
+			const float tx = TimeToX(static_cast<int64_t>(sec * 1e6), lx, lw);
 			Rect(tx, y0 + 6, 0.6f, kRulerH - 6, kLine);
-			Text(tx + 1.5f, y0 + 1, Fmt("%d", sec), kDim, 0.34f);
+			Text(tx + 1.5f, y0 + 1, every < 1 ? Fmt("%.2f", sec) : Fmt("%d", static_cast<int>(sec)), kDim, 0.34f);
 		}
-		const double framePx = lw / std::max(1.0, static_cast<double>(c.FrameCount()));
+		const double framePx = lw / std::max(1.0, static_cast<double>(vl) * c.fps / 1e6);
 		if (framePx >= 3)
-			for (int64_t f = 0; f <= c.FrameCount(); f++)
-				Rect(lx + static_cast<float>(f * framePx), y0 + kRulerH - 3, 0.4f, 3, kLine);
+			for (int64_t f = vs * c.fps / 1'000'000; f * 1'000'000 / c.fps <= vs + vl; f++)
+				Rect(TimeToX(f * 1'000'000 / c.fps, lx, lw), y0 + kRulerH - 3, 0.4f, 3, kLine);
+		if (s.viewLenUs > 0) Text(lx + lw - 70, y0 + 1, Fmt("zoom %.1fs  CTRL+wheel", static_cast<double>(vl) / 1e6), kAccent, 0.32f);
 
 		// dragging a clip along its lane (whole frames)
 		if (s.clipDragIndex >= 0)
@@ -1478,10 +1698,14 @@ namespace
 			if (!s.lmb || !o || s.clipDragIndex >= static_cast<int>(o->clips.size())) s.clipDragIndex = -1;
 			else
 			{
-				const double tAt = static_cast<double>((s.cx - lx) / lw) * static_cast<double>(c.lengthUs);
 				const int64_t frameUs = 1000000 / c.fps;
-				int64_t start = static_cast<int64_t>(tAt) - s.clipDragGrabUs;
+				int64_t start = XToTime(s.cx, lx, lw) - s.clipDragGrabUs;
 				start = std::max<int64_t>(0, (start + frameUs / 2) / frameUs * frameUs);
+				{
+					const AnimClip& dc = o->clips[static_cast<size_t>(s.clipDragIndex)];
+					const int64_t a = Snap(start, lw, o->id, s.clipDragIndex, 0), b = Snap(start + dc.lengthUs, lw, o->id, s.clipDragIndex, 0) - dc.lengthUs;
+					start = std::max<int64_t>(0, a != start ? a : b);	// either edge may snap
+				}
 				if (start != o->clips[static_cast<size_t>(s.clipDragIndex)].startUs)
 				{
 					AnimClip moved = o->clips[static_cast<size_t>(s.clipDragIndex)];
@@ -1489,6 +1713,19 @@ namespace
 					s.scene.SetClip(o->id, s.clipDragIndex, moved, true);
 					s.clipDragIndex = s.scene.selectedClip;
 				}
+			}
+		}
+
+		// dragging a position key (whole frames)
+		if (s.keyDrag)
+		{
+			if (!s.lmb || !s.scene.Find(s.keyObj)) s.keyDrag = false;
+			else
+			{
+				const int64_t frameUs = 1000000 / c.fps;
+				int64_t at = std::max<int64_t>(0, (XToTime(s.cx, lx, lw) + frameUs / 2) / frameUs * frameUs);
+				at = Snap(at, lw, s.keyObj, -1, 0, s.keyUs);
+				if (at != s.keyUs && s.scene.MoveKey(s.keyObj, s.keyUs, at, true)) s.keyUs = at;
 			}
 		}
 
@@ -1500,10 +1737,13 @@ namespace
 			if (!s.lmb || !tk) s.takeDragId = 0;
 			else
 			{
-				const double tAt = static_cast<double>((s.cx - lx) / lw) * static_cast<double>(c.lengthUs);
 				const int64_t frameUs = 1000000 / c.fps;
-				int64_t start = static_cast<int64_t>(tAt) - s.takeDragGrabUs;
+				int64_t start = XToTime(s.cx, lx, lw) - s.takeDragGrabUs;
 				start = std::max<int64_t>(0, (start + frameUs / 2) / frameUs * frameUs);
+				{
+					const int64_t a = Snap(start, lw, o->id, -1, tk->id), b = Snap(start + tk->LengthUs(), lw, o->id, -1, tk->id) - tk->LengthUs();
+					start = std::max<int64_t>(0, a != start ? a : b);
+				}
 				if (start != tk->startUs) s.scene.SetTakeStart(o->id, tk->id, start, true);
 			}
 		}
@@ -1514,18 +1754,29 @@ namespace
 		if (!s.lmb) s.scrubbing = false;
 		if (s.scrubbing)
 		{
-			const double t = std::max(0.0, std::min(1.0, static_cast<double>((s.cx - lx) / lw)));
+			const int64_t t = std::max<int64_t>(0, std::min(c.lengthUs, XToTime(s.cx, lx, lw)));
 			c.playing = false;
-			c.SetFrame(static_cast<int64_t>(t * static_cast<double>(c.FrameCount()) + 0.5));
+			c.SetFrame((t * c.fps + 500'000) / 1'000'000);
 		}
 
 		// tracks
 		float ry = y0 + kRulerH + 1;
 		Text(4, ry + 1, "TRACKS", kAccent);
 		const int maxRows = static_cast<int>((h - kRulerH - 2) / kRow);
-		if (overTime || Inside(s.cx, s.cy, 0, y0, kW, h))
+		if ((overTime || Inside(s.cx, s.cy, 0, y0, kW, h)) && s.wheel)
 		{
-			s.timelineScroll -= static_cast<float>(s.wheel);
+			int64_t vs2, vl2;
+			ViewRange(vs2, vl2);
+			if (s.ctrl && overTime)
+			{
+				// zoom about the time under the cursor
+				const int64_t at = XToTime(s.cx, lx, lw);
+				const int64_t nl = std::max<int64_t>(500'000, std::min(c.lengthUs, static_cast<int64_t>(static_cast<double>(vl2) * (s.wheel > 0 ? 0.7 : 1.43))));
+				s.viewStartUs = std::max<int64_t>(0, at - static_cast<int64_t>(static_cast<double>(at - vs2) * static_cast<double>(nl) / static_cast<double>(vl2)));
+				s.viewLenUs = nl >= c.lengthUs ? 0 : nl;
+			}
+			else if (s.shift) s.viewStartUs = std::max<int64_t>(0, vs2 - static_cast<int64_t>(s.wheel) * vl2 / 8);	// pan
+			else s.timelineScroll -= static_cast<float>(s.wheel);
 			s.wheel = 0;
 		}
 		const int count = static_cast<int>(s.scene.objects.size());
@@ -1543,7 +1794,7 @@ namespace
 				{
 					const bool act = tk.id == o.activeTake;
 					if (!act && !(o.id == s.scene.selected && tk.id == s.scene.selectedTake)) continue;	// only the active (or selected) take
-					const float tx0 = TimeToX(tk.startUs, lx, lw), tx1 = TimeToX(tk.startUs + tk.LengthUs(), lx, lw);
+					const float tx0 = TimeToX(tk.startUs, lx, lw), tx1 = TimeToX(tk.EndUs(), lx, lw);
 					const bool tsel = o.id == s.scene.selected && tk.id == s.scene.selectedTake;
 					const vec4_t body = { 0.62f, 0.36f, 0.85f, act ? (tsel ? 0.85f : 0.6f) : 0.3f };
 					Rect(tx0, yy + 1, std::max(2.0f, tx1 - tx0), kRow - 2, body);
@@ -1567,8 +1818,31 @@ namespace
 						s.tab = TAB_SCENE;
 						s.takeDragObj = o.id;
 						s.takeDragId = tk.id;
-						const double tAt = static_cast<double>((s.clickX - lx) / lw) * static_cast<double>(c.lengthUs);
-						s.takeDragGrabUs = static_cast<int64_t>(tAt) - tk.startUs;
+						s.takeDragGrabUs = XToTime(s.clickX, lx, lw) - tk.startUs;
+						s.keyObj = 0;
+					}
+				}
+			// position keys: diamonds along the bottom of the lane
+			if (o.type == ObjType::Actor)
+				for (auto& k : o.keys)
+				{
+					const float kx = TimeToX(k.tUs, lx, lw);
+					if (kx < lx - 3 || kx > lx + lw + 3) continue;
+					const bool ksel = s.keyObj == o.id && s.keyUs == k.tUs;
+					const vec4_t kc = { 1.0f, 0.85f, 0.25f, ksel ? 1.0f : 0.8f };
+					Rect(kx - 2, yy + kRow - 5, 4, 4, ksel ? kAccent : kc);
+					if (s.clicked && Inside(s.clickX, s.clickY, kx - 3, yy + kRow - 6, 6, 6))
+					{
+						s.clicked = false;
+						s.scene.selected = o.id;
+						s.lastSel = o.id;
+						s.levelSel = -1;
+						s.scene.selectedClip = -1;
+						s.scene.selectedTake = 0;
+						s.keyObj = o.id;
+						s.keyUs = k.tUs;
+						s.keyDrag = true;
+						s.tab = TAB_SCENE;
 					}
 				}
 			if (o.type == ObjType::Actor && !o.clips.empty())
@@ -1598,8 +1872,8 @@ namespace
 						s.tab = TAB_SCENE;
 						s.clipDragObj = o.id;
 						s.clipDragIndex = static_cast<int>(ci);
-						const double tAt = static_cast<double>((s.clickX - lx) / lw) * static_cast<double>(s.scene.clock.lengthUs);
-						s.clipDragGrabUs = static_cast<int64_t>(tAt) - c.startUs;
+						s.clipDragGrabUs = XToTime(s.clickX, lx, lw) - c.startUs;
+						s.keyObj = 0;
 					}
 				}
 			}
@@ -1622,7 +1896,7 @@ namespace
 		}
 		else
 			Text(4, sy + 1, "F10 close   TAB hide panels   SPACE play   , . step   CTRL+Z/Y undo/redo   CTRL+S save   "
-				"right mouse + WASD fly   F focus   P freeze world", kDim, 0.36f);
+				"right mouse + WASD fly   F focus   P freeze   K key   CTRL+B split   N snap", kDim, 0.36f);
 	}
 
 	void DrawViewportOverlay()
@@ -1961,6 +2235,7 @@ namespace
 		s.dragging = false;
 		s.clipDragIndex = -1;
 		s.takeDragId = 0;
+		s.keyDrag = false;
 		cgi_Cvar_Set("cs_active", "0");
 		if (Frozen()) SetFreeze(false);	// back to regular gameplay
 	}
@@ -2190,6 +2465,9 @@ int CS_KeyEvent(int key, const int down)
 		else s.scene.Remove(s.scene.selected);
 	}
 	else if (is(ACT_DUPLICATE)) s.scene.Duplicate(s.scene.selected);
+	else if (is(ACT_SPLIT)) SplitAtPlayhead();
+	else if (is(ACT_KEY)) SetKeyAtPlayhead();
+	else if (is(ACT_SNAP)) { s.snap = !s.snap; s.host.Log(0, s.snap ? "Snapping on" : "Snapping off"); }
 	else if (is(ACT_FOCUS)) Focus();
 	else if (is(ACT_FREEZE)) SetFreeze(!Frozen());
 	else if (is(ACT_PLAYER_VIEW)) PlayerView();
@@ -2241,6 +2519,8 @@ void CS_Frame()
 	if (s.open || s.rec != Studio::REC_IDLE)
 	{
 		EvaluateScene();
+		// saber clashes with takes while the scene plays (recording: your attacks bounce off them)
+		if (s.clashes && s.scene.clock.playing && !s.takeEnts.empty()) DetectClashes(s.takeEnts, s.rec == Studio::REC_RECORDING);
 	}
 
 	if (s.open && s.camActive && s.rmb)
@@ -2297,7 +2577,7 @@ void CS_Draw2D()
 {
 	if (!g_s || !g_s->open) return;
 	Studio& s = S();
-	if (s.scene.selected != s.lastSel) { s.scene.selectedClip = -1; s.scene.selectedTake = 0; s.lastSel = s.scene.selected; }
+	if (s.scene.selected != s.lastSel) { s.scene.selectedClip = -1; s.scene.selectedTake = 0; s.keyObj = 0; s.lastSel = s.scene.selected; }
 	UpdateDrag();
 	DrawGizmo();
 	if (s.panels)

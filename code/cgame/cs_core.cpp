@@ -326,7 +326,8 @@ namespace cs
 	bool Take::operator==(const Take& o) const
 	{
 		return id == o.id && name == o.name && startUs == o.startUs && profile == o.profile && performer == o.performer &&
-			Anims() == o.Anims() && Samples() == o.Samples();
+			trimInUs == o.trimInUs && trimOutUs == o.trimOutUs && offset[0] == o.offset[0] && offset[1] == o.offset[1] &&
+			offset[2] == o.offset[2] && yawOffset == o.yawOffset && Anims() == o.Anims() && Samples() == o.Samples();
 	}
 
 	TakeData& Take::Edit()
@@ -352,7 +353,30 @@ namespace cs
 		return a + d * f;
 	}
 
-	bool Take::Evaluate(int64_t t, TakeSample& out) const
+	bool Take::Evaluate(const int64_t localUs, TakeSample& out) const
+	{
+		const int64_t local = std::max<int64_t>(0, std::min(localUs, LengthUs()));
+		if (!EvaluateRaw(local + trimInUs, out)) return false;
+		out.tUs = localUs;
+		if (offset[0] != 0 || offset[1] != 0 || offset[2] != 0 || yawOffset != 0)
+		{
+			// turned about where the recording starts, then moved
+			const float* pivot = data->samples.front().origin;
+			const double r = static_cast<double>(yawOffset) * 3.14159265358979323846 / 180.0;
+			const float c = static_cast<float>(std::cos(r)), sn = static_cast<float>(std::sin(r));
+			const float dx = out.origin[0] - pivot[0], dy = out.origin[1] - pivot[1];
+			out.origin[0] = pivot[0] + dx * c - dy * sn + offset[0];
+			out.origin[1] = pivot[1] + dx * sn + dy * c + offset[1];
+			out.origin[2] += offset[2];
+			const float vx = out.velocity[0], vy = out.velocity[1];
+			out.velocity[0] = vx * c - vy * sn;
+			out.velocity[1] = vx * sn + vy * c;
+			out.yaw += yawOffset;
+		}
+		return true;
+	}
+
+	bool Take::EvaluateRaw(int64_t t, TakeSample& out) const
 	{
 		const auto& samples = data->samples;
 		if (samples.empty()) return false;
@@ -492,6 +516,202 @@ namespace cs
 		Object after = *o;
 		after.ghost = on;
 		return Change(after, false);
+	}
+
+	// ------------------------------------------------------------------------------------------
+	// Phase 4: take / clip editing, keys
+	// ------------------------------------------------------------------------------------------
+
+	const char* InterpName(const Interp i)
+	{
+		switch (i)
+		{
+		case Interp::Step: return "step";
+		case Interp::Linear: return "linear";
+		case Interp::CatmullRom: return "curve";
+		default: return "smooth";
+		}
+	}
+
+	static Interp InterpFromName(const std::string& n)
+	{
+		if (n == "step") return Interp::Step;
+		if (n == "linear") return Interp::Linear;
+		if (n == "curve") return Interp::CatmullRom;
+		return Interp::Smooth;
+	}
+
+	static float Unwrap(const float from, float to)
+	{
+		while (to - from > 180.0f) to -= 360.0f;
+		while (to - from < -180.0f) to += 360.0f;
+		return to;
+	}
+
+	static void KeyPos(const std::vector<TransformKey>& k, const int i, const float t, float out[3], float& yaw)
+	{
+		// segment i -> i+1 at t (0..1), in the interpolation of key i
+		const int n = static_cast<int>(k.size());
+		const TransformKey& a = k[static_cast<size_t>(i)];
+		const TransformKey& b = k[static_cast<size_t>(std::min(i + 1, n - 1))];
+		const float by = Unwrap(a.yaw, b.yaw);
+		float f = t;
+		switch (a.interp)
+		{
+		case Interp::Step: f = 0; break;
+		case Interp::Smooth: f = t * t * (3 - 2 * t); break;
+		default: break;
+		}
+		if (a.interp == Interp::CatmullRom)
+		{
+			const TransformKey& p0 = k[static_cast<size_t>(std::max(i - 1, 0))];
+			const TransformKey& p3 = k[static_cast<size_t>(std::min(i + 2, n - 1))];
+			const float t2 = t * t, t3 = t2 * t;
+			for (int j = 0; j < 3; j++)
+				out[j] = 0.5f * (2 * a.origin[j] + (-p0.origin[j] + b.origin[j]) * t +
+					(2 * p0.origin[j] - 5 * a.origin[j] + 4 * b.origin[j] - p3.origin[j]) * t2 +
+					(-p0.origin[j] + 3 * a.origin[j] - 3 * b.origin[j] + p3.origin[j]) * t3);
+			const float y0 = Unwrap(a.yaw, p0.yaw), y3 = Unwrap(by, p3.yaw);
+			yaw = 0.5f * (2 * a.yaw + (-y0 + by) * t + (2 * y0 - 5 * a.yaw + 4 * by - y3) * t2 + (-y0 + 3 * a.yaw - 3 * by + y3) * t3);
+			return;
+		}
+		for (int j = 0; j < 3; j++) out[j] = a.origin[j] + (b.origin[j] - a.origin[j]) * f;
+		yaw = a.yaw + (by - a.yaw) * f;
+	}
+
+	bool EvaluateKeys(const std::vector<TransformKey>& k, const int64_t t, float origin[3], float& yaw, float velocity[3])
+	{
+		for (int j = 0; j < 3; j++) velocity[j] = 0;
+		if (k.empty()) return false;
+		if (t <= k.front().tUs) { std::copy(k.front().origin, k.front().origin + 3, origin); yaw = k.front().yaw; return true; }
+		if (t >= k.back().tUs) { std::copy(k.back().origin, k.back().origin + 3, origin); yaw = k.back().yaw; return true; }
+		size_t i = 0;
+		while (i + 1 < k.size() && k[i + 1].tUs <= t) i++;
+		const double span = static_cast<double>(k[i + 1].tUs - k[i].tUs);
+		const float f = static_cast<float>(static_cast<double>(t - k[i].tUs) / span);
+		KeyPos(k, static_cast<int>(i), f, origin, yaw);
+		// velocity from a small step (the game swings the legs from it)
+		const float df = static_cast<float>(std::min(0.02, 10'000.0 / span));
+		float o2[3], y2;
+		KeyPos(k, static_cast<int>(i), std::min(1.0f, f + df), o2, y2);
+		const float dt = static_cast<float>(span / 1e6) * (std::min(1.0f, f + df) - f);
+		if (dt > 0) for (int j = 0; j < 3; j++) velocity[j] = (o2[j] - origin[j]) / dt;
+		return true;
+	}
+
+	bool Scene::SetTake(const int id, const Take& edited, const bool coalesce)
+	{
+		const Object* o = Find(id);
+		if (!o) return false;
+		Object after = *o;
+		Take* t = FindTake(after, edited.id);
+		if (!t) return false;
+		Take e = edited;
+		e.startUs = std::max<int64_t>(0, e.startUs);
+		e.trimInUs = std::max<int64_t>(0, std::min(e.trimInUs, e.RecordedUs() - 1000));
+		e.trimOutUs = std::max<int64_t>(0, std::min(e.trimOutUs, e.RecordedUs() - e.trimInUs - 1000));
+		if (e == *t) return true;
+		*t = e;
+		return Change(after, coalesce, "take " + std::to_string(e.id));
+	}
+
+	int Scene::SplitTake(const int id, const int takeId, const int64_t atUs)
+	{
+		const Object* o = Find(id);
+		if (!o) return 0;
+		Object after = *o;
+		Take* t = FindTake(after, takeId);
+		if (!t || atUs <= t->startUs + 1000 || atUs >= t->EndUs() - 1000) return 0;
+		Take second = *t;		// shares the recording
+		const int64_t cut = atUs - t->startUs;
+		t->trimOutUs += t->LengthUs() - cut;
+		second.trimInUs += cut;
+		second.startUs = atUs;
+		int top = 0;
+		for (auto& k : after.takes) top = std::max(top, k.id);
+		second.id = top + 1;
+		second.name = t->name + " b";
+		after.takes.push_back(second);
+		Change(after, false);
+		selectedTake = second.id;
+		return second.id;
+	}
+
+	int Scene::SplitClip(const int id, const int index, const int64_t atUs)
+	{
+		const Object* o = Find(id);
+		if (!o || index < 0 || index >= static_cast<int>(o->clips.size())) return -1;
+		Object after = *o;
+		AnimClip& c = after.clips[static_cast<size_t>(index)];
+		if (atUs <= c.startUs + 1000 || atUs >= c.startUs + c.lengthUs - 1000) return -1;
+		AnimClip second = c;
+		const int64_t cut = atUs - c.startUs;
+		c.lengthUs = cut;
+		second.startUs = atUs;
+		second.lengthUs -= cut;
+		second.animOffsetUs += cut;
+		second.blendMs = 0;		// it carries straight on
+		after.clips.push_back(second);
+		std::stable_sort(after.clips.begin(), after.clips.end(), [](const AnimClip& a, const AnimClip& b) { return a.startUs < b.startUs; });
+		Change(after, false);
+		const Object* n = Find(id);
+		for (size_t i = 0; n && i < n->clips.size(); i++)
+			if (n->clips[i] == second) { selectedClip = static_cast<int>(i); return selectedClip; }
+		return -1;
+	}
+
+	static void SortKeys(std::vector<TransformKey>& k)
+	{
+		std::stable_sort(k.begin(), k.end(), [](const TransformKey& a, const TransformKey& b) { return a.tUs < b.tUs; });
+	}
+
+	bool Scene::SetKey(const int id, const TransformKey& key, const bool coalesce)
+	{
+		const Object* o = Find(id);
+		if (!o || o->type != ObjType::Actor) return false;
+		Object after = *o;
+		TransformKey k = key;
+		k.tUs = std::max<int64_t>(0, k.tUs);
+		bool replaced = false;
+		for (auto& e : after.keys) if (e.tUs == k.tUs) { e = k; replaced = true; }
+		if (!replaced) after.keys.push_back(k);
+		SortKeys(after.keys);
+		after.prop = true;	// keys move a prop
+		return Change(after, coalesce, "key " + std::to_string(k.tUs));
+	}
+
+	bool Scene::MoveKey(const int id, const int64_t fromUs, int64_t toUs, const bool coalesce)
+	{
+		const Object* o = Find(id);
+		if (!o) return false;
+		toUs = std::max<int64_t>(0, toUs);
+		Object after = *o;
+		TransformKey* k = nullptr;
+		for (auto& e : after.keys) { if (e.tUs == fromUs) k = &e; else if (e.tUs == toUs) return false; }	// one key per time
+		if (!k) return false;
+		k->tUs = toUs;
+		SortKeys(after.keys);
+		return Change(after, coalesce, "key move");
+	}
+
+	bool Scene::RemoveKey(const int id, const int64_t tUs)
+	{
+		const Object* o = Find(id);
+		if (!o) return false;
+		Object after = *o;
+		const size_t n = after.keys.size();
+		after.keys.erase(std::remove_if(after.keys.begin(), after.keys.end(), [&](const TransformKey& k) { return k.tUs == tUs; }), after.keys.end());
+		return after.keys.size() != n && Change(after, false);
+	}
+
+	bool Scene::SetKeyInterp(const int id, const int64_t tUs, const Interp interp)
+	{
+		const Object* o = Find(id);
+		if (!o) return false;
+		Object after = *o;
+		for (auto& k : after.keys)
+			if (k.tUs == tUs) { if (k.interp == interp) return true; k.interp = interp; return Change(after, false); }
+		return false;
 	}
 
 	static void SortClips(std::vector<AnimClip>& c)
@@ -764,6 +984,8 @@ namespace cs
 					k.set("loop", c.loop);
 					k.set("startFrame", c.startFrame);
 					k.set("endFrame", c.endFrame);
+					k.set("blendMs", c.blendMs);
+					if (c.animOffsetUs) k.set("animOffsetUs", static_cast<double>(c.animOffsetUs));
 					clips.push(k);
 				}
 				j.set("clips", clips);
@@ -779,6 +1001,10 @@ namespace cs
 					k.set("startUs", static_cast<double>(t.startUs));
 					k.set("profile", t.profile);
 					k.set("performer", t.performer);
+					if (t.trimInUs) k.set("trimInUs", static_cast<double>(t.trimInUs));
+					if (t.trimOutUs) k.set("trimOutUs", static_cast<double>(t.trimOutUs));
+					if (t.offset[0] != 0 || t.offset[1] != 0 || t.offset[2] != 0) k.set("offset", Vec(t.offset));
+					if (t.yawOffset != 0) k.set("yawOffset", static_cast<double>(t.yawOffset));
 					Json an = Json::MakeArray();
 					for (auto& a : t.Anims()) an.push(a);
 					k.set("anims", an);
@@ -797,6 +1023,20 @@ namespace cs
 					takes.push(k);
 				}
 				if (!o.takes.empty()) j.set("takes", takes);
+				if (!o.keys.empty())
+				{
+					Json keys = Json::MakeArray();
+					for (auto& k : o.keys)
+					{
+						Json kj = Json::MakeObject();
+						kj.set("tUs", static_cast<double>(k.tUs));
+						kj.set("origin", Vec(k.origin));
+						kj.set("yaw", static_cast<double>(k.yaw));
+						kj.set("interp", InterpName(k.interp));
+						keys.push(kj);
+					}
+					j.set("keys", keys);
+				}
 			}
 			else j.set("fov", static_cast<double>(o.fov));
 			objs.push(j);
@@ -910,6 +1150,8 @@ namespace cs
 					c.loop = cj.get("loop").asBool(false);
 					c.startFrame = cj.get("startFrame").asInt(0);
 					c.endFrame = cj.get("endFrame").asInt(-1);
+					c.blendMs = cj.get("blendMs").asInt(100);
+					c.animOffsetUs = static_cast<int64_t>(cj.get("animOffsetUs").asNumber(0));
 					if (!c.anim.empty()) o.clips.push_back(c);
 				}
 				SortClips(o.clips);
@@ -925,6 +1167,10 @@ namespace cs
 					t.startUs = static_cast<int64_t>(tj.get("startUs").asNumber(0));
 					t.profile = tj.get("profile").asString();
 					t.performer = tj.get("performer").asString();
+					t.trimInUs = static_cast<int64_t>(tj.get("trimInUs").asNumber(0));
+					t.trimOutUs = static_cast<int64_t>(tj.get("trimOutUs").asNumber(0));
+					ReadVec(tj.get("offset"), t.offset);
+					t.yawOffset = static_cast<float>(tj.get("yawOffset").asNumber(0));
 					const Json& an = tj.get("anims");
 					for (size_t q = 0; q < an.size(); q++) t.AnimIndex(an[q].asString());
 					const Json& sm = tj.get("samples");
@@ -968,6 +1214,19 @@ namespace cs
 					else warnings.push_back(o.name + ": take '" + t.name + "' is empty or damaged, skipped");
 				}
 				o.activeTake = j.get("activeTake").asInt(0);
+				const Json& keys = j.get("keys");
+				for (size_t k = 0; k < keys.size(); k++)
+				{
+					TransformKey key;
+					key.tUs = static_cast<int64_t>(keys[k].get("tUs").asNumber(0));
+					ReadVec(keys[k].get("origin"), key.origin);
+					key.yaw = static_cast<float>(keys[k].get("yaw").asNumber(0));
+					key.interp = InterpFromName(keys[k].get("interp").asString());
+					bool dup = false;
+					for (auto& e : o.keys) dup = dup || e.tUs == key.tUs;
+					if (!dup) o.keys.push_back(key);
+				}
+				SortKeys(o.keys);
 				if (!ActiveTake(o)) o.activeTake = 0;
 				// level NPCs that were adopted aren't in a fresh level by name: the studio respawns them
 				o.adopted = false;

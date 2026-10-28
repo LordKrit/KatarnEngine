@@ -7,6 +7,7 @@ builds and is unit-tested outside the engine (tests/cinematic_studio).
 */
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -36,10 +37,13 @@ namespace cs
 		bool loop = false;			// loops until the next clip (else holds its last frame)
 		int startFrame = 0;			// range inside the animation (relative frames)
 		int endFrame = -1;			// -1 = last frame
+		int blendMs = 100;			// blend into this clip from what played before (Phase 4)
+		int64_t animOffsetUs = 0;	// starts this far into its animation (the second half of a split clip)
 		bool operator==(const AnimClip& o) const
 		{
 			return startUs == o.startUs && lengthUs == o.lengthUs && anim == o.anim && parts == o.parts &&
-				speed == o.speed && loop == o.loop && startFrame == o.startFrame && endFrame == o.endFrame;
+				speed == o.speed && loop == o.loop && startFrame == o.startFrame && endFrame == o.endFrame &&
+				blendMs == o.blendMs && animOffsetUs == o.animOffsetUs;
 		}
 	};
 	const char* ObjTypeName(ObjType t);
@@ -78,20 +82,46 @@ namespace cs
 		int64_t startUs = 0;		// scene time the take starts
 		std::string profile;		// animation set the performer had (for information)
 		std::string performer;		// NPC type / "player"
+		// Phase 4: trimmed off the start / end of the recording, and moved / turned as a whole
+		// (turned about where the recording starts)
+		int64_t trimInUs = 0, trimOutUs = 0;
+		float offset[3] = { 0, 0, 0 };
+		float yawOffset = 0;
 
 		const std::vector<TakeSample>& Samples() const { return data->samples; }
 		const std::vector<std::string>& Anims() const { return data->anims; }
 		TakeData& Edit();				// the data, copied first if another take shares it
 		void Add(const TakeSample& s) { Edit().samples.push_back(s); }
-		int64_t LengthUs() const { return data->samples.empty() ? 0 : data->samples.back().tUs; }
+		int64_t RecordedUs() const { return data->samples.empty() ? 0 : data->samples.back().tUs; }
+		int64_t LengthUs() const { return std::max<int64_t>(0, RecordedUs() - trimInUs - trimOutUs); }	// on the timeline
+		int64_t EndUs() const { return startUs + LengthUs(); }
 		int AnimIndex(const std::string& name);	// adds it if new
 		// the performance at a time into the take (clamped to the take): positions, velocity and angles are
 		// interpolated; an animation frame is interpolated while the same animation keeps playing forward
-		bool Evaluate(int64_t localUs, TakeSample& out) const;
+		bool Evaluate(int64_t localUs, TakeSample& out) const;	// localUs: time into the (trimmed) take; with offsets
+		bool EvaluateRaw(int64_t recordedUs, TakeSample& out) const;	// the recording itself
 		bool operator==(const Take& o) const;
 	private:
 		std::shared_ptr<TakeData> data = std::make_shared<TakeData>();
 	};
+
+	// ---- Phase 4: keyframed position ----
+	enum class Interp { Step, Linear, Smooth, CatmullRom };
+	const char* InterpName(Interp i);
+	struct TransformKey
+	{
+		int64_t tUs = 0;
+		float origin[3] = { 0, 0, 0 };
+		float yaw = 0;
+		Interp interp = Interp::Smooth;	// how it moves from this key to the next
+		bool operator==(const TransformKey& o) const
+		{
+			return tUs == o.tUs && origin[0] == o.origin[0] && origin[1] == o.origin[1] && origin[2] == o.origin[2] &&
+				yaw == o.yaw && interp == o.interp;
+		}
+	};
+	// position and facing from keys at a time (holds the first / last key outside them); velocity in units/s
+	bool EvaluateKeys(const std::vector<TransformKey>& keys, int64_t t, float origin[3], float& yaw, float velocity[3]);
 
 	struct Object
 	{
@@ -114,6 +144,7 @@ namespace cs
 		bool ghost = false;		// drawn see-through (a guide while recording over it)
 		std::vector<Take> takes;	// recorded performances
 		int activeTake = 0;		// id of the take that drives the actor (0 = none)
+		std::vector<TransformKey> keys;	// sorted by tUs; move a prop when no take drives it
 
 		// camera
 		float fov = 80.0f;
@@ -216,6 +247,14 @@ namespace cs
 		bool RemoveTake(int id, int takeId);
 		bool SetProp(int id, bool on);
 		bool SetGhost(int id, bool on);
+		bool SetTake(int id, const Take& edited, bool coalesce);	// trims, offsets, name (same take id)
+		int SplitTake(int id, int takeId, int64_t atUs);		// returns the second part's id
+		int SplitClip(int id, int index, int64_t atUs);			// returns the second part's index
+		// keys (undoable): one key per time; setting a key where one is replaces it
+		bool SetKey(int id, const TransformKey& key, bool coalesce = false);
+		bool MoveKey(int id, int64_t fromUs, int64_t toUs, bool coalesce);
+		bool RemoveKey(int id, int64_t tUs);
+		bool SetKeyInterp(int id, int64_t tUs, Interp interp);
 		static const Take* ActiveTake(const Object& o);
 		static Take* FindTake(Object& o, int takeId);
 		int selectedTake = 0;	// take id in the selected object (0 = none)

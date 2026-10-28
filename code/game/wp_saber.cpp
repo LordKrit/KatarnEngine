@@ -48075,3 +48075,22 @@ qboolean wp_saber_Off_Dash_Evasion(gentity_t* self, vec3_t hitloc)
 
 	return qtrue;
 }
+// Cinematic Studio: a saber clash the studio found between a recorded take and another blade (the game
+// only clashes when the defender's own combat code blocks, which a played-back take doesn't run).
+// Same sound, sparks and screen flash as a game block; `bounce` knocks a live attacker's swing back.
+void CS_SaberClash(gentity_t* ent, const int saberNum, const int bladeNum, vec3_t position, vec3_t normal, gentity_t* bounce)
+{
+	if (!ent || !ent->client) return;
+	WP_SaberBlockSound(ent, saberNum, bladeNum);
+	WP_SaberBlockEffect(ent, saberNum, bladeNum, position, normal, qfalse);
+	if (!g_noClashFlare)
+	{
+		g_saberFlashTime = level.time - 50;
+		VectorCopy(position, g_saberFlashPos);
+	}
+	if (bounce && bounce->client && bounce->health > 0 && PM_SaberInAttack(bounce->client->ps.saberMove) &&
+		bounce->client->ps.saberBlocked == BLOCKED_NONE)
+	{
+		bounce->client->ps.saberBlocked = BLOCKED_ATK_BOUNCE;	// the attack bounces off, as against a real block
+	}
+}

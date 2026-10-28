@@ -24,6 +24,7 @@ JK BUILD: Cinematic Studio - Actor Manager, game side (Phase 2).
 #include <cstring>
 #include <map>
 
+extern void CS_SaberClash(gentity_t* ent, int saberNum, int bladeNum, vec3_t position, vec3_t normal, gentity_t* bounce);
 extern int G_ParseAnimFileSet(const char* skeletonName, const char* model_name = nullptr);
 
 int g_csGlaOffset[MAX_GENTITIES];	// per entity: target .gla handle - model's own .gla handle
@@ -632,12 +633,14 @@ namespace cs
 	}
 
 	// play an animation on the legs or torso at the engine speed it was recorded with
-	bool PlayAnimAt(const int ent, const int anim, const int parts, const float frame, const float speed, const bool loop, const int blendMs)
+	bool PlayAnimAt(const int ent, const int anim, const int parts, const float frame, const float speed, const bool loop, const int blendMs,
+		const int startFrame, const int endFrame)
 	{
 		gentity_t* e = Actor(ent);
 		int first, num, lerp, gla; bool loops;
 		if (!e || !Resolve(e, anim, first, num, lerp, loops, gla)) return false;
-		const int s0 = first, s1 = first + num;
+		const int ef = endFrame < 0 || endFrame >= num ? num - 1 : endFrame;
+		const int s0 = first + std::max(0, std::min(startFrame, ef)), s1 = first + ef + 1;
 		int flags = loop ? BONE_ANIM_OVERRIDE_LOOP : BONE_ANIM_OVERRIDE_FREEZE;
 		if (blendMs > 0) flags |= BONE_ANIM_BLEND;
 		const float setFrame = std::max(static_cast<float>(s0), std::min(static_cast<float>(s1) - 0.001f, first + frame));
@@ -663,17 +666,20 @@ namespace cs
 	}
 
 	// the frame the engine is showing on the legs or torso, relative to `anim` (false if it plays something else)
-	bool LiveFrame(const int ent, const int parts, const int anim, float& rel)
+	bool LiveFrame(const int ent, const int parts, const int anim, float& rel, const int startFrame, const int endFrame)
 	{
 		gentity_t* e = Actor(ent);
 		int first, num, lerp, gla; bool loops;
 		if (!e || !Resolve(e, anim, first, num, lerp, loops, gla)) return false;
+		const int last = endFrame < 0 || endFrame >= num ? num - 1 : endFrame;
+		const int s0 = first + std::max(0, std::min(startFrame, last));
+		num = last + 1;	// end of the range (relative)
 		const int bone = parts == PARTS_TORSO ? e->lowerLumbarBone : e->rootBone;
 		if (bone == -1) return false;
 		float cur = 0, sp = 0;
 		int sf = 0, ef = 0, fl = 0, ml = 0;
 		if (!gi.G2API_GetBoneAnimIndex(&e->ghoul2[e->playerModel], bone, AnimTime(), &cur, &sf, &ef, &fl, &sp, &ml)) return false;
-		if (sf != first || ef != first + num) return false;
+		if (sf != s0 || ef != first + num) return false;
 		rel = cur - static_cast<float>(first);
 		return true;
 	}
@@ -685,6 +691,116 @@ namespace cs
 		if (!e || ent == 0 || !e->client->noclip) return;
 		e->contents = solid ? CONTENTS_BODY : 0;
 		gi.linkentity(e);
+	}
+
+	// ---- Phase 4: saber clashes with takes ------------------------------------------------------
+
+	namespace
+	{
+		// closest points between segments p1-q1 and p2-q2; returns the squared distance
+		float SegSeg(const vec3_t p1, const vec3_t q1, const vec3_t p2, const vec3_t q2, vec3_t c1, vec3_t c2)
+		{
+			vec3_t d1, d2, r;
+			VectorSubtract(q1, p1, d1);
+			VectorSubtract(q2, p2, d2);
+			VectorSubtract(p1, p2, r);
+			const float a = DotProduct(d1, d1), e = DotProduct(d2, d2), f = DotProduct(d2, r);
+			float s = 0, t = 0;
+			if (a <= 1e-6f && e <= 1e-6f) { VectorCopy(p1, c1); VectorCopy(p2, c2); }
+			else if (a <= 1e-6f) t = std::max(0.0f, std::min(1.0f, f / e));
+			else
+			{
+				const float c = DotProduct(d1, r);
+				if (e <= 1e-6f) s = std::max(0.0f, std::min(1.0f, -c / a));
+				else
+				{
+					const float b = DotProduct(d1, d2), den = a * e - b * b;
+					s = den != 0 ? std::max(0.0f, std::min(1.0f, (b * f - c * e) / den)) : 0.0f;
+					t = (b * s + f) / e;
+					if (t < 0) { t = 0; s = std::max(0.0f, std::min(1.0f, -c / a)); }
+					else if (t > 1) { t = 1; s = std::max(0.0f, std::min(1.0f, (b - c) / a)); }
+				}
+			}
+			VectorMA(p1, s, d1, c1);
+			VectorMA(p2, t, d2, c2);
+			vec3_t d;
+			VectorSubtract(c1, c2, d);
+			return DotProduct(d, d);
+		}
+
+		struct Blade { int ent, saber, blade; vec3_t base, tip, baseOld, tipOld; };
+
+		void Blades(gentity_t* e, std::vector<Blade>& out)
+		{
+			if (!e || !e->client || e->health <= 0 || e->client->ps.weapon != WP_SABER || e->client->ps.saberInFlight) return;
+			for (int s = 0; s < (e->client->ps.dualSabers ? 2 : 1); s++)
+			{
+				const saberInfo_t& sab = e->client->ps.saber[s];
+				for (int b = 0; b < sab.numBlades; b++)
+				{
+					const bladeInfo_t& bl = sab.blade[b];
+					if (!bl.active || bl.length <= 1) continue;
+					Blade x;
+					x.ent = e->s.number; x.saber = s; x.blade = b;
+					VectorCopy(bl.muzzlePoint, x.base);
+					VectorMA(bl.muzzlePoint, bl.length, bl.muzzleDir, x.tip);
+					VectorCopy(bl.muzzlePointOld, x.baseOld);
+					VectorMA(bl.muzzlePointOld, bl.length, bl.muzzleDirOld, x.tipOld);
+					out.push_back(x);
+				}
+			}
+		}
+
+		std::map<int, int> g_clashUntil;	// pair -> level.time until which it can't clash again
+	}
+
+	int DetectClashes(const std::vector<int>& takeEnts, const bool bounceLive)
+	{
+		std::vector<Blade> driven, others;
+		for (const int n : takeEnts) Blades(Actor(n), driven);
+		if (driven.empty()) return 0;
+		for (int i = 0; i < ENTITYNUM_WORLD; i++)
+		{
+			gentity_t* e = &g_entities[i];
+			if (!e->inuse || !e->client || std::find(takeEnts.begin(), takeEnts.end(), i) != takeEnts.end()) continue;
+			if (i != 0 && !e->NPC) continue;
+			Blades(Actor(i), others);
+		}
+		for (auto& b : driven) others.push_back(b);		// takes clash with each other too
+		int n = 0;
+		for (auto& a : driven)
+			for (auto& b : others)
+			{
+				if (a.ent == b.ent) continue;
+				const int key = std::min(a.ent, b.ent) * MAX_GENTITIES + std::max(a.ent, b.ent);
+				auto it = g_clashUntil.find(key);
+				if (it != g_clashUntil.end() && it->second > level.time) continue;
+				// now, and halfway through the last frame's swing
+				vec3_t c1, c2, m1, m2, m3, m4;
+				float d = SegSeg(a.base, a.tip, b.base, b.tip, c1, c2);
+				for (int k = 0; k < 3; k++)
+				{
+					m1[k] = (a.base[k] + a.baseOld[k]) * 0.5f; m2[k] = (a.tip[k] + a.tipOld[k]) * 0.5f;
+					m3[k] = (b.base[k] + b.baseOld[k]) * 0.5f; m4[k] = (b.tip[k] + b.tipOld[k]) * 0.5f;
+				}
+				vec3_t e1, e2;
+				const float dm = SegSeg(m1, m2, m3, m4, e1, e2);
+				if (dm < d) { d = dm; VectorCopy(e1, c1); VectorCopy(e2, c2); }
+				if (d > 3.0f * 3.0f) continue;
+				vec3_t pos, normal;
+				VectorAdd(c1, c2, pos);
+				VectorScale(pos, 0.5f, pos);
+				VectorSubtract(b.tip, b.base, normal);
+				vec3_t ad;
+				VectorSubtract(a.tip, a.base, ad);
+				CrossProduct(ad, normal, normal);
+				if (VectorNormalize(normal) < 0.001f) VectorSet(normal, 0, 0, 1);
+				const bool bLive = std::find(takeEnts.begin(), takeEnts.end(), b.ent) == takeEnts.end();
+				CS_SaberClash(&g_entities[a.ent], a.saber, a.blade, pos, normal, bounceLive && bLive ? &g_entities[b.ent] : nullptr);
+				g_clashUntil[key] = level.time + 250;
+				n++;
+			}
+		return n;
 	}
 
 	bool GameHost::SetActorProfile(const int ent, const std::string& profile, std::string& why, const bool force)
