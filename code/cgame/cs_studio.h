@@ -17,6 +17,7 @@ namespace cs
 		bool GetActorTransform(int ent, float origin[3], float angles[3]) override;
 		void SetActorTransform(int ent, const float origin[3], const float angles[3]) override;
 		void SetActorAI(int ent, bool on) override;
+		void SetActorProp(int ent, bool on) override;
 		bool SetActorProfile(int ent, const std::string& profile, std::string& why, bool force) override;
 		std::string MapName() override;
 		bool WriteFile(const std::string& path, const std::string& data) override;
@@ -66,6 +67,12 @@ namespace cs
 	bool CheckProfile(int ent, const std::string& profile, std::string& why);
 	bool SetProfile(int ent, const std::string& profile, std::string& why, bool force = false);
 	bool ViewRay(float sx, float sy, float dir[3]);			// virtual screen point -> world direction
+
+	// ---- Recorder (Phase 3) ----
+	void SetHidden(int ent, bool hide);			// not drawn, not solid (an actor being re-recorded)
+	void SetGhost(int ent, float alpha);		// drawn see-through (1 = solid)
+	void SetSabers(int ent, int takeFlags);		// TAKE_SABER1/2 on or off
+	bool SamplePlayer(Take& take, TakeSample& out);	// the player's state now (adds animation names to the take)
 }
 
 // called from the cgame
@@ -78,3 +85,4 @@ void CS_Frame();						// every CG_DrawActiveFrame, before the view is built
 bool CS_ApplyView();					// after the view is built: the studio camera, if active
 bool CS_IsOpen();
 void CS_Draw2D();						// instead of the HUD while the studio is open
+void CS_DrawOverlay();					// over the HUD while it's closed (recording)

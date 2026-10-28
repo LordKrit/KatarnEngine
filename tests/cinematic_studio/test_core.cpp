@@ -13,7 +13,7 @@ static int g_fail = 0, g_pass = 0;
 class FakeHost : public Host
 {
 public:
-	struct Ent { std::string npc, name; float o[3], a[3]; bool ai = false; bool alive = true; std::string profile; };
+	struct Ent { std::string npc, name; float o[3], a[3]; bool ai = false; bool alive = true; std::string profile; bool prop = false; };
 	std::map<int, Ent> ents;
 	std::map<std::string, std::string> files;
 	std::string map = "md_test";
@@ -48,6 +48,7 @@ public:
 		ents[ent].profile = p;
 		return true;
 	}
+	void SetActorProp(int ent, bool on) override { ents[ent].prop = on; }
 	std::string MapName() override { return map; }
 	bool WriteFile(const std::string& p, const std::string& d) override { files[p] = d; return true; }
 	bool ReadFile(const std::string& p, std::string& out) override
@@ -284,8 +285,106 @@ static void TestPhase2()
 	CHECK(h.ents[lo->entNum].profile == "_humanoid_vader");
 }
 
+static Take MakeTake()
+{
+	Take t;
+	t.performer = "player";
+	const int stand = t.AnimIndex("BOTH_STAND1"), walk = t.AnimIndex("BOTH_WALK1");
+	CHECK(t.AnimIndex("BOTH_STAND1") == stand && t.anims.size() == 2);
+	for (int i = 0; i <= 10; i++)
+	{
+		TakeSample x;
+		x.tUs = i * 100'000;
+		x.origin[0] = static_cast<float>(i * 10);
+		x.yaw = i < 5 ? 170.0f : -170.0f;
+		x.legs = i < 6 ? stand : walk;
+		x.legsFrame = static_cast<float>(i < 6 ? i * 2 : (i - 6) * 3);
+		x.torso = stand;
+		x.torsoFrame = static_cast<float>(i == 8 ? 0 : i);	// loops back at 8
+		x.flags = i >= 3 ? TAKE_SABER1 : 0;
+		t.samples.push_back(x);
+	}
+	return t;
+}
+
+static void TestPhase3()
+{
+	FakeHost h;
+	Scene s(&h);
+	const float o[3] = { 0, 0, 0 }, a[3] = { 0, 0, 0 };
+
+	// evaluation: interpolation, clamping, animation changes and loops
+	Take t = MakeTake();
+	CHECK(t.LengthUs() == 1'000'000);
+	TakeSample x;
+	CHECK(t.Evaluate(150'000, x) && std::fabs(x.origin[0] - 15) < 1e-4 && std::fabs(x.legsFrame - 3) < 1e-4 && x.legs == 0);
+	CHECK(t.Evaluate(-5, x) && x.origin[0] == 0 && t.Evaluate(5'000'000, x) && x.origin[0] == 100);	// clamped
+	CHECK(t.Evaluate(450'000, x) && std::fabs(std::fabs(x.yaw) - 180) < 1e-3);		// shortest way across 180
+	CHECK(t.Evaluate(550'000, x) && x.legs == 0 && std::fabs(x.legsFrame - 10) < 1e-4);	// new animation next: hold
+	CHECK(t.Evaluate(750'000, x) && std::fabs(x.torsoFrame - 7) < 1e-4);					// looping back: hold
+	CHECK(t.Evaluate(350'000, x) && x.flags == TAKE_SABER1);
+	Take empty;
+	CHECK(!empty.Evaluate(0, x));
+
+	// prop mode
+	const int v = s.AddActor("md_vader", o, a);
+	const int ent = s.Find(v)->entNum;
+	CHECK(s.SetProp(v, true) && h.ents[ent].prop && !h.ents[ent].ai);
+	CHECK(!s.SetProp(v, true));
+	CHECK(s.SetAI(v, true) && !h.ents[ent].ai);		// AI stays off while it's a prop
+	CHECK(s.SetProp(v, false) && !h.ents[ent].prop && h.ents[ent].ai);
+	CHECK(s.Undo() && h.ents[ent].prop && s.Undo() && !s.Find(v)->ai && s.Undo() && !h.ents[ent].prop);
+
+	// takes: add, activate, move, rename, remove, undo
+	const int t1 = s.AddTake(v, t, true);
+	CHECK(t1 == 1 && s.Find(v)->activeTake == 1 && s.Find(v)->prop && h.ents[ent].prop && s.selectedTake == 1);
+	CHECK(s.Find(v)->takes[0].name == "Take 1");
+	Take tooShort; tooShort.samples.resize(1);
+	CHECK(!s.AddTake(v, tooShort, true));
+	const int t2 = s.AddTake(v, t, false);
+	CHECK(t2 == 2 && s.Find(v)->activeTake == 1);
+	CHECK(s.SetActiveTake(v, t2) && Scene::ActiveTake(*s.Find(v))->id == 2);
+	CHECK(!s.SetActiveTake(v, 99));
+	CHECK(s.SetTakeStart(v, t2, 500'000, true) && s.SetTakeStart(v, t2, 700'000, true));
+	CHECK(Scene::FindTake(*s.Find(v), t2)->startUs == 700'000);
+	CHECK(s.Undo() && Scene::FindTake(*s.Find(v), t2)->startUs == 0);		// coalesced drag = one undo
+	CHECK(s.RenameTake(v, t2, "Duel B") && Scene::FindTake(*s.Find(v), t2)->name == "Duel B");
+	CHECK(s.RemoveTake(v, t2) && s.Find(v)->activeTake == 1 && s.Find(v)->takes.size() == 1);
+	CHECK(s.Undo() && s.Find(v)->takes.size() == 2 && s.Find(v)->activeTake == 2);
+	CHECK(s.SetGhost(v, true) && s.Find(v)->ghost);
+	CHECK(s.SetActiveTake(v, 0) && !Scene::ActiveTake(*s.Find(v)) && s.Undo());
+
+	// saved and loaded, sample for sample
+	CHECK(s.Save("P3"));
+	Scene l(&h);
+	std::vector<std::string> warn;
+	CHECK(l.Load("P3", false, false, warn) && warn.empty());
+	const Object* lo = l.Find(v);
+	CHECK(lo && lo->prop && lo->ghost && lo->activeTake == 2 && lo->takes.size() == 2);
+	CHECK(lo->takes[0] == s.Find(v)->takes[0] && lo->takes[1] == s.Find(v)->takes[1]);
+	CHECK(h.ents[lo->entNum].prop);
+
+	// a damaged take is skipped with a warning; an older (version 1) project still loads
+	std::string txt = h.files["CinematicStudio/Projects/P3/scenes/scene_01.json"];
+	const size_t at = txt.find("\"samples\": [");
+	CHECK(at != std::string::npos);
+	h.files["CinematicStudio/Projects/P3/scenes/scene_01.json"] = txt.substr(0, at) + "\"samples\":[1,2,3]" +
+		txt.substr(txt.find(']', at) + 1);
+	Scene d(&h);
+	warn.clear();
+	CHECK(d.Load("P3", false, false, warn) && warn.size() == 1 && d.Find(v)->takes.size() == 1);
+	std::string pj = h.files["CinematicStudio/Projects/P3/project.json"];
+	const size_t vp = pj.find("\"version\": 2");
+	CHECK(vp != std::string::npos);
+	h.files["CinematicStudio/Projects/P3/project.json"] = pj.replace(vp, 12, "\"version\": 1");
+	Scene e(&h);
+	warn.clear();
+	CHECK(e.Load("P3", false, false, warn));
+}
+
 int main()
 {
+	TestPhase3();
 	TestPhase2();
 	TestJson();
 	TestClock();

@@ -10888,5 +10888,6 @@ void CG_DrawActive(const stereoFrame_t stereoView)
 	else
 	{
 		CG_Draw2D();
+		CS_DrawOverlay();
 	}
 }

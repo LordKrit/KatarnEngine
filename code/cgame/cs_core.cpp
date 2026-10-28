@@ -4,6 +4,7 @@ JK BUILD: Cinematic Studio - scene, clock, undo/redo and project files (see cs_c
 #include "cs_core.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace cs
@@ -105,7 +106,8 @@ namespace cs
 			host_->Log(1, "Couldn't spawn actor '" + o.name + "' (NPC type '" + o.npcType + "' missing?)");
 			return false;
 		}
-		host_->SetActorAI(o.entNum, o.ai);
+		host_->SetActorAI(o.entNum, o.ai && !o.prop);
+		if (o.prop) host_->SetActorProp(o.entNum, true);
 		if (!o.profile.empty())
 		{
 			std::string why;
@@ -198,7 +200,7 @@ namespace cs
 		std::copy(angles, angles + 3, after.angles);
 		const int64_t now = host_->NowMs();
 		if (coalesce && !undo_.empty() && undo_.back().kind == Op::Change && undo_.back().after.id == id &&
-			now - undo_.back().timeMs < 1000)
+			undo_.back().tag == "transform" && now - undo_.back().timeMs < 1000)
 		{
 			undo_.back().after = after;
 			undo_.back().timeMs = now;
@@ -207,7 +209,7 @@ namespace cs
 		}
 		else
 		{
-			Op op; op.kind = Op::Change; op.before = *o; op.after = after; op.timeMs = now;
+			Op op; op.kind = Op::Change; op.before = *o; op.after = after; op.timeMs = now; op.tag = "transform";
 			Push(op);
 		}
 		Apply(after, true);
@@ -309,6 +311,176 @@ namespace cs
 		return o.id;
 	}
 
+	// ------------------------------------------------------------------------------------------
+	// Takes (Phase 3)
+	// ------------------------------------------------------------------------------------------
+
+	bool TakeSample::operator==(const TakeSample& o) const
+	{
+		return tUs == o.tUs && origin[0] == o.origin[0] && origin[1] == o.origin[1] && origin[2] == o.origin[2] &&
+			yaw == o.yaw && pitch == o.pitch && legs == o.legs && torso == o.torso && legsFrame == o.legsFrame &&
+			torsoFrame == o.torsoFrame && flags == o.flags && weapon == o.weapon;
+	}
+
+	bool Take::operator==(const Take& o) const
+	{
+		return id == o.id && name == o.name && startUs == o.startUs && profile == o.profile && performer == o.performer &&
+			anims == o.anims && samples == o.samples;
+	}
+
+	int Take::AnimIndex(const std::string& n)
+	{
+		if (n.empty()) return -1;
+		for (size_t i = 0; i < anims.size(); i++) if (anims[i] == n) return static_cast<int>(i);
+		anims.push_back(n);
+		return static_cast<int>(anims.size()) - 1;
+	}
+
+	static float LerpAngle(const float a, const float b, const float f)
+	{
+		float d = std::fmod(b - a, 360.0f);
+		if (d > 180.0f) d -= 360.0f;
+		if (d < -180.0f) d += 360.0f;
+		return a + d * f;
+	}
+
+	bool Take::Evaluate(int64_t t, TakeSample& out) const
+	{
+		if (samples.empty()) return false;
+		if (t <= samples.front().tUs) { out = samples.front(); out.tUs = t; return true; }
+		if (t >= samples.back().tUs) { out = samples.back(); out.tUs = t; return true; }
+		// last sample at or before t
+		auto it = std::upper_bound(samples.begin(), samples.end(), t, [](const int64_t v, const TakeSample& s) { return v < s.tUs; });
+		const TakeSample& a = *(it - 1);
+		const TakeSample& b = *it;
+		const float f = b.tUs > a.tUs ? static_cast<float>(static_cast<double>(t - a.tUs) / static_cast<double>(b.tUs - a.tUs)) : 0.0f;
+		out = a;
+		out.tUs = t;
+		for (int i = 0; i < 3; i++) out.origin[i] = a.origin[i] + (b.origin[i] - a.origin[i]) * f;
+		out.yaw = LerpAngle(a.yaw, b.yaw, f);
+		out.pitch = LerpAngle(a.pitch, b.pitch, f);
+		// the same animation playing forward: in between frames; a new animation or a loop: the earlier sample's
+		if (a.legs == b.legs && b.legsFrame >= a.legsFrame) out.legsFrame = a.legsFrame + (b.legsFrame - a.legsFrame) * f;
+		if (a.torso == b.torso && b.torsoFrame >= a.torsoFrame) out.torsoFrame = a.torsoFrame + (b.torsoFrame - a.torsoFrame) * f;
+		return true;
+	}
+
+	const Take* Scene::ActiveTake(const Object& o)
+	{
+		if (!o.activeTake) return nullptr;
+		for (auto& t : o.takes) if (t.id == o.activeTake) return &t;
+		return nullptr;
+	}
+
+	Take* Scene::FindTake(Object& o, const int takeId)
+	{
+		for (auto& t : o.takes) if (t.id == takeId) return &t;
+		return nullptr;
+	}
+
+	bool Scene::Change(const Object& after, const bool coalesce, const std::string& tag)
+	{
+		Object* o = Find(after.id);
+		if (!o) return false;
+		const int64_t now = host_->NowMs();
+		if (coalesce && !undo_.empty() && undo_.back().kind == Op::Change && undo_.back().after.id == after.id &&
+			undo_.back().tag == tag && now - undo_.back().timeMs < 1000)
+		{
+			undo_.back().after = after;
+			undo_.back().timeMs = now;
+			redo_.clear();
+			dirty = true;
+		}
+		else
+		{
+			Op op; op.kind = Op::Change; op.before = *o; op.after = after; op.timeMs = now; op.tag = tag;
+			Push(op);
+		}
+		Apply(after, true);
+		return true;
+	}
+
+	int Scene::AddTake(const int id, Take take, const bool makeActive)
+	{
+		const Object* o = Find(id);
+		if (!o || o->type != ObjType::Actor || take.samples.size() < 2) return 0;
+		Object after = *o;
+		int top = 0;
+		for (auto& t : after.takes) top = std::max(top, t.id);
+		take.id = top + 1;
+		if (take.name.empty()) { char b[32]; snprintf(b, sizeof b, "Take %d", take.id); take.name = b; }
+		after.takes.push_back(take);
+		if (makeActive || !after.activeTake) after.activeTake = take.id;
+		after.prop = true;		// a performance is played back as an animated prop
+		Change(after, false);
+		selectedTake = take.id;
+		return take.id;
+	}
+
+	bool Scene::SetTakeStart(const int id, const int takeId, const int64_t startUs, const bool coalesce)
+	{
+		const Object* o = Find(id);
+		if (!o) return false;
+		Object after = *o;
+		Take* t = FindTake(after, takeId);
+		if (!t) return false;
+		t->startUs = std::max<int64_t>(0, startUs);
+		return Change(after, coalesce, "take start " + std::to_string(takeId));
+	}
+
+	bool Scene::RenameTake(const int id, const int takeId, const std::string& name)
+	{
+		const Object* o = Find(id);
+		if (!o || name.empty()) return false;
+		Object after = *o;
+		Take* t = FindTake(after, takeId);
+		if (!t) return false;
+		t->name = name;
+		return Change(after, false);
+	}
+
+	bool Scene::SetActiveTake(const int id, const int takeId)
+	{
+		const Object* o = Find(id);
+		if (!o) return false;
+		Object after = *o;
+		if (takeId && !FindTake(after, takeId)) return false;
+		if (after.activeTake == takeId) return true;
+		after.activeTake = takeId;
+		return Change(after, false);
+	}
+
+	bool Scene::RemoveTake(const int id, const int takeId)
+	{
+		const Object* o = Find(id);
+		if (!o) return false;
+		Object after = *o;
+		const size_t n = after.takes.size();
+		after.takes.erase(std::remove_if(after.takes.begin(), after.takes.end(), [&](const Take& t) { return t.id == takeId; }), after.takes.end());
+		if (after.takes.size() == n) return false;
+		if (after.activeTake == takeId) after.activeTake = after.takes.empty() ? 0 : after.takes.back().id;
+		if (selectedTake == takeId) selectedTake = 0;
+		return Change(after, false);
+	}
+
+	bool Scene::SetProp(const int id, const bool on)
+	{
+		const Object* o = Find(id);
+		if (!o || o->type != ObjType::Actor || o->prop == on) return false;
+		Object after = *o;
+		after.prop = on;
+		return Change(after, false);
+	}
+
+	bool Scene::SetGhost(const int id, const bool on)
+	{
+		const Object* o = Find(id);
+		if (!o || o->type != ObjType::Actor || o->ghost == on) return false;
+		Object after = *o;
+		after.ghost = on;
+		return Change(after, false);
+	}
+
 	static void SortClips(std::vector<AnimClip>& c)
 	{
 		std::stable_sort(c.begin(), c.end(), [](const AnimClip& a, const AnimClip& b) { return a.startUs < b.startUs; });
@@ -345,8 +517,8 @@ namespace cs
 		c.lengthUs = std::max<int64_t>(1000, c.lengthUs);
 		const int64_t now = host_->NowMs();
 		const bool merge = coalesce && !undo_.empty() && undo_.back().kind == Op::Change && undo_.back().after.id == id &&
-			now - undo_.back().timeMs < 1000;
-		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = now;
+			undo_.back().tag == "clip" && now - undo_.back().timeMs < 1000;
+		Op op; op.kind = Op::Change; op.before = *o; op.timeMs = now; op.tag = "clip";
 		o->clips[static_cast<size_t>(index)] = c;
 		SortClips(o->clips);
 		if (merge) { undo_.back().after = *o; undo_.back().timeMs = now; redo_.clear(); dirty = true; }
@@ -408,7 +580,8 @@ namespace cs
 			return;
 		}
 		const int ent = cur->entNum;
-		const bool aiChanged = cur->ai != state.ai;
+		const bool aiChanged = cur->ai != state.ai || cur->prop != state.prop;
+		const bool propChanged = cur->prop != state.prop;
 		const bool typeChanged = cur->type == ObjType::Actor && cur->npcType != state.npcType;
 		const bool profileChanged = cur->profile != state.profile || cur->profileForced != state.profileForced;
 		*cur = state;
@@ -424,7 +597,8 @@ namespace cs
 		if (cur->entNum >= 0 && host_->ActorAlive(cur->entNum))
 		{
 			host_->SetActorTransform(cur->entNum, cur->origin, cur->angles);
-			if (aiChanged) host_->SetActorAI(cur->entNum, cur->ai);
+			if (propChanged) host_->SetActorProp(cur->entNum, cur->prop);
+			if (aiChanged) host_->SetActorAI(cur->entNum, cur->ai && !cur->prop);
 			if (profileChanged)
 			{
 				std::string why;
@@ -475,6 +649,7 @@ namespace cs
 		redo_.clear();
 		selected = 0;
 		selectedClip = -1;
+		selectedTake = 0;
 		nextId_ = 1;
 		dirty = false;
 	}
@@ -498,7 +673,7 @@ namespace cs
 		{
 			if (o.type != ObjType::Actor || o.entNum < 0) continue;
 			if (!host_->ActorAlive(o.entNum)) { o.entNum = -1; continue; }
-			if (o.ai) host_->GetActorTransform(o.entNum, o.origin, o.angles);
+			if (o.ai && !o.prop) host_->GetActorTransform(o.entNum, o.origin, o.angles);
 		}
 	}
 
@@ -569,6 +744,35 @@ namespace cs
 					clips.push(k);
 				}
 				j.set("clips", clips);
+				if (o.prop) j.set("prop", true);
+				if (o.ghost) j.set("ghost", true);
+				if (o.activeTake) j.set("activeTake", o.activeTake);
+				Json takes = Json::MakeArray();
+				for (auto& t : o.takes)
+				{
+					Json k = Json::MakeObject();
+					k.set("id", t.id);
+					k.set("name", t.name);
+					k.set("startUs", static_cast<double>(t.startUs));
+					k.set("profile", t.profile);
+					k.set("performer", t.performer);
+					Json an = Json::MakeArray();
+					for (auto& a : t.anims) an.push(a);
+					k.set("anims", an);
+					// samples flattened, kTakeFields numbers each (see TakeFields below)
+					Json sm = Json::MakeArray();
+					for (auto& x : t.samples)
+					{
+						const double v[] = { static_cast<double>(x.tUs), x.origin[0], x.origin[1], x.origin[2], x.yaw, x.pitch,
+							static_cast<double>(x.legs), x.legsFrame, static_cast<double>(x.torso), x.torsoFrame,
+							static_cast<double>(x.flags), static_cast<double>(x.weapon) };
+						for (const double d : v) sm.push(Json(d));
+					}
+					k.set("sampleFields", "tUs x y z yaw pitch legs legsFrame torso torsoFrame flags weapon");
+					k.set("samples", sm);
+					takes.push(k);
+				}
+				if (!o.takes.empty()) j.set("takes", takes);
 			}
 			else j.set("fov", static_cast<double>(o.fov));
 			objs.push(j);
@@ -685,6 +889,48 @@ namespace cs
 					if (!c.anim.empty()) o.clips.push_back(c);
 				}
 				SortClips(o.clips);
+				o.prop = j.get("prop").asBool(false);
+				o.ghost = j.get("ghost").asBool(false);
+				const Json& takes = j.get("takes");
+				for (size_t k = 0; k < takes.size(); k++)
+				{
+					const Json& tj = takes[k];
+					Take t;
+					t.id = tj.get("id").asInt(static_cast<int>(k) + 1);
+					t.name = tj.get("name").asString();
+					t.startUs = static_cast<int64_t>(tj.get("startUs").asNumber(0));
+					t.profile = tj.get("profile").asString();
+					t.performer = tj.get("performer").asString();
+					const Json& an = tj.get("anims");
+					for (size_t a = 0; a < an.size(); a++) t.anims.push_back(an[a].asString());
+					const Json& sm = tj.get("samples");
+					constexpr size_t kF = 12;
+					const int na = static_cast<int>(t.anims.size());
+					for (size_t b = 0; b + kF <= sm.size(); b += kF)
+					{
+						TakeSample x;
+						x.tUs = static_cast<int64_t>(sm[b].asNumber());
+						for (int i = 0; i < 3; i++) x.origin[i] = static_cast<float>(sm[b + 1 + i].asNumber());
+						x.yaw = static_cast<float>(sm[b + 4].asNumber());
+						x.pitch = static_cast<float>(sm[b + 5].asNumber());
+						x.legs = sm[b + 6].asInt(-1);
+						x.legsFrame = static_cast<float>(sm[b + 7].asNumber());
+						x.torso = sm[b + 8].asInt(-1);
+						x.torsoFrame = static_cast<float>(sm[b + 9].asNumber());
+						x.flags = sm[b + 10].asInt(0);
+						x.weapon = sm[b + 11].asInt(0);
+						if (x.legs >= na) x.legs = -1;
+						if (x.torso >= na) x.torso = -1;
+						if (!t.samples.empty() && x.tUs < t.samples.back().tUs) continue;	// keep them sorted
+						t.samples.push_back(x);
+					}
+					bool dup = false;
+					for (auto& u : o.takes) dup = dup || u.id == t.id;
+					if (t.samples.size() >= 2 && !dup) o.takes.push_back(t);
+					else warnings.push_back(o.name + ": take '" + t.name + "' is empty or damaged, skipped");
+				}
+				o.activeTake = j.get("activeTake").asInt(0);
+				if (!ActiveTake(o)) o.activeTake = 0;
 				// level NPCs that were adopted aren't in a fresh level by name: the studio respawns them
 				o.adopted = false;
 				if (o.npcType.empty()) { warnings.push_back(o.name + ": no NPC type"); continue; }

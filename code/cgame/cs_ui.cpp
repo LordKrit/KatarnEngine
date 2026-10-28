@@ -182,6 +182,24 @@ namespace
 		int64_t clipDragGrabUs = 0;
 		std::vector<int> heldEnts;	// actors whose animation the studio holds (released on close)
 		int lastSel = 0;
+
+		// ---- Phase 3: recorder ----
+		enum { REC_IDLE, REC_COUNTDOWN, REC_RECORDING } rec = REC_IDLE;
+		int recTarget = 0;			// actor getting the take (0 = a new actor)
+		int recCountdownEnd = 0;	// ms
+		int64_t recPunchUs = 0;		// scene time the take starts
+		int64_t recLastUs = -1;
+		double recOldSpeed = 1.0;
+		bool recOldLoop = false;
+		Take recTake;
+		int recCountdownSec = 3;
+		bool recGhostOthers = true;	// show the other takes see-through while recording
+		std::vector<int> hiddenEnts;	// hidden while recording
+		std::vector<int> ghostEnts;		// entities the studio made see-through
+
+		// take dragging on the timeline
+		int takeDragObj = 0, takeDragId = 0;
+		int64_t takeDragGrabUs = 0;
 	};
 
 	Studio* g_s = nullptr;
@@ -194,6 +212,7 @@ namespace
 	int NowMs() { return cgi_Milliseconds(); }
 	void Close();
 	void ReleasePreview();
+	void StartRecording(int target);
 
 	// ------------------------------------------------------------------------------------------
 	// drawing helpers
@@ -621,7 +640,27 @@ namespace
 			else if (Button(x, y, kRightW - 12, 11, "CHANGE NPC TYPE", false, !o->adopted)) BeginField(FIELD_NPCTYPE, o->npcType), y += 13;
 			else y += 13;
 			if (Button(x, y, kRightW - 12, 11, "ANIMATIONS...")) s.tab = TAB_ANIMS;
-			y += 14;
+			y += 13;
+			if (Button(x, y, bw, 11, o->prop ? "PROP: ON" : "PROP: OFF", o->prop, true)) s.scene.SetProp(o->id, !o->prop);
+			if (Button(x + bw + 2, y, bw, 11, "GHOST", o->ghost)) s.scene.SetGhost(o->id, !o->ghost);
+			if (Button(x + 2 * (bw + 2), y, bw, 11, "RECORD TAKE", false, s.rec == Studio::REC_IDLE)) { StartRecording(o->id); return; }
+			y += 13;
+			Text(x, y, Fmt("TAKES (%d)", static_cast<int>(o->takes.size())), kAccent);
+			if (!o->takes.empty() && Button(x + kRightW - 52, y - 1, 40, 9, "NONE", !o->activeTake)) s.scene.SetActiveTake(o->id, 0);
+			y += 10;
+			int shown = 0;
+			for (auto& t : o->takes)
+			{
+				if (shown++ >= 4) { Text(x, y, Fmt("+%d more (timeline)", static_cast<int>(o->takes.size()) - 4), kDim); y += kRow; break; }
+				const bool act = t.id == o->activeTake, sel = t.id == s.scene.selectedTake;
+				if (sel) Rect(x - 5, y, kRightW - 2, kRow, kSel);
+				TextClip(x, y + 1, Fmt("%s %s  %.1fs", act ? ">" : " ", t.name.c_str(), static_cast<double>(t.LengthUs()) / 1e6), kRightW - 56, act ? kAccent : kTextCol);
+				if (Button(x + kRightW - 52, y, 40, 9, act ? "ACTIVE" : "USE", act)) s.scene.SetActiveTake(o->id, act ? 0 : t.id);
+				else if (TakeClick(x - 5, y, kRightW - 52, kRow)) { s.scene.selectedTake = t.id; s.scene.selectedClip = -1; }
+				y += kRow;
+			}
+			if (o->takes.empty()) { Text(x, y, "RECORD TAKE: perform it yourself", kDim); y += kRow; }
+			y += 2;
 			Text(x, y, "drag in view: move  CTRL+drag: turn", kDim); y += kRow;
 			Text(x, y, "arrows/PgUp/PgDn, Q/E (SHIFT/CTRL)", kDim);
 		}
@@ -759,24 +798,61 @@ namespace
 		return static_cast<float>(sf) + std::max(0.0f, f);
 	}
 
-	// timeline clips drive their actors (exactly, frame by frame) while the studio is open
-	void EvaluateClips()
+	void Unhold(const int ent)
+	{
+		Studio& s = S();
+		for (size_t i = 0; i < s.heldEnts.size(); i++)
+			if (s.heldEnts[i] == ent) { ReleaseAnim(ent); s.heldEnts.erase(s.heldEnts.begin() + static_cast<long>(i)); return; }
+	}
+
+	// a take drives its actor: position, facing, legs and torso frames, sabers
+	void DriveTake(const Object& o, const Take& tk, const int64_t t)
+	{
+		Studio& s = S();
+		TakeSample x;
+		if (!tk.Evaluate(t - tk.startUs, x)) return;
+		const float ang[3] = { 0, x.yaw, 0 };
+		s.host.SetActorTransform(o.entNum, x.origin, ang);
+		const auto pose = [&](const int idx, const float frame, const int parts)
+		{
+			if (idx < 0 || idx >= static_cast<int>(tk.anims.size())) return;
+			AnimInfo ai;
+			if (!AnimInfoFor(o.entNum, AnimByName(tk.anims[static_cast<size_t>(idx)]), ai)) return;	// skeleton lacks it
+			PoseAnim(o.entNum, ai.anim, parts, std::min(frame, static_cast<float>(ai.numFrames - 1)), 0.0f, false, 0, -1, 0);
+		};
+		if (x.legs == x.torso && fabsf(x.legsFrame - x.torsoFrame) < 0.01f) pose(x.legs, x.legsFrame, PARTS_BOTH);
+		else { pose(x.legs, x.legsFrame, PARTS_LEGS); pose(x.torso, x.torsoFrame, PARTS_TORSO); }
+		SetSabers(o.entNum, x.flags);
+		Hold(o.entNum);
+	}
+
+	bool Contains(const std::vector<int>& v, const int e) { return std::find(v.begin(), v.end(), e) != v.end(); }
+
+	// takes and timeline clips drive their actors (exactly, frame by frame) while the studio is open
+	// or recording. A clip that is playing wins over the take; otherwise the active take drives
+	// (holding its first/last pose outside its range); otherwise a held clip; otherwise the game.
+	void EvaluateScene()
 	{
 		Studio& s = S();
 		const int64_t t = s.scene.clock.timeUs;
+		std::vector<int> ghosts;
 		for (auto& o : s.scene.objects)
 		{
-			if (o.type != ObjType::Actor || o.entNum < 0 || o.clips.empty() || o.entNum == s.previewEnt) continue;
+			if (o.type != ObjType::Actor || o.entNum < 0) continue;
+			const bool recordingOver = s.rec != Studio::REC_IDLE && o.id == s.recTarget;
+			const Take* tk = Scene::ActiveTake(o);
+			const bool ghost = o.ghost || (s.rec != Studio::REC_IDLE && s.recGhostOthers && tk && !recordingOver);
+			if (ghost) { SetGhost(o.entNum, 0.4f); ghosts.push_back(o.entNum); }
+			if (o.entNum == s.previewEnt || recordingOver) continue;
 			int64_t local = 0;
 			bool holding = false;
-			const AnimClip* c = Scene::ActiveClip(o, t, local, holding);
-			if (!c)
+			const AnimClip* c = o.clips.empty() ? nullptr : Scene::ActiveClip(o, t, local, holding);
+			if (tk && (!c || holding))
 			{
-				// before the first clip the game animates the actor
-				for (size_t i = 0; i < s.heldEnts.size(); i++)
-					if (s.heldEnts[i] == o.entNum) { ReleaseAnim(o.entNum); s.heldEnts.erase(s.heldEnts.begin() + static_cast<long>(i)); break; }
+				DriveTake(o, *tk, t);
 				continue;
 			}
+			if (!c) { Unhold(o.entNum); continue; }	// before the first clip the game animates the actor
 			AnimInfo ai;
 			if (!AnimInfoFor(o.entNum, AnimByName(c->anim), ai)) continue;	// this skeleton lacks the animation
 			int sf, ef;
@@ -784,6 +860,15 @@ namespace
 			PoseAnim(o.entNum, ai.anim, c->parts, f, 0.0f, false, sf, ef, 0);
 			Hold(o.entNum);
 		}
+		for (const int e : s.ghostEnts) if (!Contains(ghosts, e)) SetGhost(e, 1.0f);
+		s.ghostEnts = ghosts;
+	}
+
+	void ClearGhosts()
+	{
+		Studio& s = S();
+		for (const int e : s.ghostEnts) SetGhost(e, 1.0f);
+		s.ghostEnts.clear();
 	}
 
 	void LoadProfiles()
@@ -963,6 +1048,43 @@ namespace
 	}
 
 	// the selected timeline clip, edited in the SCENE inspector
+	bool DrawTakeEditor(const float x, float y)
+	{
+		Studio& s = S();
+		Object* o = s.scene.Find(s.scene.selected);
+		Take* t = o ? Scene::FindTake(*o, s.scene.selectedTake) : nullptr;
+		if (!t) return false;
+		const float w = kRightW - 12;
+		Text(x, y, "TAKE", kAccent);
+		if (Button(x + w - 40, y - 1, 40, 10, "CLOSE")) { s.scene.selectedTake = 0; return false; }
+		y += 11;
+		Label(x, y, "name", t->name, w); y += kRow;
+		Label(x, y, "actor", o->name, w); y += kRow;
+		Label(x, y, "performer", t->performer + (t->profile.empty() ? "" : "  (" + t->profile + ")"), w); y += kRow;
+		const int64_t frameUs = 1'000'000 / s.scene.clock.fps;
+		Label(x, y, "start", Fmt("%.2fs", static_cast<double>(t->startUs) / 1e6), w);
+		const int id = o->id, tid = t->id;
+		const int64_t step = s.shift ? 1'000'000 : frameUs;
+		if (Button(x + w - 28, y, 12, 9, "-")) { s.scene.SetTakeStart(id, tid, t->startUs - step, true); return true; }
+		if (Button(x + w - 14, y, 12, 9, "+")) { s.scene.SetTakeStart(id, tid, t->startUs + step, true); return true; }
+		y += kRow;
+		Label(x, y, "length", Fmt("%.2fs", static_cast<double>(t->LengthUs()) / 1e6), w); y += kRow;
+		Label(x, y, "samples", Fmt("%d  (%d animations)", static_cast<int>(t->samples.size()), static_cast<int>(t->anims.size())), w); y += kRow + 1;
+		const bool act = o->activeTake == tid;
+		if (Button(x, y, 50, 10, act ? "ACTIVE" : "USE", act)) { s.scene.SetActiveTake(id, act ? 0 : tid); return true; }
+		if (Button(x + 52, y, 50, 10, "RE-RECORD", false, s.rec == Studio::REC_IDLE))
+		{
+			s.scene.clock.timeUs = t->startUs;	// a new take from the same point; this one stays
+			StartRecording(id);
+			return true;
+		}
+		if (Button(x + w - 48, y, 48, 10, "DELETE")) { s.scene.RemoveTake(id, tid); return true; }
+		y += 13;
+		Text(x, y, "drag takes on the timeline; SHIFT = 1s", kDim); y += kRow;
+		Text(x, y, "a playing clip overrides the take", kDim);
+		return true;
+	}
+
 	bool DrawClipEditor(const float x, float y)
 	{
 		Studio& s = S();
@@ -1118,6 +1240,7 @@ namespace
 		case TAB_SCENE:
 		default:
 			if (DrawClipEditor(ix, y)) break;
+			if (DrawTakeEditor(ix, y)) break;
 			Text(ix, y, "INSPECTOR", kAccent); y += 12;
 			if (sel && sel->type == ObjType::Camera) DrawCameraInspector(ix, y, sel);
 			else if (sel) DrawActorInspector(ix, y, sel, -1);
@@ -1136,7 +1259,14 @@ namespace
 			Text(ix, y, "ADD ACTOR (NPC type)", kAccent); y += 12;
 			DrawField(ix, y, kRightW - 12, FIELD_NPC, s.npcType); y += 13;
 			if (Button(ix, y, kRightW - 12, 11, "SPAWN IN FRONT OF VIEW")) { s.field = FIELD_NONE; SpawnActor(s.npcType); }
-			y += 16;
+			y += 13;
+			if (Button(ix, y, kRightW - 12, 11, "RECORD NEW PERFORMER (YOU)", false, s.rec == Studio::REC_IDLE)) { s.field = FIELD_NONE; StartRecording(0); break; }
+			y += 11;
+			Text(ix, y, Fmt("plays back as your NPC, or %s", s.npcType.c_str()), kDim, 0.36f);
+			y += 9;
+			if (Button(ix, y, 80, 10, Fmt("COUNTDOWN %ds", s.recCountdownSec))) s.recCountdownSec = (s.recCountdownSec + 1) % 6;
+			if (Button(ix + 82, y, kRightW - 94, 10, "GHOST OTHERS", s.recGhostOthers)) s.recGhostOthers = !s.recGhostOthers;
+			y += 15;
 			Text(ix, y, "LEVEL CHARACTERS", kAccent); y += 12;
 			int ents[64];
 			const int n = ListCharacters(ents, 64);
@@ -1311,6 +1441,22 @@ namespace
 			}
 		}
 
+		// dragging a take along its lane (whole frames)
+		if (s.takeDragId)
+		{
+			Object* o = s.scene.Find(s.takeDragObj);
+			Take* tk = o ? Scene::FindTake(*o, s.takeDragId) : nullptr;
+			if (!s.lmb || !tk) s.takeDragId = 0;
+			else
+			{
+				const double tAt = static_cast<double>((s.cx - lx) / lw) * static_cast<double>(c.lengthUs);
+				const int64_t frameUs = 1000000 / c.fps;
+				int64_t start = static_cast<int64_t>(tAt) - s.takeDragGrabUs;
+				start = std::max<int64_t>(0, (start + frameUs / 2) / frameUs * frameUs);
+				if (start != tk->startUs) s.scene.SetTakeStart(o->id, tk->id, start, true);
+			}
+		}
+
 		// scrub: click or drag on the ruler / lanes
 		const bool overTime = Inside(s.cx, s.cy, lx, y0, lw, h);
 		if (s.clicked && Inside(s.clickX, s.clickY, lx, y0, lw, h)) { s.clicked = false; s.scrubbing = true; }
@@ -1341,6 +1487,39 @@ namespace
 			if (o.id == s.scene.selected) Rect(0, yy, kW, kRow, kSel);
 			TextClip(14, yy + 1, o.name, kLeftW - 18, o.type == ObjType::Camera ? kCam : kTextCol);
 			Rect(lx, yy + 1, lw, kRow - 2, kLane);
+			if (o.type == ObjType::Actor)
+				for (auto& tk : o.takes)
+				{
+					const bool act = tk.id == o.activeTake;
+					if (!act && !(o.id == s.scene.selected && tk.id == s.scene.selectedTake)) continue;	// only the active (or selected) take
+					const float tx0 = TimeToX(tk.startUs, lx, lw), tx1 = TimeToX(tk.startUs + tk.LengthUs(), lx, lw);
+					const bool tsel = o.id == s.scene.selected && tk.id == s.scene.selectedTake;
+					const vec4_t body = { 0.62f, 0.36f, 0.85f, act ? (tsel ? 0.85f : 0.6f) : 0.3f };
+					Rect(tx0, yy + 1, std::max(2.0f, tx1 - tx0), kRow - 2, body);
+					if (tsel) Frame(tx0, yy + 1, std::max(2.0f, tx1 - tx0), kRow - 2, kAccent);
+					if (o.clips.empty()) TextClip(tx0 + 2, yy + 1.5f, "REC " + tk.name, std::max(0.0f, tx1 - tx0 - 3), kTextCol);
+					// clips are drawn on top and take the click first; the take takes what's left
+					bool onClip = false;
+					for (auto& c2 : o.clips)
+					{
+						const float a0 = TimeToX(c2.startUs, lx, lw), a1 = TimeToX(c2.startUs + c2.lengthUs, lx, lw);
+						onClip = onClip || Inside(s.clickX, s.clickY, a0, yy, std::max(4.0f, a1 - a0), kRow);
+					}
+					if (s.clicked && !onClip && Inside(s.clickX, s.clickY, tx0, yy, std::max(4.0f, tx1 - tx0), kRow))
+					{
+						s.clicked = false;
+						s.scene.selected = o.id;
+						s.lastSel = o.id;
+						s.levelSel = -1;
+						s.scene.selectedClip = -1;
+						s.scene.selectedTake = tk.id;
+						s.tab = TAB_SCENE;
+						s.takeDragObj = o.id;
+						s.takeDragId = tk.id;
+						const double tAt = static_cast<double>((s.clickX - lx) / lw) * static_cast<double>(c.lengthUs);
+						s.takeDragGrabUs = static_cast<int64_t>(tAt) - tk.startUs;
+					}
+				}
 			if (o.type == ObjType::Actor && !o.clips.empty())
 			{
 				for (size_t ci = 0; ci < o.clips.size(); ci++)
@@ -1364,6 +1543,7 @@ namespace
 						s.lastSel = o.id;
 						s.levelSel = -1;
 						s.scene.selectedClip = static_cast<int>(ci);
+						s.scene.selectedTake = 0;
 						s.tab = TAB_SCENE;
 						s.clipDragObj = o.id;
 						s.clipDragIndex = static_cast<int>(ci);
@@ -1372,7 +1552,7 @@ namespace
 					}
 				}
 			}
-			else if (o.type == ObjType::Actor) Text(lx + 3, yy + 1.5f, "no clips: ANIMATIONS tab > ADD CLIP AT PLAYHEAD", kDim, 0.34f);
+			else if (o.type == ObjType::Actor && o.takes.empty()) Text(lx + 3, yy + 1.5f, "no clips: ANIMATIONS tab > ADD CLIP AT PLAYHEAD, or RECORD TAKE", kDim, 0.34f);
 			if (TakeClick(0, yy, kLeftW, kRow)) { s.scene.selected = o.id; s.levelSel = -1; }
 		}
 		if (!count) Text(14, ry + kRow + 1, "no objects", kDim);
@@ -1489,6 +1669,136 @@ namespace
 		Rect(s.cx, s.cy, 6.5f, 1.5f, kTextCol);
 	}
 
+	// ------------------------------------------------------------------------------------------
+	// Phase 3: Ghost Performance Recorder
+	// ------------------------------------------------------------------------------------------
+
+	void Open();
+
+	// record the player into a take for `target` (0 = a new actor), starting at the playhead
+	void StartRecording(const int target)
+	{
+		Studio& s = S();
+		if (s.rec != Studio::REC_IDLE) return;
+		const Object* o = target ? s.scene.Find(target) : nullptr;
+		if (target && (!o || o->type != ObjType::Actor)) { s.host.Log(1, "Select an actor to record a take for"); return; }
+		Clock& c = s.scene.clock;
+		if (c.timeUs >= c.lengthUs) c.timeUs = 0;
+		ReleasePreview();
+		s.recTarget = target;
+		s.recPunchUs = c.timeUs;
+		s.recLastUs = -1;
+		s.recTake = Take();
+		s.recOldSpeed = c.speed;
+		s.recOldLoop = c.loop;
+		c.Pause();
+		if (o && o->entNum >= 0) { SetHidden(o->entNum, true); Unhold(o->entNum); s.hiddenEnts.push_back(o->entNum); }
+		Close();			// the game gets the keyboard and mouse back; the scene keeps playing
+		s.rec = Studio::REC_COUNTDOWN;
+		s.recCountdownEnd = NowMs() + s.recCountdownSec * 1000;
+		s.host.Log(0, "Recording " + (o ? "a take for " + o->name : std::string("a new performer")) + " from " + c.Timecode() +
+			" in " + std::to_string(s.recCountdownSec) + " s. F10 stops.");
+	}
+
+	void SampleNow()
+	{
+		Studio& s = S();
+		const int64_t t = s.scene.clock.timeUs - s.recPunchUs;
+		TakeSample x;
+		if (t < 0 || !SamplePlayer(s.recTake, x)) return;
+		if (!s.recTake.samples.empty() && t <= s.recTake.samples.back().tUs) return;
+		x.tUs = s.recTake.samples.empty() ? 0 : t;		// a take starts at 0
+		s.recTake.samples.push_back(x);
+		s.recLastUs = t;
+	}
+
+	void StopRecording(const bool keep)
+	{
+		Studio& s = S();
+		if (s.rec == Studio::REC_IDLE) return;
+		Clock& c = s.scene.clock;
+		const bool wasRecording = s.rec == Studio::REC_RECORDING;
+		if (wasRecording) SampleNow();
+		s.rec = Studio::REC_IDLE;
+		c.Pause();
+		c.speed = s.recOldSpeed;
+		c.loop = s.recOldLoop;
+		for (const int e : s.hiddenEnts) SetHidden(e, false);
+		s.hiddenEnts.clear();
+		ClearGhosts();
+		Open();
+		Take tk = s.recTake;
+		s.recTake = Take();
+		if (!keep || !wasRecording || tk.samples.size() < 2)
+		{
+			c.timeUs = s.recPunchUs;
+			s.host.Log(1, keep ? "Nothing recorded (stopped before the countdown ended)" : "Recording discarded");
+			return;
+		}
+		tk.startUs = s.recPunchUs;
+		int id = s.recTarget;
+		if (!id || !s.scene.Find(id))
+		{
+			// a new actor of the performer's type where the performance starts
+			const std::string type = tk.performer.empty() || tk.performer == "player" ? s.npcType : tk.performer;
+			const float ang[3] = { 0, tk.samples[0].yaw, 0 };
+			id = s.scene.AddActor(type, tk.samples[0].origin, ang);
+			if (!id) { s.host.Log(2, "Couldn't spawn '" + type + "' for the take (set the NPC type in ACTORS and record again)"); return; }
+		}
+		const int takeId = s.scene.AddTake(id, tk, true);
+		s.scene.selected = id;
+		s.lastSel = id;
+		s.scene.selectedClip = -1;
+		s.scene.selectedTake = takeId;
+		const int64_t end = tk.startUs + tk.LengthUs();
+		if (end > c.lengthUs) c.lengthUs = (end + 999'999) / 1'000'000 * 1'000'000;
+		c.timeUs = s.recPunchUs;
+		s.tab = TAB_SCENE;
+		Object* o = s.scene.Find(id);
+		const Take* nt = o ? Scene::FindTake(*o, takeId) : nullptr;
+		s.host.Log(0, Fmt("%s: %s recorded (%.1f s, %d samples)", o ? o->name.c_str() : "?", nt ? nt->name.c_str() : "take",
+			static_cast<double>(tk.LengthUs()) / 1e6, static_cast<int>(tk.samples.size())));
+	}
+
+	// runs every frame from CS_Frame
+	void RecorderFrame()
+	{
+		Studio& s = S();
+		Clock& c = s.scene.clock;
+		if (s.rec == Studio::REC_COUNTDOWN && NowMs() >= s.recCountdownEnd)
+		{
+			s.rec = Studio::REC_RECORDING;
+			c.speed = 1.0;		// performances are recorded in real time
+			c.loop = false;
+			c.Play();
+			SampleNow();
+		}
+		if (s.rec != Studio::REC_RECORDING) return;
+		// recording past the end of the scene makes the scene longer
+		if (c.timeUs > c.lengthUs - 500'000) c.lengthUs += 5'000'000;
+		if (!c.playing) c.Play();
+		const int64_t t = c.timeUs - s.recPunchUs;
+		if (s.recLastUs < 0 || t - s.recLastUs >= 1'000'000 / 30) SampleNow();	// 30 samples a second
+	}
+
+	void DrawRecordingOverlay()
+	{
+		Studio& s = S();
+		if (s.rec == Studio::REC_IDLE) return;
+		if (s.rec == Studio::REC_COUNTDOWN)
+		{
+			const int left = std::max(0, (s.recCountdownEnd - NowMs() + 999) / 1000);
+			Text(310, 190, Fmt("%d", left), kRed, 2.0f);
+			Text(232, 240, "get ready - recording starts", kTextCol, 0.5f);
+		}
+		else
+		{
+			if ((NowMs() / 500) % 2 == 0) Rect(8, 8, 8, 8, kRed);
+			Text(20, 6, "REC  " + s.scene.clock.Timecode(), kRed, 0.55f);
+			Text(20, 18, "F10: stop and keep    console 'studio rec cancel': discard", kDim, 0.38f);
+		}
+	}
+
 	void Open()
 	{
 		Studio& s = S();
@@ -1514,6 +1824,7 @@ namespace
 		ReleaseAllHeld();
 		s.dragging = false;
 		s.clipDragIndex = -1;
+		s.takeDragId = 0;
 		cgi_Cvar_Set("cs_active", "0");
 		if (Frozen()) SetFreeze(false);	// back to regular gameplay
 	}
@@ -1560,6 +1871,9 @@ void CS_Init()
 		}
 	s.initMap = map;
 	s.open = false;
+	s.rec = Studio::REC_IDLE;	// a level change ends a recording (it's lost)
+	s.hiddenEnts.clear();
+	s.ghostEnts.clear();
 	s.levelSel = -1;
 	PlayerView();
 	cgi_Cvar_Set("cs_active", "0");
@@ -1582,6 +1896,11 @@ void CS_Shutdown()
 	}
 }
 
+void CS_DrawOverlay()
+{
+	if (g_s && !g_s->open) DrawRecordingOverlay();
+}
+
 bool CS_IsOpen()
 {
 	return g_s && g_s->open;
@@ -1593,7 +1912,26 @@ void CS_Command_f()
 	const char* sub = cgi_Argc() > 1 ? CG_Argv(1) : "";
 	const std::string a2 = cgi_Argc() > 2 ? CG_Argv(2) : "";
 	const bool force = cgi_Argc() > 3 && !Q_stricmp(CG_Argv(3), "force");
-	if (!sub[0] || !Q_stricmp(sub, "toggle")) { s.open ? Close() : Open(); return; }
+	if (!sub[0] || !Q_stricmp(sub, "toggle"))
+	{
+		if (s.rec != Studio::REC_IDLE) StopRecording(true);	// F10 while recording: stop and keep
+		else s.open ? Close() : Open();
+		return;
+	}
+	if (!Q_stricmp(sub, "rec"))
+	{
+		if (!Q_stricmp(a2.c_str(), "stop")) StopRecording(true);
+		else if (!Q_stricmp(a2.c_str(), "cancel")) StopRecording(false);
+		else if (s.rec != Studio::REC_IDLE) StopRecording(true);
+		else if (!Q_stricmp(a2.c_str(), "new")) StartRecording(0);
+		else
+		{
+			const Object* o = s.scene.Find(s.scene.selected);
+			StartRecording(o && o->type == ObjType::Actor ? o->id : 0);
+		}
+		return;
+	}
+	if (!Q_stricmp(sub, "countdown")) { s.recCountdownSec = std::max(0, std::min(10, atoi(a2.c_str()))); return; }
 	if (!Q_stricmp(sub, "open")) { Open(); return; }
 	if (!Q_stricmp(sub, "close")) { Close(); return; }
 	if (!Q_stricmp(sub, "save")) { Save(a2.empty() ? s.scene.project : a2); return; }
@@ -1617,7 +1955,8 @@ void CS_Command_f()
 		return;
 	}
 	Com_Printf("studio [open|close|toggle]  save [name]  load <name> [force]  recover [name]  new\n"
-		"       spawn <npc>  camera  play  pause  stop  fps <24|30|60>  undo  redo  freeze  list\n");
+		"       spawn <npc>  camera  play  pause  stop  fps <24|30|60>  undo  redo  freeze  list\n"
+		"       rec [new|stop|cancel]  countdown <seconds>\n");
 }
 
 int CS_KeyEvent(int key, const int down)
@@ -1758,7 +2097,11 @@ void CS_Frame()
 	if (s.open)
 	{
 		if (s.scene.clock.playing && s.previewEnt >= 0) ReleasePreview();	// playback takes the actors back
-		EvaluateClips();
+	}
+	RecorderFrame();
+	if (s.open || s.rec != Studio::REC_IDLE)
+	{
+		EvaluateScene();
 	}
 
 	if (s.open && s.camActive && s.rmb)
@@ -1815,7 +2158,7 @@ void CS_Draw2D()
 {
 	if (!g_s || !g_s->open) return;
 	Studio& s = S();
-	if (s.scene.selected != s.lastSel) { s.scene.selectedClip = -1; s.lastSel = s.scene.selected; }
+	if (s.scene.selected != s.lastSel) { s.scene.selectedClip = -1; s.scene.selectedTake = 0; s.lastSel = s.scene.selected; }
 	UpdateDrag();
 	DrawGizmo();
 	if (s.panels)

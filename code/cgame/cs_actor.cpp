@@ -28,7 +28,14 @@ extern int G_ParseAnimFileSet(const char* skeletonName, const char* model_name =
 
 int g_csGlaOffset[MAX_GENTITIES];	// per entity: target .gla handle - model's own .gla handle
 static int g_csExtraCur[MAX_GENTITIES];	// per entity: the extra animation the studio posed (0 = none)
-static int g_csOrigSet[MAX_GENTITIES];	// per entity: its own animation set + 1 (0 = never switched)
+static int g_csOrigSet[MAX_GENTITIES];
+static float g_csGhostAlpha[MAX_GENTITIES];	// 0 = normal (drawn solid); else the alpha it's drawn with
+static int g_csPropContents[MAX_GENTITIES];	// contents before prop mode / hiding + 1 (0 = not changed)
+
+float CS_GhostAlpha(const int entNum)
+{
+	return entNum >= 0 && entNum < MAX_GENTITIES && g_csGhostAlpha[entNum] > 0 ? g_csGhostAlpha[entNum] : 1.0f;
+}	// per entity: its own animation set + 1 (0 = never switched)
 
 int CS_GlaOffset(const gentity_t* ent)
 {
@@ -37,7 +44,7 @@ int CS_GlaOffset(const gentity_t* ent)
 
 void CS_ClearEntity(const int entNum)
 {
-	if (entNum >= 0 && entNum < MAX_GENTITIES) g_csGlaOffset[entNum] = 0, g_csOrigSet[entNum] = 0, g_csExtraCur[entNum] = 0;
+	if (entNum >= 0 && entNum < MAX_GENTITIES) g_csGlaOffset[entNum] = 0, g_csOrigSet[entNum] = 0, g_csExtraCur[entNum] = 0, g_csGhostAlpha[entNum] = 0, g_csPropContents[entNum] = 0;
 }
 
 void CS_ClearAllEntities()
@@ -45,6 +52,8 @@ void CS_ClearAllEntities()
 	memset(g_csGlaOffset, 0, sizeof g_csGlaOffset);
 	memset(g_csOrigSet, 0, sizeof g_csOrigSet);
 	memset(g_csExtraCur, 0, sizeof g_csExtraCur);
+	memset(g_csGhostAlpha, 0, sizeof g_csGhostAlpha);
+	memset(g_csPropContents, 0, sizeof g_csPropContents);
 }
 
 namespace cs
@@ -474,6 +483,121 @@ namespace cs
 		if (legs >= 0 && legs < MAX_ANIMATIONS && set.animations[legs].numFrames > 0) PoseAnim(ent, legs, PARTS_LEGS, -1, 1, true, 0, -1, 150);
 		if (torso >= 0 && torso < MAX_ANIMATIONS && set.animations[torso].numFrames > 0) PoseAnim(ent, torso, PARTS_TORSO, -1, 1, true, 0, -1, 150);
 		ReleaseAnim(ent);
+		return true;
+	}
+
+	// ---- Phase 3: animated props, ghosts, recording the player ----------------------------------
+
+	namespace
+	{
+		void KeepContents(gentity_t* e)
+		{
+			if (!g_csPropContents[e->s.number]) g_csPropContents[e->s.number] = e->contents + 1;
+		}
+		void RestoreContents(gentity_t* e)
+		{
+			if (g_csPropContents[e->s.number]) e->contents = g_csPropContents[e->s.number] - 1;
+			g_csPropContents[e->s.number] = 0;
+		}
+	}
+
+	// animated prop: no AI, no collision (others walk through it, it falls through nothing), no gravity,
+	// can't be hurt or targeted. It stays exactly where the studio puts it.
+	void GameHost::SetActorProp(const int ent, const bool on)
+	{
+		gentity_t* e = Actor(ent);
+		if (!e || ent == 0) return;
+		if (on)
+		{
+			KeepContents(e);
+			e->contents = 0;
+			e->client->noclip = true;
+			e->flags |= FL_NOTARGET | FL_GODMODE | FL_NO_KNOCKBACK;
+			VectorClear(e->client->ps.velocity);
+			if (e->NPC) e->NPC->behaviorState = e->NPC->defaultBehavior = BS_CINEMATIC;
+		}
+		else
+		{
+			RestoreContents(e);
+			if (!e->contents) e->contents = CONTENTS_BODY;
+			e->client->noclip = false;
+			e->flags &= ~(FL_NOTARGET | FL_GODMODE | FL_NO_KNOCKBACK);
+		}
+		gi.linkentity(e);
+	}
+
+	void SetHidden(const int ent, const bool hide)
+	{
+		gentity_t* e = Actor(ent);
+		if (!e || ent == 0) return;
+		if (hide) { e->s.eFlags |= EF_NODRAW; KeepContents(e); e->contents = 0; }
+		else
+		{
+			e->s.eFlags &= ~EF_NODRAW;
+			const bool prop = e->client->noclip;
+			RestoreContents(e);
+			if (prop) { KeepContents(e); e->contents = 0; }	// still a prop: stays non-solid
+		}
+		gi.linkentity(e);
+	}
+
+	void SetGhost(const int ent, const float alpha)
+	{
+		if (ent > 0 && ent < MAX_GENTITIES) g_csGhostAlpha[ent] = alpha >= 1.0f ? 0.0f : std::max(0.05f, alpha);
+	}
+
+	void SetSabers(const int ent, const int flags)
+	{
+		gentity_t* e = Actor(ent);
+		if (!e || ent == 0 || e->client->ps.weapon != WP_SABER) return;
+		playerState_t& ps = e->client->ps;
+		const bool on1 = (flags & TAKE_SABER1) != 0, on2 = (flags & TAKE_SABER2) != 0;
+		if (on1 != static_cast<bool>(ps.saber[0].Active())) on1 ? ps.saber[0].Activate() : ps.saber[0].Deactivate();
+		if (ps.dualSabers && on2 != static_cast<bool>(ps.saber[1].Active())) on2 ? ps.saber[1].Activate() : ps.saber[1].Deactivate();
+	}
+
+	namespace
+	{
+		// relative frame of the animation a bone is playing
+		float BoneFrame(gentity_t* e, const int bone, const int anim)
+		{
+			const animFileSet_t* set = Set(e);
+			if (!set || bone == -1 || anim < 0 || anim >= MAX_ANIMATIONS) return 0;
+			const animation_t& a = set->animations[anim];
+			float cur = 0, sp = 0;
+			int sf = 0, ef = 0, fl = 0, ml = 0;
+			if (!gi.G2API_GetBoneAnimIndex(&e->ghoul2[e->playerModel], bone, AnimTime(), &cur, &sf, &ef, &fl, &sp, &ml)) return 0;
+			const float rel = cur - static_cast<float>(a.firstFrame);
+			return std::max(0.0f, std::min(rel, static_cast<float>(std::max(0, a.numFrames - 1))));
+		}
+	}
+
+	bool SamplePlayer(Take& take, TakeSample& out)
+	{
+		gentity_t* e = Actor(0);
+		if (!e) return false;
+		const playerState_t& ps = e->client->ps;
+		VectorCopy(ps.origin, out.origin);
+		out.yaw = ps.viewangles[YAW];
+		out.pitch = ps.viewangles[PITCH];
+		const auto name = [](const int a) { return (a >= 0 && a < MAX_ANIMATIONS && animTable[a].name) ? std::string(animTable[a].name) : std::string(); };
+		out.legs = take.AnimIndex(name(ps.legsAnim));
+		out.torso = take.AnimIndex(name(ps.torsoAnim));
+		out.legsFrame = BoneFrame(e, e->rootBone, ps.legsAnim);
+		out.torsoFrame = BoneFrame(e, e->lowerLumbarBone, ps.torsoAnim);
+		out.flags = 0;
+		if (ps.weapon == WP_SABER)
+		{
+			if (ps.saber[0].Active()) out.flags |= TAKE_SABER1;
+			if (ps.dualSabers && ps.saber[1].Active()) out.flags |= TAKE_SABER2;
+		}
+		out.weapon = ps.weapon;
+		if (take.samples.empty())
+		{
+			const animFileSet_t* set = Set(e);
+			take.profile = set ? set->filename : "";
+			take.performer = e->NPC_type && e->NPC_type[0] ? e->NPC_type : "player";
+		}
 		return true;
 	}
 

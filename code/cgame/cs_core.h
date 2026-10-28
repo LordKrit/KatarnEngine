@@ -15,7 +15,8 @@ builds and is unit-tested outside the engine (tests/cinematic_studio).
 
 namespace cs
 {
-	constexpr int kProjectSchema = 1;	// bump when the file layout changes; readers accept <= this
+	constexpr int kProjectSchema = 2;	// 2: takes, prop, ghost (Phase 3)
+	constexpr int kProjectSchemaOld = 1;	// bump when the file layout changes; readers accept <= this
 	constexpr const char* kProjectRoot = "CinematicStudio/Projects";
 
 	enum class ObjType { Actor, Camera };
@@ -42,6 +43,40 @@ namespace cs
 	};
 	const char* ObjTypeName(ObjType t);
 
+	// ---- Phase 3: recorded performances ----
+	// One sample of a performer: where it was, where it looked, and the exact frame of the legs and
+	// torso animations (named through Take::anims, so a take plays on any skeleton that has them).
+	struct TakeSample
+	{
+		int64_t tUs = 0;			// time into the take
+		float origin[3] = { 0, 0, 0 };
+		float yaw = 0, pitch = 0;	// view angles
+		int legs = -1, torso = -1;	// index into Take::anims (-1 = none)
+		float legsFrame = 0, torsoFrame = 0;	// relative frames
+		int flags = 0;				// TAKE_SABER1 | TAKE_SABER2
+		int weapon = 0;
+		bool operator==(const TakeSample& o) const;
+	};
+	enum TakeFlags { TAKE_SABER1 = 1, TAKE_SABER2 = 2 };
+
+	struct Take
+	{
+		int id = 0;
+		std::string name;
+		int64_t startUs = 0;		// scene time the take starts
+		std::string profile;		// animation set the performer had (for information)
+		std::string performer;		// NPC type / "player"
+		std::vector<std::string> anims;
+		std::vector<TakeSample> samples;	// sorted by tUs, first at 0
+
+		int64_t LengthUs() const { return samples.empty() ? 0 : samples.back().tUs; }
+		int AnimIndex(const std::string& name);	// adds it if new
+		// the performance at a time into the take (clamped to the take): positions and angles are
+		// interpolated; an animation frame is interpolated while the same animation keeps playing forward
+		bool Evaluate(int64_t localUs, TakeSample& out) const;
+		bool operator==(const Take& o) const;
+	};
+
 	struct Object
 	{
 		int id = 0;
@@ -59,6 +94,10 @@ namespace cs
 		std::string profile;	// animation profile (_humanoid_X); "" = the model's own
 		bool profileForced = false;	// applied without the skeleton checks
 		std::vector<AnimClip> clips;	// sorted by startUs
+		bool prop = false;		// animated prop: no AI, no collision, no gravity; only the studio moves it
+		bool ghost = false;		// drawn see-through (a guide while recording over it)
+		std::vector<Take> takes;	// recorded performances
+		int activeTake = 0;		// id of the take that drives the actor (0 = none)
 
 		// camera
 		float fov = 80.0f;
@@ -79,6 +118,7 @@ namespace cs
 		// animation profile ("" = the model's own); false + why if the skeletons don't match
 		// force: skip the skeleton checks
 		virtual bool SetActorProfile(int ent, const std::string& profile, std::string& why, bool force) = 0;
+		virtual void SetActorProp(int ent, bool on) = 0;	// animated prop mode (see Object::prop)
 		virtual std::string MapName() = 0;
 		// files, relative to the game's write directory
 		virtual bool WriteFile(const std::string& path, const std::string& data) = 0;
@@ -115,6 +155,7 @@ namespace cs
 		enum Kind { Add, Remove, Change } kind = Change;
 		Object before, after;
 		int64_t timeMs = 0;
+		std::string tag;	// what kind of edit (only edits of the same kind coalesce)
 	};
 
 	class Scene
@@ -151,6 +192,18 @@ namespace cs
 		bool RemoveClip(int id, int index);
 		int selectedClip = -1;	// in the selected object
 
+		// takes (undoable)
+		int AddTake(int id, Take take, bool makeActive);	// returns the take id (0 = failed)
+		bool SetTakeStart(int id, int takeId, int64_t startUs, bool coalesce);
+		bool RenameTake(int id, int takeId, const std::string& name);
+		bool SetActiveTake(int id, int takeId);				// 0 = none
+		bool RemoveTake(int id, int takeId);
+		bool SetProp(int id, bool on);
+		bool SetGhost(int id, bool on);
+		static const Take* ActiveTake(const Object& o);
+		static Take* FindTake(Object& o, int takeId);
+		int selectedTake = 0;	// take id in the selected object (0 = none)
+
 		// The clip that drives an actor at scene time t: the latest one that started at or before t.
 		// local = time into the clip; holding = past the end of a non-looping clip (show its last frame).
 		static const AnimClip* ActiveClip(const Object& o, int64_t t, int64_t& localUs, bool& holding);
@@ -178,6 +231,7 @@ namespace cs
 
 	private:
 		void Push(const Op& op);
+		bool Change(const Object& after, bool coalesce, const std::string& tag = "");	// undoable change of one object
 		void Apply(const Object& state, bool exists);	// make the world + scene match a snapshot
 		bool Spawn(Object& o);
 		Host* host_;

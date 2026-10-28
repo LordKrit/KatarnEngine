@@ -6013,6 +6013,12 @@ void CG_AddRefEntityWithPowerups(refEntity_t* ent, int powerups, centity_t* cent
 			ent->shaderRGBA[3] *= alpha;
 		}
 	}
+	// Cinematic Studio ghosts (recorded takes shown see-through)
+	if (const float ghost = CS_GhostAlpha(cent->gent->s.number); ghost < 1.0f)
+	{
+		ent->renderfx |= RF_ALPHA_FADE;
+		ent->shaderRGBA[3] = static_cast<byte>(ent->shaderRGBA[3] * ghost);
+	}
 
 	// If certain states are active, we don't want to add in the regular body
 	if (!gent->client->ps.powerups[PW_CLOAKED] &&

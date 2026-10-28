@@ -480,6 +480,7 @@ void G_SetOrigin(gentity_t* ent, const vec3_t origin);
 int CS_GlaOffset(const gentity_t* ent);
 void CS_ClearEntity(int entNum);
 void CS_ClearAllEntities();
+float CS_GhostAlpha(int entNum);	// Cinematic Studio: 1 = solid
 void G_SetAngles(gentity_t* ent, const vec3_t angles);
 
 void G_DebugLine(vec3_t a, vec3_t b, int duration, int color);
