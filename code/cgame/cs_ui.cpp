@@ -69,7 +69,7 @@ namespace
 	{
 		ACT_CLOSE, ACT_PANELS, ACT_PLAY, ACT_STOP, ACT_STEP_BACK, ACT_STEP_FWD, ACT_UNDO, ACT_REDO, ACT_SAVE,
 		ACT_DELETE, ACT_FOCUS, ACT_FREEZE, ACT_LEFT, ACT_RIGHT, ACT_FWD, ACT_BACK, ACT_UP, ACT_DOWN, ACT_TURN_L, ACT_TURN_R,
-		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_DIRECTOR, ACT_COUNT
+		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_DIRECTOR, ACT_PREV_KEY, ACT_NEXT_KEY, ACT_LOOK, ACT_COUNT
 	};
 	struct Hotkey { const char* name; int key; bool ctrl; };
 	Hotkey g_keys[ACT_COUNT] = {
@@ -82,6 +82,7 @@ namespace
 		{ "nudge_up", A_PAGE_UP, false }, { "nudge_down", A_PAGE_DOWN, false },
 		{ "turn_left", A_LOW_Q, false }, { "turn_right", A_LOW_E, false }, { "player_view", A_LOW_V, false },
 		{ "duplicate", A_LOW_D, true }, { "split", A_LOW_B, true }, { "set_key", A_LOW_K, false }, { "snap", A_LOW_N, false }, { "director", A_LOW_C, false },
+		{ "prev_key", A_OPEN_BRACKET, false }, { "next_key", A_CLOSE_BRACKET, false }, { "look_through", A_LOW_L, false },
 	};
 
 	struct KeyName { const char* n; int k; };
@@ -89,7 +90,7 @@ namespace
 		{ "TAB", A_TAB }, { "SPACE", A_SPACE }, { "ENTER", A_ENTER }, { "HOME", A_HOME }, { "END", A_END },
 		{ "DEL", A_DELETE }, { "INS", A_INSERT }, { "PGUP", A_PAGE_UP }, { "PGDN", A_PAGE_DOWN },
 		{ "LEFT", A_CURSOR_LEFT }, { "RIGHT", A_CURSOR_RIGHT }, { "UP", A_CURSOR_UP }, { "DOWN", A_CURSOR_DOWN },
-		{ "COMMA", A_COMMA }, { "PERIOD", A_PERIOD }, { "MINUS", A_MINUS }, { "PLUS", A_PLUS },
+		{ "COMMA", A_COMMA }, { "LBRACKET", A_OPEN_BRACKET }, { "RBRACKET", A_CLOSE_BRACKET }, { "PERIOD", A_PERIOD }, { "MINUS", A_MINUS }, { "PLUS", A_PLUS },
 		{ "F1", A_F1 }, { "F2", A_F2 }, { "F3", A_F3 }, { "F4", A_F4 }, { "F5", A_F5 }, { "F6", A_F6 }, { "F7", A_F7 },
 		{ "F8", A_F8 }, { "F9", A_F9 }, { "F10", A_F10 }, { "F11", A_F11 }, { "F12", A_F12 },
 	};
@@ -825,11 +826,11 @@ namespace
 		y += kRow;
 		Label(x, y, "keys / cuts", Fmt("%d / %d", static_cast<int>(o->keys.size()), static_cast<int>(o->cuts.size()))); y += kRow + 3;
 		const float bw = (w - 4) / 3;
-		if (Button(x, y, bw, 11, "LOOK THROUGH", s.lookId == o->id && s.pilotId != o->id)) LookThrough(o->id, false);
+		if (Button(x, y, bw, 11, "VIEW (L)", s.lookId == o->id && s.pilotId != o->id)) LookThrough(o->id, false);
 		if (Button(x + bw + 2, y, bw, 11, "PILOT", s.pilotId == o->id)) LookThrough(o->id, true);
 		if (Button(x + 2 * (bw + 2), y, bw, 11, "PLAYER VIEW")) { s.director = false; PlayerView(); }
 		y += 13;
-		if (Button(x, y, bw, 11, "KEY (K)")) SetKeyAtPlayhead();
+		if (Button(x, y, bw, 11, "KEY VIEW (K)")) SetKeyAtPlayhead();
 		if (Button(x + bw + 2, y, bw, 11, "CUT HERE")) { if (s.scene.AddCut(o->id, s.scene.clock.timeUs)) s.host.Log(0, "Cut to " + o->name + " at " + s.scene.clock.Timecode()); }
 		if (Button(x + 2 * (bw + 2), y, bw, 11, "REC MOVE", s.camRec)) s.camRec = !s.camRec;
 		y += 13;
@@ -1275,6 +1276,7 @@ namespace
 	// the selected timeline clip, edited in the SCENE inspector
 	void SplitAtPlayhead();
 	void SetKeyAtPlayhead();
+	void JumpKey(int dir);
 	bool DrawTakeEditor(const float x, float y)
 	{
 		Studio& s = S();
@@ -1410,8 +1412,14 @@ namespace
 			const int64_t frameUs0 = 1'000'000 / s.scene.clock.fps;
 			k.tUs = s.scene.clock.timeUs / frameUs0 * frameUs0;
 			float ang[3], fov;
-			if (s.pilotId == o->id || s.lookId == o->id) { VectorCopy(s.camOrg, k.origin); VectorCopy(s.camAng, ang); fov = s.camFov; }
-			else CamPose(*o, k.tUs, k.origin, ang, fov, false);
+			if (s.lookId == o->id && !s.pilotId) CamPose(*o, k.tUs, k.origin, ang, fov, false);	// viewing through it: where it is
+			else
+			{
+				// what you see now: the free camera, the camera you pilot, or the player's view
+				VectorCopy(cg.refdef.vieworg, k.origin);
+				VectorCopy(cg.refdefViewAngles, ang);
+				fov = cg.refdef.fov_x;
+			}
 			k.pitch = ang[PITCH]; k.yaw = ang[YAW]; k.roll = ang[ROLL]; k.fov = fov;
 			for (auto& e : o->keys) if (e.tUs == k.tUs) k.interp = e.interp;
 			const int cid = o->id;
@@ -1441,6 +1449,26 @@ namespace
 		for (auto& e : o->keys) if (e.tUs == k.tUs) k.interp = e.interp;
 		const int id = o->id;
 		if (s.scene.SetKey(id, k)) { s.keyObj = id; s.keyUs = k.tUs; s.host.Log(0, o->name + ": key at " + s.scene.clock.Timecode()); }
+	}
+
+	// the playhead to the selected object's previous / next key (and select it)
+	void JumpKey(const int dir)
+	{
+		Studio& s = S();
+		const Object* o = s.scene.Find(s.scene.selected);
+		if (!o || o->keys.empty()) { s.host.Log(1, "No keys on the selection"); return; }
+		const int64_t t = s.scene.clock.timeUs;
+		const TransformKey* best = nullptr;
+		for (auto& k : o->keys)
+		{
+			if (dir > 0 && k.tUs > t && (!best || k.tUs < best->tUs)) best = &k;
+			if (dir < 0 && k.tUs < t && (!best || k.tUs > best->tUs)) best = &k;
+		}
+		if (!best) best = dir > 0 ? &o->keys.back() : &o->keys.front();
+		s.scene.clock.Pause();
+		s.scene.clock.timeUs = best->tUs;
+		s.keyObj = o->id;
+		s.keyUs = best->tUs;
 	}
 
 	void SplitAtPlayhead()
@@ -2311,24 +2339,48 @@ namespace
 		case TAB_CAMERA:
 		{
 			Text(ix, y, "CAMERAS", kAccent); y += 12;
-			if (Button(ix, y, 66, 11, "ADD FROM VIEW")) AddCameraFromView();
-			if (Button(ix + 70, y, 66, 11, "PLAYER VIEW", !s.camActive)) PlayerView();
+			if (Button(ix, y, 66, 11, "NEW FROM VIEW")) AddCameraFromView();
+			if (Button(ix + 70, y, 44, 11, "FREE CAM", s.camActive && !s.lookId)) { StopLooking(); StartFreeCam(); }
+			if (Button(ix + 116, y, 44, 11, "PLAYER", !s.camActive)) PlayerView();
 			y += 14;
-			if (Button(ix, y, 66, 11, "FREE CAMERA", s.camActive && !s.lookId)) { StopLooking(); StartFreeCam(); }
-			y += 16;
+			// each camera: VIEW (see through it, it follows its keys) / PILOT (you fly it)
 			for (auto& o : s.scene.objects)
 			{
-				if (o.type != ObjType::Camera || y > y0 + h - kRow) continue;
+				if (o.type != ObjType::Camera || y > y0 + h - 110) continue;
 				const bool sel2 = o.id == s.scene.selected;
-				if (sel2) Rect(x + 1, y, kRightW - 2, kRow, kSel);
-				TextClip(ix, y + 1, o.name + (s.lookId == o.id ? "  [viewing]" : ""), kRightW - 12, s.lookId == o.id ? kCam : kTextCol);
-				if (TakeClick(x, y, kRightW, kRow)) { s.scene.selected = o.id; LookThrough(o.id, false); }
-				y += kRow;
+				if (sel2) Rect(x + 1, y, kRightW - 2, 11, kSel);
+				const bool viewing = s.lookId == o.id && !s.pilotId, piloting = s.pilotId == o.id;
+				TextClip(ix, y + 1.5f, o.name + Fmt("  %dk", static_cast<int>(o.keys.size())), kRightW - 96, viewing || piloting ? kCam : kTextCol);
+				if (Button(ix + kRightW - 92, y, 38, 10, "VIEW", viewing)) { s.scene.selected = o.id; s.lastSel = o.id; LookThrough(o.id, false); }
+				if (Button(ix + kRightW - 52, y, 40, 10, "PILOT", piloting)) { s.scene.selected = o.id; s.lastSel = o.id; LookThrough(o.id, true); }
+				if (TakeClick(x, y, kRightW - 96, 11)) { s.scene.selected = o.id; s.lastSel = o.id; }
+				y += 12;
 			}
-			y += 6;
-			Text(ix, y, "K: key the camera   CUT HERE: cut to it", kDim); y += kRow;
-		Text(ix, y, "C: director view (follows the cuts)", kDim); y += kRow;
-		if (Button(ix, y, 66, 11, "PATHS", s.showPaths)) s.showPaths = !s.showPaths;
+			if (!std::any_of(s.scene.objects.begin(), s.scene.objects.end(), [](const Object& c) { return c.type == ObjType::Camera; }))
+			{
+				Text(ix, y, "No cameras yet: fly the free camera", kDim); y += kRow;
+				Text(ix, y, "(right mouse + WASD), NEW FROM VIEW.", kDim); y += kRow;
+			}
+			y += 4;
+			Object* cam = sel && sel->type == ObjType::Camera ? sel : nullptr;
+			if (cam)
+			{
+				Text(ix, y, cam->name + ": KEYS", kAccent); y += 11;
+				const float bw = (kRightW - 16) / 3;
+				if (Button(ix, y, bw * 2 + 2, 12, "KEY WHAT I SEE (K)")) SetKeyAtPlayhead();
+				if (Button(ix + 2 * (bw + 2), y, bw, 12, "CUT HERE")) { if (s.scene.AddCut(cam->id, s.scene.clock.timeUs)) s.host.Log(0, "Cut to " + cam->name + " at " + s.scene.clock.Timecode()); }
+				y += 14;
+				if (Button(ix, y, bw, 11, "< PREV KEY", false, !cam->keys.empty())) JumpKey(-1);
+				if (Button(ix + bw + 2, y, bw, 11, "NEXT KEY >", false, !cam->keys.empty())) JumpKey(1);
+				if (Button(ix + 2 * (bw + 2), y, bw, 11, "PLAY IT")) { LookThrough(cam->id, false); s.scene.clock.Play(); }
+				y += 14;
+				Text(ix, y, "1 move the playhead (ruler, , . keys)", kDim); y += kRow;
+				Text(ix, y, "2 fly there: FREE CAM or PILOT + WASD", kDim); y += kRow;
+				Text(ix, y, "3 KEY WHAT I SEE; repeat at other times", kDim); y += kRow;
+				Text(ix, y, "4 VIEW (or PLAY IT) to watch it move", kDim); y += kRow + 2;
+			}
+			Text(ix, y, "C: director view (follows the CUTS row)", kDim); y += kRow;
+			if (Button(ix, y, 66, 11, "PATHS", s.showPaths)) s.showPaths = !s.showPaths;
 			break;
 		}
 
@@ -2783,6 +2835,8 @@ namespace
 						s.keyUs = k.tUs;
 						s.keyDrag = true;
 						s.tab = TAB_SCENE;
+						s.scene.clock.Pause();
+						s.scene.clock.timeUs = k.tUs;	// the playhead goes to the key
 					}
 				}
 			if (o.type == ObjType::Actor && !o.clips.empty())
@@ -2937,6 +2991,9 @@ namespace
 				Text(x0, y0 - 9, o ? o->name : info.npcType + " (level)", kAccent, 0.36f);
 			}
 		}
+		if (const Object* sc = s.scene.Find(s.scene.selected))
+			if (sc->type == ObjType::Camera && sc->keys.size() >= 2 && (s.lookId != sc->id || s.pilotId) && !s.director)
+				Text(kLeftW + 6, kPanelY + 13, "L (or VIEW) to watch " + sc->name + " follow its keys", kWarn, 0.36f);
 		if (s.camActive)
 		{
 			const Object* look = s.scene.Find(s.lookId);
@@ -3734,6 +3791,14 @@ int CS_KeyEvent(int key, const int down)
 	else if (is(ACT_SPLIT)) SplitAtPlayhead();
 	else if (is(ACT_KEY)) SetKeyAtPlayhead();
 	else if (is(ACT_DIRECTOR)) { s.director = !s.director; if (s.director) { s.pilotId = 0; s.camActive = true; } s.host.Log(0, s.director ? "Director view: the cut track picks the camera" : "Director view off"); }
+	else if (is(ACT_PREV_KEY)) JumpKey(-1);
+	else if (is(ACT_NEXT_KEY)) JumpKey(1);
+	else if (is(ACT_LOOK))
+	{
+		const Object* o = s.scene.Find(s.scene.selected);
+		if (o && o->type == ObjType::Camera) LookThrough(o->id, false);
+		else s.host.Log(1, "Select a camera to look through it (L)");
+	}
 	else if (is(ACT_SNAP)) { s.snap = !s.snap; s.host.Log(0, s.snap ? "Snapping on" : "Snapping off"); }
 	else if (is(ACT_FOCUS)) Focus();
 	else if (is(ACT_FREEZE)) SetFreeze(!Frozen());
