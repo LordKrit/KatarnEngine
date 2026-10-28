@@ -226,6 +226,7 @@ namespace
 		// ---- Phase 5: combat replay ----
 		int64_t recCgStartUs = 0;	// capture clock when recording began
 		int64_t lastEvalUs = -1;	// scene time events were played up to
+		bool wasPlaying = false;
 		bool irOn = false;			// instant replay: keep the last irSeconds of play
 		int irSeconds = 30;
 		int64_t irLastUs = -1, irLastPruneUs = 0;
@@ -1739,6 +1740,15 @@ namespace
 	}
 
 	// ---- Phase 8: audio and faces ----
+	// how long a sound file plays (0 = can't load it)
+	int64_t SoundLenUs(const std::string& path)
+	{
+		const sfxHandle_t h = cgi_S_RegisterSound(path.c_str());
+		if (!h) return 0;
+		const float ms = cgi_S_GetSampleLength(h);
+		return ms > 0 ? static_cast<int64_t>(ms * 1000.0) : 0;
+	}
+
 	void StartSound(const Object& o, const SoundClip& c)
 	{
 		Studio& s = S();
@@ -1871,9 +1881,10 @@ namespace
 			if (Button(x + w - 14, y, 12, 9, "+")) { c.startUs += step; ch = true; }
 			y += kRow;
 			Label(x, y, "length", Fmt("%.2fs (on the timeline)", static_cast<double>(c.lengthUs) / 1e6), w);
-			if (Button(x + w - 28, y, 12, 9, "-")) { c.lengthUs -= step * 5; ch = true; }
+			if (Button(x + w - 28, y, 12, 9, "-")) { c.lengthUs = std::max<int64_t>(step, c.lengthUs - step * 5); ch = true; }
 			if (Button(x + w - 14, y, 12, 9, "+")) { c.lengthUs += step * 5; ch = true; }
 			y += kRow;
+			if (Button(x + w - 60, y - kRow, 32, 9, "FIT")) { if (const int64_t len = SoundLenUs(c.path)) { c.lengthUs = len; ch = true; } }
 			if (Button(x, y, 50, 10, "PLAY NOW")) StartSound(*o, c);
 			if (Button(x + 52, y, 50, 10, "STOP")) StopStudioSounds();
 			y += 12;
@@ -1904,7 +1915,10 @@ namespace
 					SoundClip c;
 					c.startUs = t;
 					c.path = path;
+					if (const int64_t len = SoundLenUs(path)) c.lengthUs = len;
+					else s.host.Log(1, "Can't load " + path + " (check the path; it plays from sound/... in the game's folders)");
 					e.sounds.push_back(c);
+					SortLanes(e);
 					s.scene.Edit(e, false);
 				}
 			}
@@ -2077,8 +2091,10 @@ namespace
 					SoundClip c;
 					c.startUs = t;
 					c.path = s.soundPath;
-					if (o->music) c.lengthUs = 30'000'000;
+					if (const int64_t len = SoundLenUs(c.path)) c.lengthUs = len;
+					else if (o->music) c.lengthUs = 30'000'000;
 					e.sounds.push_back(c);
+					SortLanes(e);
 					s.scene.Edit(e, false);
 				}
 			}
@@ -3818,7 +3834,7 @@ namespace
 
 		// scrub: click or drag on the ruler / lanes
 		const bool overTime = Inside(s.cx, s.cy, lx, y0, lw, h);
-		if (s.clicked && Inside(s.clickX, s.clickY, lx, y0, lw, h)) { s.clicked = false; s.scrubbing = true; }
+		if (s.clicked && Inside(s.clickX, s.clickY, lx, y0, lw, kRulerH)) { s.clicked = false; s.scrubbing = true; }	// ruler: scrub; lanes: their clips first
 		if (!s.lmb) s.scrubbing = false;
 		if (s.scrubbing)
 		{
@@ -4127,6 +4143,14 @@ namespace
 		}
 		if (!count) Text(14, ry + kRow + 1, "no objects", kDim);
 
+		// a click on empty lane space scrubs (clips, keys and blocks took theirs above)
+		if (s.clicked && Inside(s.clickX, s.clickY, lx, y0, lw, h))
+		{
+			s.clicked = false;
+			s.scrubbing = true;
+			c.playing = false;
+			c.SetFrame((std::max<int64_t>(0, std::min(c.lengthUs, XToTime(s.clickX, lx, lw))) * c.fps + 500'000) / 1'000'000);
+		}
 		if (s.ld.kind == 4)
 		{
 			const Object* o = s.scene.Find(s.ld.obj);
@@ -5175,6 +5199,9 @@ void CS_Frame()
 		SetCaptureSkip(s.takeEnts);
 		// world events play while the scene plays forward (not when scrubbing or jumping)
 		const int64_t t = s.scene.clock.timeUs;
+		// play pressed: what starts right here (a line added at the playhead) plays too
+		if (s.scene.clock.playing && !s.wasPlaying) { PlaySceneEvents(t - 1, t); PlaySceneSounds(t - 1, t); }
+		s.wasPlaying = s.scene.clock.playing;
 		if (s.scene.clock.playing && !s.scrubbing && s.lastEvalUs >= 0 && t > s.lastEvalUs && t - s.lastEvalUs < 400'000)
 		{
 			PlaySceneEvents(s.lastEvalUs, t);
