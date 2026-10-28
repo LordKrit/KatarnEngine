@@ -179,6 +179,14 @@ namespace cs
 		g_force.clear();
 	}
 
+	// eyes and head toward another character (ENTITYNUM_NONE / -1 = their own business)
+	void SetLookTarget(const int ent, const int target)
+	{
+		if (!Character(ent)) return;
+		g_entities[ent].client->renderInfo.lookTarget = Character(target) ? target : ENTITYNUM_NONE;
+		g_entities[ent].client->renderInfo.lookTargetClearTime = 0;
+	}
+
 	// what a character's force / receiving-end state is now (for samples)
 	void ForceState(const int ent, int& forceBits, int& takeFlags)
 	{

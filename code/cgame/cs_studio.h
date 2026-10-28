@@ -105,8 +105,16 @@ namespace cs
 	bool AttachPose(int actorEnt, const std::string& bolt, const float offset[3], const float angOff[3], float org[3], float ang[3]);
 	void SetPropRenderPose(int ent, const float org[3], const float ang[3]);	// drawn there this frame
 	void ClearPropRenderPoses();
-	void ForceState(int ent, int& forceBits, int& takeFlags);			// a prop your saber can hit (still can't be hurt)
+	void ForceState(int ent, int& forceBits, int& takeFlags);
+	void SetLookTarget(int ent, int target);	// -1 = none			// a prop your saber can hit (still can't be hurt)
 }
+
+// face rig (cg_face.cpp), driven by the studio's face tracks (Phase 8)
+bool CS_FaceHasRig(int ent);
+void CS_FacePoses(int ent, std::vector<std::string>& out);
+void CS_FaceExpr(int ent, const char* pose, float weight, int blendMs);	// pose "" / nullptr = none
+void CS_FaceIdle(int ent, bool on, const char* profile);
+void CS_FaceEyes(int ent, bool force, float pitch, float yaw);
 
 // called from the cgame
 void CS_Init();							// CG_Init (new level)

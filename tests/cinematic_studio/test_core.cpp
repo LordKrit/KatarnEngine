@@ -694,8 +694,71 @@ static void TestPhase7()
 	CHECK(h.ents.size() == before - 3);	// vader + 2 props
 }
 
+static void TestPhase8()
+{
+	FakeHost h;
+	Scene s(&h);
+	const float o[3] = { 0, 0, 0 }, a[3] = { 0, 0, 0 };
+	const int v = s.AddActor("md_vader", o, a), k = s.AddActor("md_kyle", o, a);
+
+	// voice lines, expressions, idle and eye keys through Edit (sorted, clamped, undoable)
+	Object e = *s.Find(v);
+	SoundClip line; line.startUs = 3'000'000; line.path = "sound/cine/vader1.mp3";
+	SoundClip line0; line0.startUs = 1'000'000; line0.path = "sound/cine/vader0.mp3"; line0.lengthUs = 10;
+	e.sounds = { line, line0 };
+	FaceClip angry; angry.startUs = 500'000; angry.lengthUs = 2'000'000; angry.pose = "angry"; angry.weight = 3;
+	FaceClip blink; blink.startUs = 1'000'000; blink.lengthUs = 200'000; blink.pose = "blink";
+	e.faceClips = { angry, blink };
+	IdleKey off; off.tUs = 2'000'000; off.on = false;
+	IdleKey on; on.tUs = 0;
+	e.idleKeys = { off, on };
+	EyeKey look; look.tUs = 0; look.mode = EyeKey::LookAt; look.target = k;
+	EyeKey aim1; aim1.tUs = 1'000'000; aim1.mode = EyeKey::Aim; aim1.pitch = 10; aim1.yaw = -20;
+	EyeKey aim2; aim2.tUs = 2'000'000; aim2.mode = EyeKey::Aim; aim2.pitch = 0; aim2.yaw = 20;
+	EyeKey free3; free3.tUs = 3'000'000;
+	e.eyeKeys = { aim2, look, free3, aim1 };
+	CHECK(s.Edit(e, false));
+	const Object* ov = s.Find(v);
+	CHECK(ov->sounds[0].path == "sound/cine/vader0.mp3" && ov->sounds[0].lengthUs == 50'000 && ov->faceClips[0].weight == 1);
+	CHECK(ov->eyeKeys[0].mode == EyeKey::LookAt && ov->eyeKeys[3].mode == EyeKey::Free && ov->entNum >= 0);
+
+	CHECK(ActiveFaceClip(ov->faceClips, 400'000) == nullptr);
+	CHECK(ActiveFaceClip(ov->faceClips, 800'000)->pose == "angry");
+	CHECK(ActiveFaceClip(ov->faceClips, 1'100'000)->pose == "blink");		// the later one wins while it lasts
+	CHECK(ActiveFaceClip(ov->faceClips, 1'300'000)->pose == "angry" && !ActiveFaceClip(ov->faceClips, 2'500'000));
+	CHECK(IdleAt(ov->idleKeys, 100)->on && !IdleAt(ov->idleKeys, 2'000'000)->on);
+	std::vector<IdleKey> noIdle;
+	CHECK(!IdleAt(noIdle, 5));
+	EyeKey x;
+	CHECK(EyesAt(ov->eyeKeys, 500'000, x) && x.mode == EyeKey::LookAt && x.target == k);
+	CHECK(EyesAt(ov->eyeKeys, 1'500'000, x) && x.mode == EyeKey::Aim && std::fabs(x.pitch - 5) < 1e-4 && std::fabs(x.yaw) < 1e-4);
+	CHECK(EyesAt(ov->eyeKeys, 2'500'000, x) && x.yaw == 20 && EyesAt(ov->eyeKeys, 3'500'000, x) && x.mode == EyeKey::Free);
+	std::vector<EyeKey> noEyes;
+	CHECK(!EyesAt(noEyes, 0, x));
+	CHECK(s.Undo() && s.Find(v)->faceClips.empty() && s.Redo() && s.Find(v)->faceClips.size() == 2);
+
+	// music / sound tracks
+	const int m = s.AddAudio("", true);
+	CHECK(m && s.Find(m)->type == ObjType::Audio && s.Find(m)->music && s.Find(m)->name == "Music 01");
+	Object em = *s.Find(m);
+	SoundClip song; song.path = "music/kor_lite/korrib_action.mp3"; song.lengthUs = 60'000'000;
+	em.sounds.push_back(song);
+	CHECK(s.Edit(em, false) && s.Find(m)->sounds.size() == 1);
+	CHECK(s.AddAudio("Effects", false) && s.Undo());
+
+	CHECK(s.Save("P8"));
+	Scene l(&h);
+	std::vector<std::string> warn;
+	CHECK(l.Load("P8", false, false, warn) && warn.empty());
+	const Object* lv = l.Find(v);
+	CHECK(lv && lv->sounds == s.Find(v)->sounds && lv->faceClips == s.Find(v)->faceClips);
+	CHECK(lv->idleKeys == s.Find(v)->idleKeys && lv->eyeKeys == s.Find(v)->eyeKeys);
+	CHECK(l.Find(m) && l.Find(m)->music && l.Find(m)->sounds == s.Find(m)->sounds);
+}
+
 int main()
 {
+	TestPhase8();
 	TestPhase7();
 	TestPhase6();
 	TestPhase5();

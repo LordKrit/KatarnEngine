@@ -228,6 +228,22 @@ namespace
 		std::vector<IrTrack> irTracks;
 		int evDragObj = 0;
 		int64_t evDragGrabUs = 0;
+		// ---- Phase 8: audio and faces ----
+		std::string voicePath = "sound/cine/", soundPath = "music/";
+		std::vector<std::string> facePoses;
+		int facePosesEnt = -1;
+		int exprPick = 0;
+		float exprWeight = 1.0f;
+		int64_t exprLenUs = 1'000'000;
+		int exprBlendMs = 250;
+		float eyePitch = 0, eyeYaw = 0;
+		int eyeTarget = 0;
+		int audioSelObj = 0, audioSelIdx = -1;	// selected sound clip (object, index); -1 = none
+		int faceSelIdx = -1;					// selected expression clip of the selected actor
+		std::map<int, std::pair<std::string, float>> faceApplied;	// per entity: expression the studio set
+		std::map<int, int> idleApplied, eyeApplied;	// per entity: idle on (1) / off (0); eyes mode + 1
+		bool soundsStarted = false;				// the studio started sounds (stopped when playback stops)
+		bool musicStarted = false;
 		// ---- Phase 7: props ----
 		bool propModels = false;		// the PROPS tab lists model files instead of entity classes
 		std::string propSearch, propDir = "models/map_objects", propClass = "misc_model_breakable", propModel;
@@ -614,6 +630,8 @@ namespace
 		s.field = FIELD_NONE;
 		if (f == FIELD_ANIMSEARCH) { s.animSearch = t; s.animScroll = 0; return; }
 		if (f == FIELD_PROPSEARCH) { s.propSearch = t; s.propScroll = 0; return; }
+		if (f == FIELD_VOICE) { s.voicePath = t; return; }
+		if (f == FIELD_MUSIC) { s.soundPath = t; return; }
 		if (f == FIELD_PROPDIR) { s.propDir = t.empty() ? "models" : t; s.propFilesDir.clear(); s.propScroll = 0; return; }
 		if (f == FIELD_PROPKV || f == FIELD_PROPSET)
 		{
@@ -699,7 +717,9 @@ namespace
 			else if (Inside(s.cx, s.cy, x, ry, w, kRow)) Rect(x + 1, ry, w - 2, kRow, kHover);
 			const bool cam = o.type == ObjType::Camera, evt = o.type == ObjType::Events, prp = o.type == ObjType::Prop;
 			const vec4_t kPropCol = { 0.55f, 0.85f, 0.45f, 1 };
-			Text(x + 4, ry + 1, cam ? "C" : (evt ? "E" : (prp ? "P" : "A")), cam ? kCam : (evt ? kWarn : (prp ? kPropCol : kAccent)));
+			const bool aud = o.type == ObjType::Audio;
+			const vec4_t kAudCol = { 0.30f, 0.85f, 0.85f, 1 };
+			Text(x + 4, ry + 1, cam ? "C" : (evt ? "E" : (prp ? "P" : (aud ? "S" : "A"))), cam ? kCam : (evt ? kWarn : (prp ? kPropCol : (aud ? kAudCol : kAccent))));
 			const bool missing = (o.type == ObjType::Actor || o.type == ObjType::Prop) && o.entNum < 0;
 			TextClip(x + 14, ry + 1, o.name + (missing ? "  (missing)" : ""), w - 18, missing ? kWarn : kTextCol);
 			if (TakeClick(x, ry, w, kRow))
@@ -1483,6 +1503,345 @@ namespace
 		return true;
 	}
 
+	// ---- Phase 8: audio and faces ----
+	void StartSound(const Object& o, const SoundClip& c)
+	{
+		Studio& s = S();
+		const sfxHandle_t h = cgi_S_RegisterSound(c.path.c_str());
+		if (!h) { s.host.Log(1, "Can't load sound " + c.path); return; }
+		if (o.type == ObjType::Actor)
+		{
+			if (o.entNum < 0) return;
+			cgi_S_StartSound(nullptr, o.entNum, CHAN_VOICE_GLOBAL, h);	// a voice line: lip sync on a face rig
+		}
+		else if (o.music)
+		{
+			cgi_S_StartBackgroundTrack(c.path.c_str(), c.path.c_str(), qtrue);
+			s.musicStarted = true;
+		}
+		else cgi_S_StartLocalSound(h, CHAN_AUTO);
+		s.soundsStarted = true;
+	}
+
+	// sounds starting between two scene times (from, to] play
+	void PlaySceneSounds(const int64_t from, const int64_t to)
+	{
+		Studio& s = S();
+		for (auto& o : s.scene.objects)
+		{
+			if ((o.type != ObjType::Actor && o.type != ObjType::Audio) || o.sounds.empty() || !o.visible) continue;
+			for (auto& c : o.sounds)
+				if (c.startUs > from && c.startUs <= to) StartSound(o, c);
+		}
+	}
+
+	void StopStudioSounds()
+	{
+		Studio& s = S();
+		if (s.musicStarted) cgi_S_StartBackgroundTrack("", "", qfalse);
+		if (s.soundsStarted) cgi_S_StopSounds();
+		s.soundsStarted = s.musicStarted = false;
+	}
+
+	// face tracks: expressions, idle on / off, eyes; every frame, also while scrubbing
+	void EvaluateFaces()
+	{
+		Studio& s = S();
+		const int64_t t = s.scene.clock.timeUs;
+		for (auto& o : s.scene.objects)
+		{
+			if (o.type != ObjType::Actor || o.entNum < 0) continue;
+			const int e = o.entNum;
+			// expression
+			if (!o.faceClips.empty() || s.faceApplied.count(e))
+			{
+				const FaceClip* c = ActiveFaceClip(o.faceClips, t);
+				const std::string pose = c ? c->pose : "";
+				const float w = c ? c->weight : 0.0f;
+				auto it = s.faceApplied.find(e);
+				if (it == s.faceApplied.end() || it->second.first != pose || it->second.second != w)
+				{
+					int blend = c ? c->blendMs : 250;
+					if (!c && it != s.faceApplied.end())
+						for (auto& fc : o.faceClips) if (fc.pose == it->second.first) blend = fc.blendMs;	// out as it came in
+					CS_FaceExpr(e, pose.c_str(), w, blend);
+					if (c || !o.faceClips.empty()) s.faceApplied[e] = { pose, w }; else s.faceApplied.erase(e);
+				}
+			}
+			// idle
+			if (!o.idleKeys.empty())
+			{
+				const IdleKey* k = IdleAt(o.idleKeys, t);
+				const int want = k ? (k->on ? 1 : 0) : 1;
+				auto it = s.idleApplied.find(e);
+				if (it == s.idleApplied.end() || it->second != want) { CS_FaceIdle(e, want != 0, k ? k->profile.c_str() : ""); s.idleApplied[e] = want; }
+			}
+			// eyes
+			if (!o.eyeKeys.empty() || s.eyeApplied.count(e))
+			{
+				EyeKey x;
+				const bool have = EyesAt(o.eyeKeys, t, x);
+				const int mode = have ? static_cast<int>(x.mode) : -1;
+				if (mode == EyeKey::Aim) CS_FaceEyes(e, true, x.pitch, x.yaw);
+				else CS_FaceEyes(e, false, 0, 0);
+				if (mode == EyeKey::LookAt)
+				{
+					const Object* tg = s.scene.Find(x.target);
+					SetLookTarget(e, tg ? tg->entNum : -1);
+				}
+				else if (s.eyeApplied.count(e) && s.eyeApplied[e] == EyeKey::LookAt + 1) SetLookTarget(e, -1);
+				if (have) s.eyeApplied[e] = mode + 1; else s.eyeApplied.erase(e);
+			}
+		}
+	}
+
+	void RefreshFacePoses(const int ent)
+	{
+		Studio& s = S();
+		if (s.facePosesEnt == ent) return;
+		s.facePosesEnt = ent;
+		s.facePoses.clear();
+		if (ent >= 0) CS_FacePoses(ent, s.facePoses);
+		if (s.facePoses.empty()) s.facePoses = { "angry", "smile", "smirk", "sad", "surprised", "blink" };
+		s.exprPick = 0;
+	}
+
+	void DrawSoundList(const float x, float& y, Object* o, const float w, const int maxRows)
+	{
+		Studio& s = S();
+		int shown = 0;
+		for (size_t i = 0; i < o->sounds.size(); i++)
+		{
+			if (shown++ >= maxRows) { Text(x, y, Fmt("+%d more (timeline)", static_cast<int>(o->sounds.size()) - maxRows), kDim); y += kRow; break; }
+			const SoundClip& c = o->sounds[i];
+			const bool sel = s.audioSelObj == o->id && s.audioSelIdx == static_cast<int>(i);
+			if (sel) Rect(x - 5, y, kRightW - 2, kRow, kSel);
+			std::string nm = c.path;
+			const size_t sl = nm.find_last_of('/');
+			if (sl != std::string::npos) nm = nm.substr(sl + 1);
+			TextClip(x, y + 1, Fmt("%.2fs  ", static_cast<double>(c.startUs) / 1e6) + nm, w - 16, kTextCol);
+			if (Button(x + w - 12, y, 12, 9, "x")) { Object e = *o; e.sounds.erase(e.sounds.begin() + static_cast<long>(i)); s.scene.Edit(e, false); s.audioSelIdx = -1; return; }
+			if (TakeClick(x - 5, y, w - 14, kRow)) { s.audioSelObj = o->id; s.audioSelIdx = static_cast<int>(i); }
+			y += kRow;
+		}
+		// the selected one: start / length nudges
+		if (s.audioSelObj == o->id && s.audioSelIdx >= 0 && s.audioSelIdx < static_cast<int>(o->sounds.size()))
+		{
+			Object e = *o;
+			SoundClip& c = e.sounds[static_cast<size_t>(s.audioSelIdx)];
+			const int64_t step = s.shift ? 1'000'000 : 1'000'000 / s.scene.clock.fps;
+			bool ch = false;
+			Label(x, y, "start", Fmt("%.2fs", static_cast<double>(c.startUs) / 1e6), w);
+			if (Button(x + w - 28, y, 12, 9, "-")) { c.startUs -= step; ch = true; }
+			if (Button(x + w - 14, y, 12, 9, "+")) { c.startUs += step; ch = true; }
+			y += kRow;
+			Label(x, y, "length", Fmt("%.2fs (on the timeline)", static_cast<double>(c.lengthUs) / 1e6), w);
+			if (Button(x + w - 28, y, 12, 9, "-")) { c.lengthUs -= step * 5; ch = true; }
+			if (Button(x + w - 14, y, 12, 9, "+")) { c.lengthUs += step * 5; ch = true; }
+			y += kRow;
+			if (Button(x, y, 50, 10, "PLAY NOW")) StartSound(*o, c);
+			if (Button(x + 52, y, 50, 10, "STOP")) StopStudioSounds();
+			y += 12;
+			if (ch) { const SoundClip keep = c; s.scene.Edit(e, true, "sound"); const Object* n = s.scene.Find(e.id); for (size_t i = 0; n && i < n->sounds.size(); i++) if (n->sounds[i] == keep) s.audioSelIdx = static_cast<int>(i); }
+		}
+	}
+
+	void DrawAudioPanel(const float x, const float y0, const float h)
+	{
+		Studio& s = S();
+		const float ix = x + 6, w = kRightW - 12;
+		float y = y0 + 2;
+		Object* o = s.scene.Find(s.scene.selected);
+		const int64_t t = s.scene.clock.timeUs;
+		if (o && o->type == ObjType::Actor)
+		{
+			// ---- voice lines
+			Text(ix, y, "VOICE LINES: " + o->name, kAccent); y += 11;
+			DrawField(ix, y, w, FIELD_VOICE, s.voicePath); y += 13;
+			if (Button(ix, y, w, 10, "ADD LINE AT PLAYHEAD (lip sync)"))
+			{
+				std::string path = s.voicePath;
+				if (path.find('/') == std::string::npos) path = "sound/cine/" + path;
+				if (path.empty() || path.back() == '/') s.host.Log(1, "Type the sound file first (e.g. sound/cine/line1.mp3)");
+				else
+				{
+					Object e = *o;
+					SoundClip c;
+					c.startUs = t;
+					c.path = path;
+					e.sounds.push_back(c);
+					s.scene.Edit(e, false);
+				}
+			}
+			y += 12;
+			DrawSoundList(ix, y, o, w, 3);
+			y += 3;
+			// ---- face
+			const bool rig = CS_FaceHasRig(o->entNum);
+			Text(ix, y, rig ? "FACE" : "FACE (no face rig on this model)", rig ? kAccent : kDim); y += 11;
+			if (!rig)
+			{
+				Text(ix, y, "Expression / eye tracks need a model with", kDim); y += kRow;
+				Text(ix, y, "an ext_data/faces/<model>.face file.", kDim); y += kRow;
+				Text(ix, y, "Eyes LOOK AT still turn the head.", kDim); y += kRow + 2;
+			}
+			else
+			{
+				RefreshFacePoses(o->entNum);
+				const std::string pose = s.facePoses[static_cast<size_t>(s.exprPick) % s.facePoses.size()];
+				if (Button(ix, y, 12, 10, "<")) s.exprPick = (s.exprPick + static_cast<int>(s.facePoses.size()) - 1) % static_cast<int>(s.facePoses.size());
+				TextClip(ix + 15, y + 1, pose, w - 32, kTextCol);
+				if (Button(ix + w - 12, y, 12, 10, ">")) s.exprPick = (s.exprPick + 1) % static_cast<int>(s.facePoses.size());
+				y += 12;
+				const float qw = (w - 6) / 3;
+				Label(ix, y, "weight", Fmt("%.2f", s.exprWeight), qw * 2);
+				if (Button(ix + w - 28, y, 12, 9, "-")) s.exprWeight = std::max(0.1f, s.exprWeight - 0.1f);
+				if (Button(ix + w - 14, y, 12, 9, "+")) s.exprWeight = std::min(1.0f, s.exprWeight + 0.1f);
+				y += kRow;
+				Label(ix, y, "length / blend", Fmt("%.1fs / %d ms", static_cast<double>(s.exprLenUs) / 1e6, s.exprBlendMs), w - 60);
+				if (Button(ix + w - 56, y, 12, 9, "-")) s.exprLenUs = std::max<int64_t>(100'000, s.exprLenUs - (s.shift ? 1'000'000 : 100'000));
+				if (Button(ix + w - 42, y, 12, 9, "+")) s.exprLenUs += s.shift ? 1'000'000 : 100'000;
+				if (Button(ix + w - 28, y, 12, 9, "-")) s.exprBlendMs = std::max(0, s.exprBlendMs - 50);
+				if (Button(ix + w - 14, y, 12, 9, "+")) s.exprBlendMs = std::min(2000, s.exprBlendMs + 50);
+				y += kRow;
+				if (Button(ix, y, w, 10, "ADD EXPRESSION AT PLAYHEAD"))
+				{
+					Object e = *o;
+					FaceClip c;
+					c.startUs = t; c.lengthUs = s.exprLenUs; c.pose = pose; c.weight = s.exprWeight; c.blendMs = s.exprBlendMs;
+					e.faceClips.push_back(c);
+					s.scene.Edit(e, false);
+				}
+				y += 12;
+				// the clips here
+				int n = 0;
+				for (size_t i = 0; i < o->faceClips.size() && n < 2; i++)
+				{
+					const FaceClip& c = o->faceClips[i];
+					if (t < c.startUs - 3'000'000 || t > c.startUs + c.lengthUs + 3'000'000) continue;	// near the playhead
+					n++;
+					TextClip(ix, y + 1, Fmt("%.1fs %s %.1f (%.1fs)", static_cast<double>(c.startUs) / 1e6, c.pose.c_str(), c.weight, static_cast<double>(c.lengthUs) / 1e6), w - 16,
+						ActiveFaceClip(o->faceClips, t) == &c ? kAccent : kTextCol);
+					if (Button(ix + w - 12, y, 12, 9, "x")) { Object e = *o; e.faceClips.erase(e.faceClips.begin() + static_cast<long>(i)); s.scene.Edit(e, false); return; }
+					y += kRow;
+				}
+				// idle
+				const IdleKey* ik = IdleAt(o->idleKeys, t);
+				Label(ix, y, "idle", ik ? (ik->on ? "on" : "off") : "on (no keys)", w - 70);
+				const bool onB = Button(ix + w - 68, y, 32, 9, "ON HERE");
+				const bool offB = Button(ix + w - 34, y, 34, 9, "OFF HERE");
+				if (onB || offB)
+				{
+					const bool on = onB;
+					Object e = *o;
+					IdleKey k; k.tUs = t; k.on = on;
+					e.idleKeys.erase(std::remove_if(e.idleKeys.begin(), e.idleKeys.end(), [&](const IdleKey& q) { return q.tUs == t; }), e.idleKeys.end());
+					e.idleKeys.push_back(k);
+					s.scene.Edit(e, false);
+				}
+				y += kRow + 2;
+			}
+			// ---- eyes
+			Text(ix, y, "EYES", kAccent); y += 11;
+			EyeKey cur;
+			const bool haveEyes = EyesAt(o->eyeKeys, t, cur);
+			const Object* tg = haveEyes && cur.mode == EyeKey::LookAt ? s.scene.Find(cur.target) : nullptr;
+			Label(ix, y, "now", !haveEyes ? std::string("free (no keys)") : cur.mode == EyeKey::Free ? std::string("free") :
+				cur.mode == EyeKey::LookAt ? "look at " + (tg ? tg->name : std::string("?")) : Fmt("aim %.0f %.0f", cur.pitch, cur.yaw), w);
+			y += kRow;
+			{
+				const Object* pick = s.eyeTarget ? s.scene.Find(s.eyeTarget) : nullptr;
+				if (!pick || pick->id == o->id || pick->type != ObjType::Actor)
+				{
+					s.eyeTarget = 0;
+					for (auto& c : s.scene.objects) if (c.type == ObjType::Actor && c.id != o->id) { s.eyeTarget = c.id; break; }
+					pick = s.eyeTarget ? s.scene.Find(s.eyeTarget) : nullptr;
+				}
+				Label(ix, y, "target", pick ? pick->name : std::string("(no other actor)"), w - 30);
+				if (Button(ix + w - 28, y, 28, 9, "NEXT"))
+				{
+					bool after = false;
+					int next = 0;
+					for (auto& c : s.scene.objects)
+					{
+						if (c.type != ObjType::Actor || c.id == o->id) continue;
+						if (!next) next = c.id;
+						if (after) { next = c.id; break; }
+						if (c.id == s.eyeTarget) after = true;
+					}
+					s.eyeTarget = next;
+				}
+				y += kRow;
+			}
+			Label(ix, y, "aim", Fmt("%.0f %.0f", s.eyePitch, s.eyeYaw), w - 60);
+			if (Button(ix + w - 56, y, 12, 9, "^")) s.eyePitch = std::max(-40.0f, s.eyePitch - 5);
+			if (Button(ix + w - 42, y, 12, 9, "v")) s.eyePitch = std::min(40.0f, s.eyePitch + 5);
+			if (Button(ix + w - 28, y, 12, 9, "<")) s.eyeYaw = std::min(60.0f, s.eyeYaw + 5);
+			if (Button(ix + w - 14, y, 12, 9, ">")) s.eyeYaw = std::max(-60.0f, s.eyeYaw - 5);
+			y += kRow + 1;
+			const float bw = (w - 4) / 3;
+			int addMode = -1;
+			if (Button(ix, y, bw, 10, "LOOK AT HERE", false, s.eyeTarget != 0)) addMode = EyeKey::LookAt;
+			if (Button(ix + bw + 2, y, bw, 10, "AIM HERE", false, rig)) addMode = EyeKey::Aim;
+			if (Button(ix + 2 * (bw + 2), y, bw, 10, "FREE HERE")) addMode = EyeKey::Free;
+			if (addMode >= 0)
+			{
+				Object e = *o;
+				EyeKey k;
+				k.tUs = t;
+				k.mode = static_cast<EyeKey::Mode>(addMode);
+				k.target = addMode == EyeKey::LookAt ? s.eyeTarget : 0;
+				k.pitch = s.eyePitch; k.yaw = s.eyeYaw;
+				e.eyeKeys.erase(std::remove_if(e.eyeKeys.begin(), e.eyeKeys.end(), [&](const EyeKey& q) { return q.tUs == t; }), e.eyeKeys.end());
+				e.eyeKeys.push_back(k);
+				s.scene.Edit(e, false);
+			}
+			y += 12;
+			if (!o->eyeKeys.empty() && Button(ix, y, w, 9, Fmt("CLEAR %d EYE KEY(S)", static_cast<int>(o->eyeKeys.size()))))
+			{
+				Object e = *o;
+				e.eyeKeys.clear();
+				s.scene.Edit(e, false);
+			}
+			return;
+		}
+		if (o && o->type == ObjType::Audio)
+		{
+			Text(ix, y, (o->music ? "MUSIC: " : "SOUNDS: ") + o->name, kAccent); y += 11;
+			DrawField(ix, y, w, FIELD_MUSIC, s.soundPath); y += 13;
+			if (Button(ix, y, w, 10, o->music ? "ADD MUSIC AT PLAYHEAD" : "ADD SOUND AT PLAYHEAD"))
+			{
+				if (s.soundPath.empty() || s.soundPath.back() == '/') s.host.Log(1, "Type the file first (e.g. music/kor_lite/korrib_action.mp3)");
+				else
+				{
+					Object e = *o;
+					SoundClip c;
+					c.startUs = t;
+					c.path = s.soundPath;
+					if (o->music) c.lengthUs = 30'000'000;
+					e.sounds.push_back(c);
+					s.scene.Edit(e, false);
+				}
+			}
+			y += 12;
+			if (Button(ix, y, 66, 10, o->visible ? "PLAYS: ON" : "PLAYS: OFF", o->visible)) s.scene.SetVisible(o->id, !o->visible);
+			y += 13;
+			DrawSoundList(ix, y, o, w, 10);
+			y += 4;
+			Text(ix, y, o->music ? "music: one track at a time, plays on" : "sounds play where the scene starts them", kDim, 0.34f);
+			return;
+		}
+		Text(ix, y, "AUDIO", kAccent); y += 12;
+		Text(ix, y, "Select an actor for voice lines and", kDim); y += kRow;
+		Text(ix, y, "face tracks, or add a track:", kDim); y += kRow + 3;
+		if (Button(ix, y, w, 11, "ADD MUSIC TRACK")) s.scene.AddAudio("", true);
+		y += 13;
+		if (Button(ix, y, w, 11, "ADD SOUND TRACK")) s.scene.AddAudio("", false);
+		y += 16;
+		Text(ix, y, "Sounds start when the scene plays", kDim); y += kRow;
+		Text(ix, y, "through their start (not when scrubbing).", kDim);
+	}
+
 	// ---- Phase 7: props ----
 	void SpawnPropInFront()
 	{
@@ -1874,6 +2233,7 @@ namespace
 			Text(ix, y, "INSPECTOR", kAccent); y += 12;
 			if (sel && sel->type == ObjType::Camera) DrawCameraInspector(ix, y, sel);
 			else if (sel && sel->type == ObjType::Prop) DrawPropInspector(ix, y, sel);
+			else if (sel && sel->type == ObjType::Audio) DrawAudioPanel(x, y0, h);
 			else if (sel && sel->type == ObjType::Events)
 			{
 				Label(ix, y, "name", sel->name); y += kRow;
@@ -2007,10 +2367,7 @@ namespace
 			DrawAnimPanel(x, y0, h);
 			break;
 		case TAB_AUDIO:
-			Text(ix, y, "AUDIO", kAccent); y += 12;
-			Text(ix, y, "Dialogue tracks: Phase 8.", kDim); y += kRow;
-			Text(ix, y, "Now: console 'cineaudio play", kDim); y += kRow;
-			Text(ix, y, "<file> <who>' (lip sync).", kDim);
+			DrawAudioPanel(x, y0, h);
 			break;
 		case TAB_PROPS:
 			DrawPropsPanel(x, y0, h);
@@ -2326,6 +2683,52 @@ namespace
 						s.keyObj = 0;
 					}
 				}
+			// voice lines (teal, top) and expressions (pink, bottom) on actors; sound clips on audio tracks
+			{
+				const vec4_t vc = { 0.30f, 0.85f, 0.85f, 0.9f }, fc = { 0.95f, 0.45f, 0.75f, 0.85f };
+				const bool audio = o.type == ObjType::Audio;
+				for (size_t si = 0; si < o.sounds.size(); si++)
+				{
+					const SoundClip& c = o.sounds[si];
+					const float a0 = TimeToX(c.startUs, lx, lw), a1 = std::max(a0 + 2, TimeToX(c.startUs + c.lengthUs, lx, lw));
+					if (a1 < lx || a0 > lx + lw) continue;
+					const bool ssel = s.audioSelObj == o.id && s.audioSelIdx == static_cast<int>(si);
+					if (audio)
+					{
+						const vec4_t ac = { 0.30f, 0.70f, 0.75f, o.visible ? 0.75f : 0.25f };
+						Rect(a0, yy + 1, a1 - a0, kRow - 2, ac);
+						std::string nm = c.path;
+						const size_t sl = nm.find_last_of('/');
+						if (sl != std::string::npos) nm = nm.substr(sl + 1);
+						TextClip(a0 + 2, yy + 1.5f, nm, std::max(0.0f, a1 - a0 - 3), kTextCol);
+					}
+					else Rect(a0, yy + 1, a1 - a0, 2, vc);
+					if (ssel) Frame(a0, yy + 1, a1 - a0, audio ? kRow - 2 : 2, kAccent);
+					if (s.clicked && Inside(s.clickX, s.clickY, a0, yy, a1 - a0, audio ? kRow : 3))
+					{
+						s.clicked = false;
+						s.scene.selected = o.id; s.lastSel = o.id; s.levelSel = -1;
+						s.audioSelObj = o.id; s.audioSelIdx = static_cast<int>(si);
+						s.tab = TAB_AUDIO;
+					}
+				}
+				for (auto& c : o.faceClips)
+				{
+					const float a0 = TimeToX(c.startUs, lx, lw), a1 = std::max(a0 + 2, TimeToX(c.startUs + c.lengthUs, lx, lw));
+					if (a1 < lx || a0 > lx + lw) continue;
+					Rect(a0, yy + kRow - 3, a1 - a0, 2, fc);
+				}
+				for (auto& k : o.eyeKeys)
+				{
+					const float kx = TimeToX(k.tUs, lx, lw);
+					if (kx >= lx && kx <= lx + lw) Rect(kx - 0.5f, yy + 1, 1, 3, fc);
+				}
+				for (auto& k : o.idleKeys)
+				{
+					const float kx = TimeToX(k.tUs, lx, lw);
+					if (kx >= lx && kx <= lx + lw) Rect(kx - 0.5f, yy + kRow - 5, 1, 4, k.on ? vc : kRed);
+				}
+			}
 			// world events: a bar from the first to the last, a tick per event
 			if (o.type == ObjType::Events && !o.Events().empty())
 			{
@@ -3129,6 +3532,10 @@ void CS_Init()
 	s.ghostEnts.clear();
 	s.solidEnts.clear();
 	s.recPerf.clear();
+	s.faceApplied.clear();
+	s.idleApplied.clear();
+	s.eyeApplied.clear();
+	s.facePosesEnt = -1;
 	s.liveAnims.clear();
 	s.levelSel = -1;
 	PlayerView();
@@ -3381,13 +3788,18 @@ void CS_Frame()
 	{
 		EvaluateScene();
 		EvaluateProps();
+		EvaluateFaces();
 		// saber clashes with takes while the scene plays (recording: your attacks bounce off them)
 		if (s.clashes && s.scene.clock.playing && !s.takeEnts.empty()) DetectClashes(s.takeEnts, s.rec == Studio::REC_RECORDING);
 		SetCaptureSkip(s.takeEnts);
 		// world events play while the scene plays forward (not when scrubbing or jumping)
 		const int64_t t = s.scene.clock.timeUs;
 		if (s.scene.clock.playing && !s.scrubbing && s.lastEvalUs >= 0 && t > s.lastEvalUs && t - s.lastEvalUs < 400'000)
+		{
 			PlaySceneEvents(s.lastEvalUs, t);
+			PlaySceneSounds(s.lastEvalUs, t);
+		}
+		if (!s.scene.clock.playing && (s.soundsStarted || s.musicStarted) && s.rec == Studio::REC_IDLE) StopStudioSounds();
 		s.lastEvalUs = t;
 	}
 

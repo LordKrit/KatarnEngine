@@ -31,6 +31,7 @@ Console / cutscene commands:
 #include "cg_headers.h"
 #include "cg_media.h"
 #include "../game/ghoul2_shared.h"
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -97,6 +98,8 @@ namespace
 		float phase[4] = { 0, 0, 0, 0 };	// micro-motion noise phases
 		float tension = 0;
 		float eyeOff[2] = { 0, 0 };			// idle eye offset (pitch, yaw), degrees
+		bool eyeForce = false;				// Cinematic Studio eye posing: these angles instead of idle gaze
+		float eyeForceAng[2] = { 0, 0 };
 		float eyeGoal[2] = { 0, 0 };
 		int nextSaccade = 0, glanceUntil = 0;
 		// emphasis while talking
@@ -439,6 +442,7 @@ void CG_FaceEyeOffset(const int entityNum, float out[2])
 	out[0] = out[1] = 0;
 	if (entityNum < 0 || entityNum >= MAX_GENTITIES) return;
 	const FaceState& st = g_face[entityNum];
+	if (st.eyeForce) { out[0] = st.eyeForceAng[0]; out[1] = st.eyeForceAng[1]; return; }	// studio eye posing
 	if (!st.lifeInit || st.idleOff) return;
 	out[0] = st.eyeOff[0];
 	out[1] = st.eyeOff[1];
@@ -914,4 +918,68 @@ void CG_FaceIdle_f()
 		st.moodUntil = 0;
 		if (!g_profiles.count(a)) Com_Printf("faceidle: no profile '%s' (using default)\n", a);
 	}
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Cinematic Studio (Phase 8): face tracks drive these
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+	CGhoul2Info* FaceModel(const int ent)
+	{
+		if (ent < 0 || ent >= MAX_GENTITIES) return nullptr;
+		gentity_t* e = &g_entities[ent];
+		if (!e->inuse || !e->client || e->playerModel < 0 || e->ghoul2.size() <= e->playerModel) return nullptr;
+		return &e->ghoul2[e->playerModel];
+	}
+}
+
+bool CS_FaceHasRig(const int ent)
+{
+	CGhoul2Info* g2 = FaceModel(ent);
+	return g2 && LoadDef(ModelFolder(*g2)).valid;
+}
+
+// the expression poses of the model (not the one-letter mouth shapes)
+void CS_FacePoses(const int ent, std::vector<std::string>& out)
+{
+	out.clear();
+	CGhoul2Info* g2 = FaceModel(ent);
+	if (!g2) return;
+	const FaceDef& def = LoadDef(ModelFolder(*g2));
+	for (auto& p : def.poses)
+		if (p.first.size() > 1) out.push_back(p.first);
+	std::sort(out.begin(), out.end());
+}
+
+void CS_FaceExpr(const int ent, const char* pose, const float weight, const int blendMs)
+{
+	if (ent < 0 || ent >= MAX_GENTITIES) return;
+	FaceState& st = g_face[ent];
+	st.exprRate = 1000.0f / static_cast<float>(blendMs > 1 ? blendMs : 1);
+	if (!pose || !pose[0]) { st.exprTarget = 0; st.exprUntil = 0; return; }
+	if (st.expr != pose) st.exprW = 0;
+	st.expr = pose;
+	st.exprTarget = weight;
+	st.exprUntil = 0;
+}
+
+void CS_FaceIdle(const int ent, const bool on, const char* profile)
+{
+	if (ent < 0 || ent >= MAX_GENTITIES) return;
+	FaceState& st = g_face[ent];
+	st.idleOff = !on;
+	const std::string pr = profile ? profile : "";
+	if (on && st.profileName != pr) { st.profileName = pr; st.moodUntil = 0; }
+}
+
+void CS_FaceEyes(const int ent, const bool force, const float pitch, const float yaw)
+{
+	if (ent < 0 || ent >= MAX_GENTITIES) return;
+	FaceState& st = g_face[ent];
+	st.eyeForce = force;
+	st.eyeForceAng[0] = pitch;
+	st.eyeForceAng[1] = yaw;
 }

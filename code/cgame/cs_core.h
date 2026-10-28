@@ -21,7 +21,7 @@ namespace cs
 	constexpr int kProjectSchemaOld = 1;	// bump when the file layout changes; readers accept <= this
 	constexpr const char* kProjectRoot = "CinematicStudio/Projects";
 
-	enum class ObjType { Actor, Camera, Events, Prop };
+	enum class ObjType { Actor, Camera, Events, Prop, Audio };
 
 	enum AnimParts { PARTS_LEGS = 1, PARTS_TORSO = 2, PARTS_BOTH = 3 };
 
@@ -127,6 +127,50 @@ namespace cs
 	};
 	struct EventData { std::vector<WorldEvent> events; };	// sorted by tUs; shared like take data
 
+	// ---- Phase 8: audio and faces ----
+	// a sound on the timeline: on an actor, a voice line (with lip sync); on an audio track, music or a sound
+	struct SoundClip
+	{
+		int64_t startUs = 0;
+		int64_t lengthUs = 2'000'000;	// for the timeline (the sound plays to its end)
+		std::string path;
+		bool operator==(const SoundClip& o) const { return startUs == o.startUs && lengthUs == o.lengthUs && path == o.path; }
+	};
+	// an expression held for a while on an actor with a face rig
+	struct FaceClip
+	{
+		int64_t startUs = 0;
+		int64_t lengthUs = 1'000'000;
+		std::string pose;			// a pose of the model's .face file (angry, smirk, blink...)
+		float weight = 1.0f;
+		int blendMs = 250;			// in and out
+		bool operator==(const FaceClip& o) const
+		{
+			return startUs == o.startUs && lengthUs == o.lengthUs && pose == o.pose && weight == o.weight && blendMs == o.blendMs;
+		}
+	};
+	// face idle (blinks, glances, moods) on or off from a time on
+	struct IdleKey
+	{
+		int64_t tUs = 0;
+		bool on = true;
+		std::string profile;		// "" = the model's own
+		bool operator==(const IdleKey& o) const { return tUs == o.tUs && on == o.on && profile == o.profile; }
+	};
+	// where the eyes (and head) look from a time on
+	struct EyeKey
+	{
+		enum Mode { Free, LookAt, Aim } mode = Free;
+		int64_t tUs = 0;
+		int target = 0;				// LookAt: object id
+		float pitch = 0, yaw = 0;	// Aim: eye angles (degrees), blended from the previous Aim key
+		bool operator==(const EyeKey& o) const { return mode == o.mode && tUs == o.tUs && target == o.target && pitch == o.pitch && yaw == o.yaw; }
+	};
+	const FaceClip* ActiveFaceClip(const std::vector<FaceClip>& clips, int64_t t);	// started, not ended (latest)
+	const IdleKey* IdleAt(const std::vector<IdleKey>& keys, int64_t t);				// latest at or before t
+	// the eyes at t: mode / target from the latest key; Aim angles move linearly to the next Aim key
+	bool EyesAt(const std::vector<EyeKey>& keys, int64_t t, EyeKey& out);
+
 	// ---- Phase 4: keyframed position ----
 	enum class Interp { Step, Linear, Smooth, CatmullRom };
 	const char* InterpName(Interp i);
@@ -176,6 +220,13 @@ namespace cs
 		std::vector<int64_t> cuts;	// scene times the director cuts to this camera (sorted)
 		int lookAt = 0;			// actor it aims at (0 = its own angles)
 		float shake = 0;		// handheld shake, 0-10
+
+		// audio / face (Phase 8): actors: voice lines + face tracks; audio objects: sounds
+		std::vector<SoundClip> sounds;
+		std::vector<FaceClip> faceClips;
+		std::vector<IdleKey> idleKeys;
+		std::vector<EyeKey> eyeKeys;
+		bool music = false;			// audio object: its sounds are music (one at a time, the background track)
 
 		// prop (ObjType::Prop, Phase 7): any map entity class with its key / values ("cs_model" = just a model)
 		std::string classname;
@@ -270,6 +321,9 @@ namespace cs
 		int AdoptActor(int ent, const std::string& npcType, const std::string& name);
 		int AddCamera(const float origin[3], const float angles[3], float fov);
 		int AddEvents(const std::string& name, int64_t startUs, std::vector<WorldEvent> events);	// a world-events track
+		int AddAudio(const std::string& name, bool music);		// a music / sound track
+		// any change to one object, undoable (timed lists are sorted first); tag: edits of the same kind coalesce
+		bool Edit(Object after, bool coalesce, const std::string& tag = "");
 		// props (undoable): a map entity of any class; changing its class or keys spawns it again
 		int AddProp(const std::string& classname, const std::vector<std::pair<std::string, std::string>>& kv, const float origin[3], const float angles[3]);
 		bool SetPropKey(int id, const std::string& key, const std::string& value);	// "" removes the key

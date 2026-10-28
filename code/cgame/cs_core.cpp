@@ -16,6 +16,7 @@ namespace cs
 		case ObjType::Camera: return "camera";
 		case ObjType::Events: return "events";
 		case ObjType::Prop: return "prop";
+		case ObjType::Audio: return "audio";
 		default: return "actor";
 		}
 	}
@@ -279,6 +280,73 @@ namespace cs
 		std::copy(offset, offset + 3, after.attachOffset);
 		std::copy(angles, angles + 3, after.attachAngles);
 		return Change(after, coalesce, "attach");
+	}
+
+	int Scene::AddAudio(const std::string& name, const bool music)
+	{
+		Object o;
+		o.id = nextId_++;
+		o.type = ObjType::Audio;
+		o.name = NewName(name.empty() ? (music ? "Music" : "Sounds") : name);
+		o.music = music;
+		objects.push_back(o);
+		Op op; op.kind = Op::Add; op.after = o; op.timeMs = host_->NowMs();
+		Push(op);
+		selected = o.id;
+		return o.id;
+	}
+
+	bool Scene::Edit(Object after, const bool coalesce, const std::string& tag)
+	{
+		const Object* o = Find(after.id);
+		if (!o) return false;
+		const auto byStart = [](const auto& a, const auto& b) { return a.startUs < b.startUs; };
+		const auto byT = [](const auto& a, const auto& b) { return a.tUs < b.tUs; };
+		std::stable_sort(after.sounds.begin(), after.sounds.end(), byStart);
+		std::stable_sort(after.faceClips.begin(), after.faceClips.end(), byStart);
+		std::stable_sort(after.idleKeys.begin(), after.idleKeys.end(), byT);
+		std::stable_sort(after.eyeKeys.begin(), after.eyeKeys.end(), byT);
+		for (auto& c : after.sounds) { c.startUs = std::max<int64_t>(0, c.startUs); c.lengthUs = std::max<int64_t>(50'000, c.lengthUs); }
+		for (auto& c : after.faceClips)
+		{
+			c.startUs = std::max<int64_t>(0, c.startUs);
+			c.lengthUs = std::max<int64_t>(50'000, c.lengthUs);
+			c.weight = std::max(0.0f, std::min(1.0f, c.weight));
+			c.blendMs = std::max(0, std::min(2000, c.blendMs));
+		}
+		after.entNum = o->entNum;
+		return Change(after, coalesce, tag);
+	}
+
+	const FaceClip* ActiveFaceClip(const std::vector<FaceClip>& clips, const int64_t t)
+	{
+		const FaceClip* best = nullptr;
+		for (auto& c : clips)
+			if (c.startUs <= t && t < c.startUs + c.lengthUs && (!best || c.startUs >= best->startUs)) best = &c;
+		return best;
+	}
+
+	const IdleKey* IdleAt(const std::vector<IdleKey>& keys, const int64_t t)
+	{
+		const IdleKey* best = nullptr;
+		for (auto& k : keys) if (k.tUs <= t) best = &k;
+		return best;
+	}
+
+	bool EyesAt(const std::vector<EyeKey>& keys, const int64_t t, EyeKey& out)
+	{
+		size_t i = keys.size();
+		for (size_t k = 0; k < keys.size(); k++) if (keys[k].tUs <= t) i = k;
+		if (i == keys.size()) return false;
+		out = keys[i];
+		if (out.mode == EyeKey::Aim && i + 1 < keys.size() && keys[i + 1].mode == EyeKey::Aim && keys[i + 1].tUs > keys[i].tUs)
+		{
+			const float f = static_cast<float>(static_cast<double>(t - keys[i].tUs) / static_cast<double>(keys[i + 1].tUs - keys[i].tUs));
+			out.pitch += (keys[i + 1].pitch - out.pitch) * f;
+			out.yaw += (keys[i + 1].yaw - out.yaw) * f;
+		}
+		out.tUs = t;
+		return true;
 	}
 
 	bool Scene::SetEventsStart(const int id, const int64_t startUs, const bool coalesce)
@@ -1237,6 +1305,33 @@ namespace cs
 		for (int i = 0; i < 3; i++) v[i] = static_cast<float>(j[static_cast<size_t>(i)].asNumber(v[i]));
 	}
 
+	static Json SoundsToJson(const std::vector<SoundClip>& sounds)
+	{
+		Json arr = Json::MakeArray();
+		for (auto& c : sounds)
+		{
+			Json k = Json::MakeObject();
+			k.set("startUs", static_cast<double>(c.startUs));
+			k.set("lengthUs", static_cast<double>(c.lengthUs));
+			k.set("path", c.path);
+			arr.push(k);
+		}
+		return arr;
+	}
+
+	static void SoundsFromJson(const Json& j, std::vector<SoundClip>& out)
+	{
+		for (size_t i = 0; i < j.size(); i++)
+		{
+			SoundClip c;
+			c.startUs = static_cast<int64_t>(j[i].get("startUs").asNumber(0));
+			c.lengthUs = static_cast<int64_t>(j[i].get("lengthUs").asNumber(2e6));
+			c.path = j[i].get("path").asString();
+			if (!c.path.empty()) out.push_back(c);
+		}
+		std::stable_sort(out.begin(), out.end(), [](const SoundClip& a, const SoundClip& b) { return a.startUs < b.startUs; });
+	}
+
 	static Json KeysToJson(const std::vector<TransformKey>& keys)
 	{
 		Json arr = Json::MakeArray();
@@ -1350,7 +1445,55 @@ namespace cs
 					takes.push(k);
 				}
 				if (!o.takes.empty()) j.set("takes", takes);
+				if (!o.sounds.empty()) j.set("voice", SoundsToJson(o.sounds));
+				if (!o.faceClips.empty())
+				{
+					Json fc = Json::MakeArray();
+					for (auto& c : o.faceClips)
+					{
+						Json k = Json::MakeObject();
+						k.set("startUs", static_cast<double>(c.startUs));
+						k.set("lengthUs", static_cast<double>(c.lengthUs));
+						k.set("pose", c.pose);
+						k.set("weight", static_cast<double>(c.weight));
+						k.set("blendMs", c.blendMs);
+						fc.push(k);
+					}
+					j.set("faceClips", fc);
+				}
+				if (!o.idleKeys.empty())
+				{
+					Json ik = Json::MakeArray();
+					for (auto& k : o.idleKeys)
+					{
+						Json q = Json::MakeObject();
+						q.set("tUs", static_cast<double>(k.tUs));
+						q.set("on", k.on);
+						if (!k.profile.empty()) q.set("profile", k.profile);
+						ik.push(q);
+					}
+					j.set("faceIdle", ik);
+				}
+				if (!o.eyeKeys.empty())
+				{
+					Json ek = Json::MakeArray();
+					for (auto& k : o.eyeKeys)
+					{
+						Json q = Json::MakeObject();
+						q.set("tUs", static_cast<double>(k.tUs));
+						q.set("mode", k.mode == EyeKey::LookAt ? "lookat" : (k.mode == EyeKey::Aim ? "aim" : "free"));
+						if (k.target) q.set("target", k.target);
+						if (k.mode == EyeKey::Aim) { q.set("pitch", static_cast<double>(k.pitch)); q.set("yaw", static_cast<double>(k.yaw)); }
+						ek.push(q);
+					}
+					j.set("eyes", ek);
+				}
 				if (!o.keys.empty()) j.set("keys", KeysToJson(o.keys));
+			}
+			else if (o.type == ObjType::Audio)
+			{
+				j.set("music", o.music);
+				j.set("sounds", SoundsToJson(o.sounds));
 			}
 			else if (o.type == ObjType::Prop)
 			{
@@ -1505,7 +1648,7 @@ namespace cs
 			o.id = j.get("id").asInt(nextId_);
 			if (Find(o.id)) o.id = nextId_;
 			const std::string ty = j.get("type").asString();
-			o.type = ty == "camera" ? ObjType::Camera : (ty == "events" ? ObjType::Events : (ty == "prop" ? ObjType::Prop : ObjType::Actor));
+			o.type = ty == "camera" ? ObjType::Camera : (ty == "events" ? ObjType::Events : (ty == "prop" ? ObjType::Prop : (ty == "audio" ? ObjType::Audio : ObjType::Actor)));
 			o.name = j.get("name").asString(NewName(ObjTypeName(o.type)));
 			ReadVec(j.get("origin"), o.origin);
 			ReadVec(j.get("angles"), o.angles);
@@ -1520,6 +1663,11 @@ namespace cs
 				o.cuts.erase(std::unique(o.cuts.begin(), o.cuts.end()), o.cuts.end());
 				o.lookAt = j.get("lookAt").asInt(0);
 				o.shake = static_cast<float>(j.get("shake").asNumber(0));
+			}
+			else if (o.type == ObjType::Audio)
+			{
+				o.music = j.get("music").asBool(false);
+				SoundsFromJson(j.get("sounds"), o.sounds);
 			}
 			else if (o.type == ObjType::Prop)
 			{
@@ -1665,6 +1813,46 @@ namespace cs
 					else warnings.push_back(o.name + ": take '" + t.name + "' is empty or damaged, skipped");
 				}
 				o.activeTake = j.get("activeTake").asInt(0);
+				SoundsFromJson(j.get("voice"), o.sounds);
+				{
+					const Json& fc = j.get("faceClips");
+					for (size_t k = 0; k < fc.size(); k++)
+					{
+						FaceClip c;
+						c.startUs = static_cast<int64_t>(fc[k].get("startUs").asNumber(0));
+						c.lengthUs = static_cast<int64_t>(fc[k].get("lengthUs").asNumber(1e6));
+						c.pose = fc[k].get("pose").asString();
+						c.weight = static_cast<float>(fc[k].get("weight").asNumber(1));
+						c.blendMs = fc[k].get("blendMs").asInt(250);
+						if (!c.pose.empty()) o.faceClips.push_back(c);
+					}
+					const Json& ik = j.get("faceIdle");
+					for (size_t k = 0; k < ik.size(); k++)
+					{
+						IdleKey q;
+						q.tUs = static_cast<int64_t>(ik[k].get("tUs").asNumber(0));
+						q.on = ik[k].get("on").asBool(true);
+						q.profile = ik[k].get("profile").asString();
+						o.idleKeys.push_back(q);
+					}
+					const Json& ek = j.get("eyes");
+					for (size_t k = 0; k < ek.size(); k++)
+					{
+						EyeKey q;
+						q.tUs = static_cast<int64_t>(ek[k].get("tUs").asNumber(0));
+						const std::string m = ek[k].get("mode").asString();
+						q.mode = m == "lookat" ? EyeKey::LookAt : (m == "aim" ? EyeKey::Aim : EyeKey::Free);
+						q.target = ek[k].get("target").asInt(0);
+						q.pitch = static_cast<float>(ek[k].get("pitch").asNumber(0));
+						q.yaw = static_cast<float>(ek[k].get("yaw").asNumber(0));
+						o.eyeKeys.push_back(q);
+					}
+					const auto byStart = [](const auto& a, const auto& b) { return a.startUs < b.startUs; };
+					const auto byT = [](const auto& a, const auto& b) { return a.tUs < b.tUs; };
+					std::stable_sort(o.faceClips.begin(), o.faceClips.end(), byStart);
+					std::stable_sort(o.idleKeys.begin(), o.idleKeys.end(), byT);
+					std::stable_sort(o.eyeKeys.begin(), o.eyeKeys.end(), byT);
+				}
 				KeysFromJson(j.get("keys"), o.keys);
 				if (!ActiveTake(o)) o.activeTake = 0;
 				// level NPCs that were adopted aren't in a fresh level by name: the studio respawns them
