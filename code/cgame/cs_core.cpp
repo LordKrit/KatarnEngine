@@ -596,35 +596,157 @@ namespace cs
 		return to;
 	}
 
-	static void KeyPos(const std::vector<TransformKey>& k, const int i, const float t, float out[3], float& yaw)
+	// channels of a key: x y z pitch yaw roll fov (3-5 are angles)
+	static float Ch(const TransformKey& k, const int c)
 	{
-		// segment i -> i+1 at t (0..1), in the interpolation of key i
+		switch (c)
+		{
+		case 0: case 1: case 2: return k.origin[c];
+		case 3: return k.pitch;
+		case 4: return k.yaw;
+		case 5: return k.roll;
+		default: return k.fov;
+		}
+	}
+
+	// segment i -> i+1 at t (0..1), in the interpolation of key i; out: the 7 channels
+	static void KeyChannels(const std::vector<TransformKey>& k, const int i, const float t, float out[7])
+	{
 		const int n = static_cast<int>(k.size());
 		const TransformKey& a = k[static_cast<size_t>(i)];
 		const TransformKey& b = k[static_cast<size_t>(std::min(i + 1, n - 1))];
-		const float by = Unwrap(a.yaw, b.yaw);
+		const TransformKey& p0 = k[static_cast<size_t>(std::max(i - 1, 0))];
+		const TransformKey& p3 = k[static_cast<size_t>(std::min(i + 2, n - 1))];
 		float f = t;
-		switch (a.interp)
+		if (a.interp == Interp::Step) f = 0;
+		else if (a.interp == Interp::Smooth) f = t * t * (3 - 2 * t);
+		const float t2 = t * t, t3 = t2 * t;
+		for (int c = 0; c < 7; c++)
 		{
-		case Interp::Step: f = 0; break;
-		case Interp::Smooth: f = t * t * (3 - 2 * t); break;
-		default: break;
+			const bool ang = c >= 3 && c <= 5;
+			const float va = Ch(a, c);
+			const float vb = ang ? Unwrap(va, Ch(b, c)) : Ch(b, c);
+			if (a.interp == Interp::CatmullRom)
+			{
+				const float v0 = ang ? Unwrap(va, Ch(p0, c)) : Ch(p0, c);
+				const float v3 = ang ? Unwrap(vb, Ch(p3, c)) : Ch(p3, c);
+				out[c] = 0.5f * (2 * va + (-v0 + vb) * t + (2 * v0 - 5 * va + 4 * vb - v3) * t2 + (-v0 + 3 * va - 3 * vb + v3) * t3);
+			}
+			else out[c] = va + (vb - va) * f;
 		}
-		if (a.interp == Interp::CatmullRom)
+	}
+
+	static void KeyPos(const std::vector<TransformKey>& k, const int i, const float t, float out[3], float& yaw)
+	{
+		float c[7];
+		KeyChannels(k, i, t, c);
+		for (int j = 0; j < 3; j++) out[j] = c[j];
+		yaw = c[4];
+	}
+
+	bool EvaluateCameraKeys(const std::vector<TransformKey>& k, const int64_t t, float origin[3], float angles[3], float& fov)
+	{
+		if (k.empty()) return false;
+		float c[7];
+		if (t <= k.front().tUs || k.size() == 1) for (int j = 0; j < 7; j++) c[j] = Ch(k.front(), j);
+		else if (t >= k.back().tUs) for (int j = 0; j < 7; j++) c[j] = Ch(k.back(), j);
+		else
 		{
-			const TransformKey& p0 = k[static_cast<size_t>(std::max(i - 1, 0))];
-			const TransformKey& p3 = k[static_cast<size_t>(std::min(i + 2, n - 1))];
-			const float t2 = t * t, t3 = t2 * t;
-			for (int j = 0; j < 3; j++)
-				out[j] = 0.5f * (2 * a.origin[j] + (-p0.origin[j] + b.origin[j]) * t +
-					(2 * p0.origin[j] - 5 * a.origin[j] + 4 * b.origin[j] - p3.origin[j]) * t2 +
-					(-p0.origin[j] + 3 * a.origin[j] - 3 * b.origin[j] + p3.origin[j]) * t3);
-			const float y0 = Unwrap(a.yaw, p0.yaw), y3 = Unwrap(by, p3.yaw);
-			yaw = 0.5f * (2 * a.yaw + (-y0 + by) * t + (2 * y0 - 5 * a.yaw + 4 * by - y3) * t2 + (-y0 + 3 * a.yaw - 3 * by + y3) * t3);
-			return;
+			size_t i = 0;
+			while (i + 1 < k.size() && k[i + 1].tUs <= t) i++;
+			KeyChannels(k, static_cast<int>(i), static_cast<float>(static_cast<double>(t - k[i].tUs) / static_cast<double>(k[i + 1].tUs - k[i].tUs)), c);
 		}
-		for (int j = 0; j < 3; j++) out[j] = a.origin[j] + (b.origin[j] - a.origin[j]) * f;
-		yaw = a.yaw + (by - a.yaw) * f;
+		for (int j = 0; j < 3; j++) { origin[j] = c[j]; angles[j] = c[3 + j]; }
+		fov = c[6];
+		return true;
+	}
+
+	int Scene::ActiveCamera(const int64_t t) const
+	{
+		int best = 0;
+		int64_t at = -1;
+		for (auto& o : objects)
+			if (o.type == ObjType::Camera)
+				for (const int64_t c : o.cuts)
+					if (c <= t && c > at) { at = c; best = o.id; }
+		return best;
+	}
+
+	std::vector<std::pair<int64_t, int>> Scene::Cuts() const
+	{
+		std::vector<std::pair<int64_t, int>> out;
+		for (auto& o : objects)
+			if (o.type == ObjType::Camera) for (const int64_t c : o.cuts) out.emplace_back(c, o.id);
+		std::sort(out.begin(), out.end());
+		return out;
+	}
+
+	bool Scene::AddCut(const int camId, int64_t t)
+	{
+		t = std::max<int64_t>(0, t);
+		// one cut per time: a cut to another camera at the same time moves here
+		for (auto& o : objects)
+			if (o.type == ObjType::Camera && o.id != camId && std::find(o.cuts.begin(), o.cuts.end(), t) != o.cuts.end())
+				RemoveCut(o.id, t);
+		const Object* o = Find(camId);
+		if (!o || o->type != ObjType::Camera || std::find(o->cuts.begin(), o->cuts.end(), t) != o->cuts.end()) return false;
+		Object after = *o;
+		after.cuts.push_back(t);
+		std::sort(after.cuts.begin(), after.cuts.end());
+		return Change(after, false);
+	}
+
+	bool Scene::RemoveCut(const int camId, const int64_t t)
+	{
+		const Object* o = Find(camId);
+		if (!o) return false;
+		Object after = *o;
+		const auto it = std::find(after.cuts.begin(), after.cuts.end(), t);
+		if (it == after.cuts.end()) return false;
+		after.cuts.erase(it);
+		return Change(after, false);
+	}
+
+	bool Scene::MoveCut(const int camId, const int64_t from, int64_t to, const bool coalesce)
+	{
+		to = std::max<int64_t>(0, to);
+		const Object* o = Find(camId);
+		if (!o) return false;
+		for (auto& c : objects)
+			if (c.type == ObjType::Camera && std::find(c.cuts.begin(), c.cuts.end(), to) != c.cuts.end()) return false;
+		Object after = *o;
+		const auto it = std::find(after.cuts.begin(), after.cuts.end(), from);
+		if (it == after.cuts.end()) return false;
+		*it = to;
+		std::sort(after.cuts.begin(), after.cuts.end());
+		return Change(after, coalesce, "cut move");
+	}
+
+	bool Scene::SetCameraLook(const int camId, const int targetId)
+	{
+		const Object* o = Find(camId);
+		if (!o || o->type != ObjType::Camera || o->lookAt == targetId) return false;
+		Object after = *o;
+		after.lookAt = targetId;
+		return Change(after, false);
+	}
+
+	bool Scene::SetCameraShake(const int camId, const float amount, const bool coalesce)
+	{
+		const Object* o = Find(camId);
+		if (!o || o->type != ObjType::Camera) return false;
+		Object after = *o;
+		after.shake = std::max(0.0f, std::min(10.0f, amount));
+		return after.shake == o->shake || Change(after, coalesce, "shake");
+	}
+
+	bool Scene::SetCameraFov(const int camId, const float fov, const bool coalesce)
+	{
+		const Object* o = Find(camId);
+		if (!o || o->type != ObjType::Camera) return false;
+		Object after = *o;
+		after.fov = std::max(5.0f, std::min(150.0f, fov));
+		return after.fov == o->fov || Change(after, coalesce, "fov");
 	}
 
 	bool EvaluateKeys(const std::vector<TransformKey>& k, const int64_t t, float origin[3], float& yaw, float velocity[3])
@@ -716,7 +838,7 @@ namespace cs
 	bool Scene::SetKey(const int id, const TransformKey& key, const bool coalesce)
 	{
 		const Object* o = Find(id);
-		if (!o || o->type != ObjType::Actor) return false;
+		if (!o || (o->type != ObjType::Actor && o->type != ObjType::Camera)) return false;
 		Object after = *o;
 		TransformKey k = key;
 		k.tUs = std::max<int64_t>(0, k.tUs);
@@ -724,7 +846,7 @@ namespace cs
 		for (auto& e : after.keys) if (e.tUs == k.tUs) { e = k; replaced = true; }
 		if (!replaced) after.keys.push_back(k);
 		SortKeys(after.keys);
-		after.prop = true;	// keys move a prop
+		if (after.type == ObjType::Actor) after.prop = true;	// keys move a prop
 		return Change(after, coalesce, "key " + std::to_string(k.tUs));
 	}
 
@@ -750,6 +872,25 @@ namespace cs
 		const size_t n = after.keys.size();
 		after.keys.erase(std::remove_if(after.keys.begin(), after.keys.end(), [&](const TransformKey& k) { return k.tUs == tUs; }), after.keys.end());
 		return after.keys.size() != n && Change(after, false);
+	}
+
+	bool Scene::ReplaceKeys(const int id, const int64_t fromUs, const int64_t toUs, const std::vector<TransformKey>& keys)
+	{
+		const Object* o = Find(id);
+		if (!o || (o->type != ObjType::Actor && o->type != ObjType::Camera)) return false;
+		Object after = *o;
+		after.keys.erase(std::remove_if(after.keys.begin(), after.keys.end(), [&](const TransformKey& k) { return k.tUs >= fromUs && k.tUs <= toUs; }), after.keys.end());
+		for (auto k : keys)
+		{
+			k.tUs = std::max<int64_t>(0, k.tUs);
+			bool dup = false;
+			for (auto& e : after.keys) if (e.tUs == k.tUs) { e = k; dup = true; }
+			if (!dup) after.keys.push_back(k);
+		}
+		SortKeys(after.keys);
+		if (after.keys == o->keys) return false;
+		if (after.type == ObjType::Actor && !after.keys.empty()) after.prop = true;
+		return Change(after, false);
 	}
 
 	bool Scene::SetKeyInterp(const int id, const int64_t tUs, const Interp interp)
@@ -995,6 +1136,43 @@ namespace cs
 		for (int i = 0; i < 3; i++) v[i] = static_cast<float>(j[static_cast<size_t>(i)].asNumber(v[i]));
 	}
 
+	static Json KeysToJson(const std::vector<TransformKey>& keys)
+	{
+		Json arr = Json::MakeArray();
+		for (auto& k : keys)
+		{
+			Json kj = Json::MakeObject();
+			kj.set("tUs", static_cast<double>(k.tUs));
+			kj.set("origin", Vec(k.origin));
+			kj.set("yaw", static_cast<double>(k.yaw));
+			if (k.pitch != 0) kj.set("pitch", static_cast<double>(k.pitch));
+			if (k.roll != 0) kj.set("roll", static_cast<double>(k.roll));
+			if (k.fov != 0) kj.set("fov", static_cast<double>(k.fov));
+			kj.set("interp", InterpName(k.interp));
+			arr.push(kj);
+		}
+		return arr;
+	}
+
+	static void KeysFromJson(const Json& keys, std::vector<TransformKey>& out)
+	{
+		for (size_t k = 0; k < keys.size(); k++)
+		{
+			TransformKey key;
+			key.tUs = static_cast<int64_t>(keys[k].get("tUs").asNumber(0));
+			ReadVec(keys[k].get("origin"), key.origin);
+			key.yaw = static_cast<float>(keys[k].get("yaw").asNumber(0));
+			key.pitch = static_cast<float>(keys[k].get("pitch").asNumber(0));
+			key.roll = static_cast<float>(keys[k].get("roll").asNumber(0));
+			key.fov = static_cast<float>(keys[k].get("fov").asNumber(0));
+			key.interp = InterpFromName(keys[k].get("interp").asString());
+			bool dup = false;
+			for (auto& e : out) dup = dup || e.tUs == key.tUs;
+			if (!dup) out.push_back(key);
+		}
+		SortKeys(out);
+	}
+
 	Json Scene::ToJson() const
 	{
 		Json s = Json::MakeObject();
@@ -1071,20 +1249,7 @@ namespace cs
 					takes.push(k);
 				}
 				if (!o.takes.empty()) j.set("takes", takes);
-				if (!o.keys.empty())
-				{
-					Json keys = Json::MakeArray();
-					for (auto& k : o.keys)
-					{
-						Json kj = Json::MakeObject();
-						kj.set("tUs", static_cast<double>(k.tUs));
-						kj.set("origin", Vec(k.origin));
-						kj.set("yaw", static_cast<double>(k.yaw));
-						kj.set("interp", InterpName(k.interp));
-						keys.push(kj);
-					}
-					j.set("keys", keys);
-				}
+				if (!o.keys.empty()) j.set("keys", KeysToJson(o.keys));
 			}
 			else if (o.type == ObjType::Events)
 			{
@@ -1117,7 +1282,19 @@ namespace cs
 				}
 				j.set("events", ev);
 			}
-			else j.set("fov", static_cast<double>(o.fov));
+			else
+			{
+				j.set("fov", static_cast<double>(o.fov));
+				if (!o.keys.empty()) j.set("keys", KeysToJson(o.keys));
+				if (!o.cuts.empty())
+				{
+					Json cuts = Json::MakeArray();
+					for (const int64_t c : o.cuts) cuts.push(Json(static_cast<double>(c)));
+					j.set("cuts", cuts);
+				}
+				if (o.lookAt) j.set("lookAt", o.lookAt);
+				if (o.shake != 0) j.set("shake", static_cast<double>(o.shake));
+			}
 			objs.push(j);
 		}
 		s.set("objects", objs);
@@ -1210,7 +1387,17 @@ namespace cs
 			ReadVec(j.get("origin"), o.origin);
 			ReadVec(j.get("angles"), o.angles);
 			o.visible = j.get("visible").asBool(true);
-			if (o.type == ObjType::Camera) o.fov = static_cast<float>(j.get("fov").asNumber(80));
+			if (o.type == ObjType::Camera)
+			{
+				o.fov = static_cast<float>(j.get("fov").asNumber(80));
+				KeysFromJson(j.get("keys"), o.keys);
+				const Json& cuts = j.get("cuts");
+				for (size_t k = 0; k < cuts.size(); k++) o.cuts.push_back(static_cast<int64_t>(cuts[k].asNumber(0)));
+				std::sort(o.cuts.begin(), o.cuts.end());
+				o.cuts.erase(std::unique(o.cuts.begin(), o.cuts.end()), o.cuts.end());
+				o.lookAt = j.get("lookAt").asInt(0);
+				o.shake = static_cast<float>(j.get("shake").asNumber(0));
+			}
 			else if (o.type == ObjType::Events)
 			{
 				o.eventsStartUs = static_cast<int64_t>(j.get("startUs").asNumber(0));
@@ -1342,19 +1529,7 @@ namespace cs
 					else warnings.push_back(o.name + ": take '" + t.name + "' is empty or damaged, skipped");
 				}
 				o.activeTake = j.get("activeTake").asInt(0);
-				const Json& keys = j.get("keys");
-				for (size_t k = 0; k < keys.size(); k++)
-				{
-					TransformKey key;
-					key.tUs = static_cast<int64_t>(keys[k].get("tUs").asNumber(0));
-					ReadVec(keys[k].get("origin"), key.origin);
-					key.yaw = static_cast<float>(keys[k].get("yaw").asNumber(0));
-					key.interp = InterpFromName(keys[k].get("interp").asString());
-					bool dup = false;
-					for (auto& e : o.keys) dup = dup || e.tUs == key.tUs;
-					if (!dup) o.keys.push_back(key);
-				}
-				SortKeys(o.keys);
+				KeysFromJson(j.get("keys"), o.keys);
 				if (!ActiveTake(o)) o.activeTake = 0;
 				// level NPCs that were adopted aren't in a fresh level by name: the studio respawns them
 				o.adopted = false;

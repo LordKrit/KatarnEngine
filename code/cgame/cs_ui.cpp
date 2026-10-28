@@ -67,7 +67,7 @@ namespace
 	{
 		ACT_CLOSE, ACT_PANELS, ACT_PLAY, ACT_STOP, ACT_STEP_BACK, ACT_STEP_FWD, ACT_UNDO, ACT_REDO, ACT_SAVE,
 		ACT_DELETE, ACT_FOCUS, ACT_FREEZE, ACT_LEFT, ACT_RIGHT, ACT_FWD, ACT_BACK, ACT_UP, ACT_DOWN, ACT_TURN_L, ACT_TURN_R,
-		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_COUNT
+		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_DIRECTOR, ACT_COUNT
 	};
 	struct Hotkey { const char* name; int key; bool ctrl; };
 	Hotkey g_keys[ACT_COUNT] = {
@@ -79,7 +79,7 @@ namespace
 		{ "nudge_forward", A_CURSOR_UP, false }, { "nudge_back", A_CURSOR_DOWN, false },
 		{ "nudge_up", A_PAGE_UP, false }, { "nudge_down", A_PAGE_DOWN, false },
 		{ "turn_left", A_LOW_Q, false }, { "turn_right", A_LOW_E, false }, { "player_view", A_LOW_V, false },
-		{ "duplicate", A_LOW_D, true }, { "split", A_LOW_B, true }, { "set_key", A_LOW_K, false }, { "snap", A_LOW_N, false },
+		{ "duplicate", A_LOW_D, true }, { "split", A_LOW_B, true }, { "set_key", A_LOW_K, false }, { "snap", A_LOW_N, false }, { "director", A_LOW_C, false },
 	};
 
 	struct KeyName { const char* n; int k; };
@@ -226,6 +226,16 @@ namespace
 		std::vector<IrTrack> irTracks;
 		int evDragObj = 0;
 		int64_t evDragGrabUs = 0;
+		// ---- Phase 6: camera director ----
+		bool director = false;		// the view follows the cut track
+		bool camRec = false;		// record the piloted camera's moves as keys while the scene plays
+		std::vector<TransformKey> camRecKeys;
+		int camRecId = 0;
+		int64_t camRecLastUs = -1;
+		int cutCam = 0;				// selected cut (camera id, time); cutCam 0 = none
+		int64_t cutUs = 0;
+		bool cutDrag = false;
+		bool showPaths = true;
 		// viewport drag of an actor a take or keys drive
 		float dragTakeOff[3] = { 0, 0, 0 }, dragTakeYaw = 0, dragOrgStart[3] = { 0, 0, 0 };
 	};
@@ -241,6 +251,8 @@ namespace
 	void Close();
 	void ReleasePreview();
 	void StartRecording(int target);
+	bool CamPose(const Object& cam, int64_t t, float org[3], float ang[3], float& fov, bool effects);
+	void CameraRecordFrame();
 	void SetInstantReplay(bool on);
 	void SetKeyAtPlayhead();
 
@@ -455,6 +467,7 @@ namespace
 		Studio& s = S();
 		StopLooking();
 		s.camActive = false;
+		s.director = false;
 	}
 
 	void StartFreeCam()
@@ -470,6 +483,46 @@ namespace
 		s.camActive = true;
 	}
 
+	// where a scene camera is at a time: its keys (or its own pose), aimed at its look-at actor, shaken
+	bool CamPose(const Object& cam, const int64_t t, float org[3], float ang[3], float& fov, const bool effects)
+	{
+		Studio& s = S();
+		if (cam.type != ObjType::Camera) return false;
+		fov = cam.fov;
+		float kf = 0;
+		if (!cam.keys.empty() && EvaluateCameraKeys(cam.keys, t, org, ang, kf)) { if (kf > 0) fov = kf; }
+		else { VectorCopy(cam.origin, org); VectorCopy(cam.angles, ang); }
+		if (!effects) return true;
+		if (cam.lookAt)
+		{
+			const Object* a = s.scene.Find(cam.lookAt);
+			EntInfo info;
+			if (a && a->entNum >= 0 && EntityInfo(a->entNum, info))
+			{
+				// aim at the chest / head
+				const vec3_t at = { info.origin[0], info.origin[1], info.mins[2] + (info.maxs[2] - info.mins[2]) * 0.8f };
+				vec3_t d, a2;
+				VectorSubtract(at, org, d);
+				if (VectorLength(d) > 1)
+				{
+					vectoangles(d, a2);
+					ang[PITCH] = AngleNormalize180(a2[PITCH]);
+					ang[YAW] = a2[YAW];
+				}
+			}
+		}
+		if (cam.shake > 0)
+		{
+			// handheld: a few slow sines, the same every time the scene plays
+			const double ts = static_cast<double>(t) / 1e6;
+			const float k = cam.shake * 0.25f;
+			ang[PITCH] += k * static_cast<float>(sin(ts * 1.7) * 0.6 + sin(ts * 4.3 + 0.5) * 0.3 + sin(ts * 11.0 + 2.0) * 0.1);
+			ang[YAW] += k * static_cast<float>(sin(ts * 1.3 + 1.0) * 0.6 + sin(ts * 3.7 + 2.0) * 0.3 + sin(ts * 9.0) * 0.1);
+			ang[ROLL] += k * 0.5f * static_cast<float>(sin(ts * 2.1 + 3.0));
+		}
+		return true;
+	}
+
 	void LookThrough(const int id, const bool pilot)
 	{
 		Studio& s = S();
@@ -478,9 +531,8 @@ namespace
 		s.lookId = id;
 		s.pilotId = pilot ? id : 0;
 		s.camActive = true;
-		VectorCopy(o->origin, s.camOrg);
-		VectorCopy(o->angles, s.camAng);
-		s.camFov = o->fov;
+		CamPose(*o, s.scene.clock.timeUs, s.camOrg, s.camAng, s.camFov, !pilot);
+		s.director = false;	// your pick; the cut track would take the view away
 	}
 
 	void Focus()
@@ -706,23 +758,59 @@ namespace
 	void DrawCameraInspector(const float x, float y, Object* o)
 	{
 		Studio& s = S();
+		const float w = kRightW - 12;
 		Label(x, y, "name", o->name); y += kRow;
 		if (Button(x + kRightW - 50, y - kRow, 38, 9, "RENAME")) BeginField(FIELD_RENAME, o->name);
 		if (s.field == FIELD_RENAME) { DrawField(x, y, kRightW - 12, FIELD_RENAME, o->name); y += 13; }
-		Label(x, y, "position", Fmt("%.0f %.0f %.0f", o->origin[0], o->origin[1], o->origin[2])); y += kRow;
-		Label(x, y, "angles", Fmt("%.0f %.0f %.0f", o->angles[0], o->angles[1], o->angles[2])); y += kRow;
-		Label(x, y, "fov", Fmt("%.0f", o->fov));
-		if (Button(x + 90, y, 18, 9, "-")) { o->fov = std::max(10.0f, o->fov - 5); s.scene.dirty = true; if (s.lookId == o->id) s.camFov = o->fov; }
-		if (Button(x + 110, y, 18, 9, "+")) { o->fov = std::min(130.0f, o->fov + 5); s.scene.dirty = true; if (s.lookId == o->id) s.camFov = o->fov; }
-		y += kRow + 3;
-		if (Button(x, y, 66, 11, "LOOK THROUGH", s.lookId == o->id && s.pilotId != o->id)) LookThrough(o->id, false);
-		if (Button(x + 70, y, 66, 11, "PILOT", s.pilotId == o->id)) LookThrough(o->id, true);
+		float org[3], ang[3], fov;
+		CamPose(*o, s.scene.clock.timeUs, org, ang, fov, false);
+		Label(x, y, "position", Fmt("%.0f %.0f %.0f", org[0], org[1], org[2])); y += kRow;
+		Label(x, y, "angles", Fmt("%.0f %.0f %.0f", ang[0], ang[1], ang[2])); y += kRow;
+		Label(x, y, "fov", Fmt("%.0f%s", fov, o->keys.empty() ? "" : "  (keys)"));
+		if (o->keys.empty())
+		{
+			if (Button(x + 90, y, 18, 9, "-")) { s.scene.SetCameraFov(o->id, o->fov - 5, true); if (s.lookId == o->id) s.camFov = std::max(5.0f, s.camFov - 5); }
+			if (Button(x + 110, y, 18, 9, "+")) { s.scene.SetCameraFov(o->id, o->fov + 5, true); if (s.lookId == o->id) s.camFov = std::min(150.0f, s.camFov + 5); }
+		}
+		y += kRow;
+		Label(x, y, "keys / cuts", Fmt("%d / %d", static_cast<int>(o->keys.size()), static_cast<int>(o->cuts.size()))); y += kRow + 3;
+		const float bw = (w - 4) / 3;
+		if (Button(x, y, bw, 11, "LOOK THROUGH", s.lookId == o->id && s.pilotId != o->id)) LookThrough(o->id, false);
+		if (Button(x + bw + 2, y, bw, 11, "PILOT", s.pilotId == o->id)) LookThrough(o->id, true);
+		if (Button(x + 2 * (bw + 2), y, bw, 11, "PLAYER VIEW")) { s.director = false; PlayerView(); }
 		y += 13;
-		if (Button(x, y, 66, 11, "SET FROM VIEW"))
-			s.scene.SetTransform(o->id, cg.refdef.vieworg, cg.refdefViewAngles, false), o->fov = cg.refdef.fov_x;
-		if (Button(x + 70, y, 66, 11, "PLAYER VIEW")) PlayerView();
+		if (Button(x, y, bw, 11, "KEY (K)")) SetKeyAtPlayhead();
+		if (Button(x + bw + 2, y, bw, 11, "CUT HERE")) { if (s.scene.AddCut(o->id, s.scene.clock.timeUs)) s.host.Log(0, "Cut to " + o->name + " at " + s.scene.clock.Timecode()); }
+		if (Button(x + 2 * (bw + 2), y, bw, 11, "REC MOVE", s.camRec)) s.camRec = !s.camRec;
+		y += 13;
+		if (Button(x, y, bw, 11, "SET FROM VIEW", false, o->keys.empty()))
+			s.scene.SetTransform(o->id, cg.refdef.vieworg, cg.refdefViewAngles, false), s.scene.SetCameraFov(o->id, cg.refdef.fov_x, false);
+		if (Button(x + bw + 2, y, bw, 11, "CLEAR KEYS", false, !o->keys.empty())) s.scene.ReplaceKeys(o->id, 0, INT64_MAX, {});
+		if (Button(x + 2 * (bw + 2), y, bw, 11, "DIRECTOR", s.director)) { s.director = !s.director; if (s.director) { s.pilotId = 0; s.camActive = true; } }
 		y += 14;
-		Text(x, y, "PILOT: hold right mouse + WASD", kDim);
+		{
+			const Object* t = o->lookAt ? s.scene.Find(o->lookAt) : nullptr;
+			Label(x, y, "look at", t ? t->name : "(its own angles)", w - 30);
+			if (Button(x + w - 28, y, 28, 9, "NEXT"))
+			{
+				// cycle: none -> each actor -> none
+				int next = 0;
+				bool after = o->lookAt == 0;
+				for (auto& a : s.scene.objects)
+				{
+					if (a.type != ObjType::Actor) continue;
+					if (after) { next = a.id; break; }
+					if (a.id == o->lookAt) after = true;
+				}
+				s.scene.SetCameraLook(o->id, next);
+			}
+			y += kRow;
+		}
+		Label(x, y, "shake", Fmt("%.1f", o->shake), w);
+		if (Button(x + w - 28, y, 12, 9, "-")) s.scene.SetCameraShake(o->id, o->shake - 0.5f, true);
+		if (Button(x + w - 14, y, 12, 9, "+")) s.scene.SetCameraShake(o->id, o->shake + 0.5f, true);
+		y += kRow + 2;
+		Text(x, y, s.camRec ? "REC MOVE: PILOT + SPACE keys your flight" : "PILOT: right mouse + WASD, wheel = fov", s.camRec ? kRed : kDim);
 	}
 
 	// ------------------------------------------------------------------------------------------
@@ -1265,7 +1353,21 @@ namespace
 	{
 		Studio& s = S();
 		const Object* o = s.scene.Find(s.scene.selected);
-		if (!o || o->type != ObjType::Actor) { s.host.Log(1, "Select an actor to key"); return; }
+		if (o && o->type == ObjType::Camera)
+		{
+			TransformKey k;
+			const int64_t frameUs0 = 1'000'000 / s.scene.clock.fps;
+			k.tUs = s.scene.clock.timeUs / frameUs0 * frameUs0;
+			float ang[3], fov;
+			if (s.pilotId == o->id || s.lookId == o->id) { VectorCopy(s.camOrg, k.origin); VectorCopy(s.camAng, ang); fov = s.camFov; }
+			else CamPose(*o, k.tUs, k.origin, ang, fov, false);
+			k.pitch = ang[PITCH]; k.yaw = ang[YAW]; k.roll = ang[ROLL]; k.fov = fov;
+			for (auto& e : o->keys) if (e.tUs == k.tUs) k.interp = e.interp;
+			const int cid = o->id;
+			if (s.scene.SetKey(cid, k)) { s.keyObj = cid; s.keyUs = k.tUs; s.host.Log(0, o->name + ": camera key at " + s.scene.clock.Timecode()); }
+			return;
+		}
+		if (!o || o->type != ObjType::Actor) { s.host.Log(1, "Select an actor or a camera to key"); return; }
 		if (o->prop && Scene::ActiveTake(*o)) { s.host.Log(1, o->name + ": a take moves it (USE NONE on its takes to key it instead)"); return; }
 		TransformKey k;
 		const int64_t frameUs = 1'000'000 / s.scene.clock.fps;
@@ -1300,7 +1402,8 @@ namespace
 		Label(x, y, "actor", o->name, w); y += kRow;
 		Label(x, y, "time", Fmt("%.3fs", static_cast<double>(k->tUs) / 1e6), w); y += kRow;
 		Label(x, y, "position", Fmt("%.0f %.0f %.0f", k->origin[0], k->origin[1], k->origin[2]), w); y += kRow;
-		Label(x, y, "yaw", Fmt("%.0f", k->yaw), w); y += kRow + 1;
+		if (o->type == ObjType::Camera) { Label(x, y, "angles", Fmt("%.0f %.0f %.0f  fov %.0f", k->pitch, k->yaw, k->roll, k->fov), w); y += kRow + 1; }
+		else { Label(x, y, "yaw", Fmt("%.0f", k->yaw), w); y += kRow + 1; }
 		const int id = o->id;
 		const int64_t at = k->tUs;
 		static const Interp kOrder[] = { Interp::Smooth, Interp::Linear, Interp::CatmullRom, Interp::Step };
@@ -1310,7 +1413,19 @@ namespace
 		if (Button(x + 72, y, 46, 10, "GO TO")) { s.scene.clock.Pause(); s.scene.clock.timeUs = at; }
 		if (Button(x + w - 40, y, 40, 10, "DELETE")) { s.scene.RemoveKey(id, at); s.keyObj = 0; return true; }
 		y += 12;
-		if (Button(x, y, w, 10, "SET FROM WHERE IT IS NOW"))
+		if (o->type == ObjType::Camera)
+		{
+			if (Button(x, y, w, 10, "SET FROM THE VIEW"))
+			{
+				TransformKey nk = *k;
+				VectorCopy(cg.refdef.vieworg, nk.origin);
+				nk.pitch = cg.refdefViewAngles[PITCH]; nk.yaw = cg.refdefViewAngles[YAW]; nk.roll = cg.refdefViewAngles[ROLL];
+				nk.fov = cg.refdef.fov_x;
+				s.scene.SetKey(id, nk);
+				return true;
+			}
+		}
+		else if (Button(x, y, w, 10, "SET FROM WHERE IT IS NOW"))
 		{
 			TransformKey nk = *k;
 			EntInfo info;
@@ -1563,7 +1678,9 @@ namespace
 				y += kRow;
 			}
 			y += 6;
-			Text(ix, y, "Camera paths and cuts: Phase 6", kDim);
+			Text(ix, y, "K: key the camera   CUT HERE: cut to it", kDim); y += kRow;
+		Text(ix, y, "C: director view (follows the cuts)", kDim); y += kRow;
+		if (Button(ix, y, 66, 11, "PATHS", s.showPaths)) s.showPaths = !s.showPaths;
 			break;
 		}
 
@@ -1809,7 +1926,60 @@ namespace
 		// tracks
 		float ry = y0 + kRulerH + 1;
 		Text(4, ry + 1, "TRACKS", kAccent);
-		const int maxRows = static_cast<int>((h - kRulerH - 2) / kRow);
+		// the cut track: which camera the director shows when (first row)
+		{
+			const float cy0 = ry + 1;
+			Text(60, cy0 + 0.5f, "CUTS", kCam, 0.36f);
+			if (Button(84, cy0, 40, 8, "DIRECTOR", s.director)) { s.director = !s.director; if (s.director) { s.pilotId = 0; s.camActive = true; } }
+			Rect(lx, cy0, lw, kRow - 2, kLane);
+			const auto cuts = s.scene.Cuts();
+			for (size_t i = 0; i < cuts.size(); i++)
+			{
+				const int64_t a0 = cuts[i].first, a1 = i + 1 < cuts.size() ? cuts[i + 1].first : c.lengthUs;
+				const Object* cam = s.scene.Find(cuts[i].second);
+				const float x0 = TimeToX(a0, lx, lw), x1 = TimeToX(a1, lx, lw);
+				if (x1 < lx || x0 > lx + lw) continue;
+				const float shade = 0.35f + 0.25f * static_cast<float>(i % 2);
+				const vec4_t seg = { kCam[0] * shade, kCam[1] * shade, kCam[2] * shade, 0.85f };
+				const float sx0 = std::max(lx, x0), sx1 = std::min(lx + lw, x1);
+				Rect(sx0, cy0, sx1 - sx0, kRow - 2, seg);
+				const bool csel = s.cutCam == cuts[i].second && s.cutUs == a0;
+				Rect(x0 - 0.6f, cy0 - 1, 1.6f, kRow, csel ? kAccent : kTextCol);
+				TextClip(sx0 + 3, cy0 + 0.5f, cam ? cam->name : "?", std::max(0.0f, sx1 - sx0 - 4), kTextCol);
+				if (s.clicked && Inside(s.clickX, s.clickY, x0 - 3, cy0 - 1, 6, kRow))
+				{
+					s.clicked = false;
+					s.cutCam = cuts[i].second;
+					s.cutUs = a0;
+					s.cutDrag = true;
+					s.scene.selected = cuts[i].second;
+					s.lastSel = s.scene.selected;
+					s.keyObj = 0;
+				}
+				else if (s.clicked && Inside(s.clickX, s.clickY, sx0, cy0, sx1 - sx0, kRow - 2))
+				{
+					s.clicked = false;
+					s.scene.selected = cuts[i].second;
+					s.lastSel = s.scene.selected;
+					s.cutCam = 0;
+				}
+			}
+			if (cuts.empty()) Text(lx + 3, cy0 + 0.5f, "no cuts: select a camera > CUT HERE (at the playhead)", kDim, 0.34f);
+			// drag a cut in time
+			if (s.cutDrag)
+			{
+				if (!s.lmb || !s.scene.Find(s.cutCam)) s.cutDrag = false;
+				else
+				{
+					const int64_t frameUs = 1000000 / c.fps;
+					int64_t at = std::max<int64_t>(0, (XToTime(s.cx, lx, lw) + frameUs / 2) / frameUs * frameUs);
+					at = Snap(at, lw, 0, -1, 0);
+					if (at != s.cutUs && s.scene.MoveCut(s.cutCam, s.cutUs, at, true)) s.cutUs = at;
+				}
+			}
+		}
+		ry += kRow;
+		const int maxRows = static_cast<int>((h - kRulerH - 2) / kRow) - 1;	// the cut track takes a row
 		if ((overTime || Inside(s.cx, s.cy, 0, y0, kW, h)) && s.wheel)
 		{
 			int64_t vs2, vl2;
@@ -1903,7 +2073,7 @@ namespace
 				}
 			}
 			// position keys: diamonds along the bottom of the lane
-			if (o.type == ObjType::Actor)
+			if (o.type == ObjType::Actor || o.type == ObjType::Camera)
 				for (auto& k : o.keys)
 				{
 					const float kx = TimeToX(k.tUs, lx, lw);
@@ -1983,14 +2153,45 @@ namespace
 	{
 		Studio& s = S();
 		// scene cameras
+		const int64_t now = s.scene.clock.timeUs;
 		for (auto& o : s.scene.objects)
 		{
-			if (o.type != ObjType::Camera || o.id == s.lookId) continue;
-			float sx, sy;
-			if (!Project(o.origin, sx, sy)) continue;
+			if (o.type != ObjType::Camera) continue;
 			const bool sel = o.id == s.scene.selected;
+			// its path: dots between its first and last key, keys as squares
+			if (s.showPaths && o.keys.size() >= 2 && (sel || o.id != s.lookId))
+			{
+				const int64_t k0 = o.keys.front().tUs, k1 = o.keys.back().tUs;
+				const int64_t step = std::max<int64_t>(50'000, (k1 - k0) / 200);
+				const vec4_t dot = { kCam[0], kCam[1], kCam[2], sel ? 0.8f : 0.35f };
+				for (int64_t t = k0; t <= k1; t += step)
+				{
+					float p[3], a[3], f, sx, sy;
+					if (!EvaluateCameraKeys(o.keys, t, p, a, f) || !Project(p, sx, sy)) continue;
+					Rect(sx - 0.6f, sy - 0.6f, 1.2f, 1.2f, dot);
+				}
+				for (auto& k : o.keys)
+				{
+					float sx, sy;
+					if (!Project(k.origin, sx, sy)) continue;
+					const bool ks = s.keyObj == o.id && s.keyUs == k.tUs;
+					Rect(sx - 1.5f, sy - 1.5f, 3, 3, ks ? kAccent : kCam);
+				}
+			}
+			if (o.id == s.lookId) continue;
+			float p[3], a[3], f, sx, sy;
+			CamPose(o, now, p, a, f, true);
+			if (!Project(p, sx, sy)) continue;
 			Frame(sx - 4, sy - 3, 8, 6, sel ? kAccent : kCam);
-			Text(sx + 6, sy - 4, o.name, sel ? kAccent : kCam, 0.36f);
+			// which way it looks
+			vec3_t fwd, tip;
+			AngleVectors(a, fwd, nullptr, nullptr);
+			VectorMA(p, 24, fwd, tip);
+			float tx, ty;
+			if (Project(tip, tx, ty))
+				for (int i = 1; i <= 4; i++) Rect(sx + (tx - sx) * i / 4.0f - 0.5f, sy + (ty - sy) * i / 4.0f - 0.5f, 1, 1, sel ? kAccent : kCam);
+			const bool live = s.scene.ActiveCamera(now) == o.id;
+			Text(sx + 6, sy - 4, o.name + (live ? "  [LIVE]" : ""), sel ? kAccent : (live ? kRed : kCam), 0.36f);
 		}
 		// selection bracket around the selected character
 		int ent = -1;
@@ -2019,7 +2220,8 @@ namespace
 		if (s.camActive)
 		{
 			const Object* look = s.scene.Find(s.lookId);
-			const std::string mode = look ? (s.pilotId ? "PILOTING " : "VIEWING ") + look->name : "FREE CAMERA";
+			const std::string mode = s.director && !s.pilotId ? "DIRECTOR: " + (look ? look->name : std::string("no cut yet")) :
+				look ? (s.pilotId ? (s.camRec && s.scene.clock.playing ? "REC MOVE " : "PILOTING ") : "VIEWING ") + look->name : "FREE CAMERA";
 			Text(kLeftW + 6, kPanelY + 3, mode + Fmt("   fov %.0f", s.camFov), kCam, 0.4f);
 		}
 	}
@@ -2035,8 +2237,9 @@ namespace
 		for (auto& o : s.scene.objects)
 		{
 			if (o.type != ObjType::Camera || o.id == s.lookId) continue;
-			float sx, sy;
-			if (!Project(o.origin, sx, sy)) continue;
+			float sx, sy, pp[3], pa[3], pf;
+			CamPose(o, s.scene.clock.timeUs, pp, pa, pf, true);
+			if (!Project(pp, sx, sy)) continue;
 			const float d = hypotf(sx - s.clickX, sy - s.clickY);
 			if (d < best) { best = d; bestId = o.id; bestEnt = -1; }
 		}
@@ -2077,6 +2280,43 @@ namespace
 	// ------------------------------------------------------------------------------------------
 	// Phase 3: Ghost Performance Recorder
 	// ------------------------------------------------------------------------------------------
+
+	// ---- Phase 6: recording a camera move ----
+	void CommitCameraRecording()
+	{
+		Studio& s = S();
+		if (s.camRecKeys.size() >= 2 && s.scene.Find(s.camRecId))
+		{
+			s.scene.ReplaceKeys(s.camRecId, s.camRecKeys.front().tUs, s.camRecKeys.back().tUs, s.camRecKeys);
+			s.host.Log(0, Fmt("Camera move recorded: %d keys, %.1f s", static_cast<int>(s.camRecKeys.size()),
+				static_cast<double>(s.camRecKeys.back().tUs - s.camRecKeys.front().tUs) / 1e6));
+		}
+		s.camRecKeys.clear();
+		s.camRecId = 0;
+		s.camRecLastUs = -1;
+	}
+
+	// while REC MOVE is on, flying a camera with the scene playing keys it 10 times a second
+	void CameraRecordFrame()
+	{
+		Studio& s = S();
+		const bool recording = s.open && s.camRec && s.pilotId && s.scene.clock.playing;
+		if (!recording) { if (!s.camRecKeys.empty()) CommitCameraRecording(); return; }
+		if (s.camRecId != s.pilotId) { CommitCameraRecording(); s.camRecId = s.pilotId; }
+		const int64_t t = s.scene.clock.timeUs;
+		if (s.camRecLastUs >= 0 && t < s.camRecLastUs) { CommitCameraRecording(); s.camRecId = s.pilotId; }	// looped
+		if (s.camRecLastUs >= 0 && t - s.camRecLastUs < 100'000) return;
+		s.camRecLastUs = t;
+		TransformKey k;
+		k.tUs = t;
+		VectorCopy(s.camOrg, k.origin);
+		k.pitch = s.camAng[PITCH];
+		k.yaw = s.camAng[YAW];
+		k.roll = s.camAng[ROLL];
+		k.fov = s.camFov;
+		k.interp = Interp::CatmullRom;
+		s.camRecKeys.push_back(k);
+	}
 
 	void Open();
 
@@ -2509,6 +2749,9 @@ namespace
 		s.takeDragId = 0;
 		s.keyDrag = false;
 		s.evDragObj = 0;
+		s.cutDrag = false;
+		s.camRec = false;
+		CameraRecordFrame();	// keeps what was recorded
 		cgi_Cvar_Set("cs_active", "0");
 		if (Frozen()) SetFreeze(false);	// back to regular gameplay
 	}
@@ -2750,12 +2993,14 @@ int CS_KeyEvent(int key, const int down)
 	else if (is(ACT_SAVE)) { if (!s.scene.project.empty()) Save(s.scene.project); else { s.tab = TAB_PROJECT; BeginField(FIELD_PROJECT, ""); } }
 	else if (is(ACT_DELETE))
 	{
-		if (s.scene.selectedClip >= 0) s.scene.RemoveClip(s.scene.selected, s.scene.selectedClip);
+		if (s.cutCam && s.cutCam == s.scene.selected) { s.scene.RemoveCut(s.cutCam, s.cutUs); s.cutCam = 0; }
+		else if (s.scene.selectedClip >= 0) s.scene.RemoveClip(s.scene.selected, s.scene.selectedClip);
 		else s.scene.Remove(s.scene.selected);
 	}
 	else if (is(ACT_DUPLICATE)) s.scene.Duplicate(s.scene.selected);
 	else if (is(ACT_SPLIT)) SplitAtPlayhead();
 	else if (is(ACT_KEY)) SetKeyAtPlayhead();
+	else if (is(ACT_DIRECTOR)) { s.director = !s.director; if (s.director) { s.pilotId = 0; s.camActive = true; } s.host.Log(0, s.director ? "Director view: the cut track picks the camera" : "Director view off"); }
 	else if (is(ACT_SNAP)) { s.snap = !s.snap; s.host.Log(0, s.snap ? "Snapping on" : "Snapping off"); }
 	else if (is(ACT_FOCUS)) Focus();
 	else if (is(ACT_FREEZE)) SetFreeze(!Frozen());
@@ -2830,17 +3075,19 @@ void CS_Frame()
 		if (s.kLeft) VectorMA(s.camOrg, -speed, right, s.camOrg);
 		if (s.kUp) s.camOrg[2] += speed;
 		if (s.kDown) s.camOrg[2] -= speed;
-		if (s.lookId && !s.pilotId) s.lookId = 0;	// flying away from a camera you were only viewing
+		if (s.lookId && !s.pilotId) { s.lookId = 0; s.director = false; }	// flying away from a camera you were only viewing
 		if (s.pilotId)
 		{
 			Object* o = s.scene.Find(s.pilotId);
-			if (o)
+			if (o && o->keys.empty() && !s.camRec)	// a keyed camera keeps its path: K keys where you flew
 			{
 				const bool moved = !VectorCompare(o->origin, s.camOrg) || !VectorCompare(o->angles, s.camAng) || o->fov != s.camFov;
 				if (moved) { s.scene.SetTransform(o->id, s.camOrg, s.camAng, true); o->fov = s.camFov; }
 			}
 		}
 	}
+
+	CameraRecordFrame();
 
 	if (now - s.lastAutosaveMs > 120000)
 	{
@@ -2851,15 +3098,21 @@ void CS_Frame()
 
 bool CS_ApplyView()
 {
+	if (g_s && g_s->open && g_s->director && !g_s->camActive && g_s->scene.ActiveCamera(g_s->scene.clock.timeUs)) g_s->camActive = true;
 	if (!g_s || !g_s->open || !g_s->camActive) return false;
 	Studio& s = S();
-	if (s.lookId && !s.pilotId)
+	const int64_t t = s.scene.clock.timeUs;
+	if (s.director && !s.pilotId)
+	{
+		// the cut track picks the camera
+		const Object* o = s.scene.Find(s.scene.ActiveCamera(t));
+		if (o) { CamPose(*o, t, s.camOrg, s.camAng, s.camFov, true); s.lookId = o->id; }
+	}
+	else if (s.lookId && !s.pilotId)
 	{
 		const Object* o = s.scene.Find(s.lookId);
 		if (!o) { PlayerView(); return false; }
-		VectorCopy(o->origin, s.camOrg);
-		VectorCopy(o->angles, s.camAng);
-		s.camFov = o->fov;
+		CamPose(*o, t, s.camOrg, s.camAng, s.camFov, true);
 	}
 	VectorCopy(s.camOrg, cg.refdef.vieworg);
 	VectorCopy(s.camAng, cg.refdefViewAngles);

@@ -567,8 +567,66 @@ static void TestPhase5()
 	}
 }
 
+static void TestPhase6()
+{
+	FakeHost h;
+	Scene s(&h);
+	const float o[3] = { 0, 0, 0 }, a[3] = { 0, 0, 0 };
+	const int v = s.AddActor("md_vader", o, a);
+	const int c1 = s.AddCamera(o, a, 80), c2 = s.AddCamera(o, a, 60);
+
+	// camera keys: position, angles, roll and fov
+	TransformKey k0; k0.tUs = 0; k0.pitch = 10; k0.yaw = 170; k0.roll = 0; k0.fov = 90; k0.interp = Interp::Linear;
+	TransformKey k1; k1.tUs = 1'000'000; k1.origin[2] = 100; k1.pitch = -10; k1.yaw = -170; k1.roll = 20; k1.fov = 50;
+	CHECK(s.SetKey(c1, k0) && s.SetKey(c1, k1) && !s.Find(c1)->prop && s.Find(c1)->keys.size() == 2);
+	float org[3], ang[3], fov;
+	CHECK(EvaluateCameraKeys(s.Find(c1)->keys, 500'000, org, ang, fov));
+	CHECK(std::fabs(org[2] - 50) < 1e-3 && std::fabs(ang[0]) < 1e-3 && std::fabs(AngleWrap(ang[1]) - 180) < 1e-3 && std::fabs(ang[2] - 10) < 1e-3 && std::fabs(fov - 70) < 1e-3);
+	CHECK(EvaluateCameraKeys(s.Find(c1)->keys, 5'000'000, org, ang, fov) && fov == 50 && ang[2] == 20);
+	std::vector<TransformKey> none;
+	CHECK(!EvaluateCameraKeys(none, 0, org, ang, fov));
+	// actor keys still work the same (the shared interpolation)
+	float yaw, vel[3];
+	CHECK(EvaluateKeys(s.Find(c1)->keys, 500'000, org, yaw, vel) && std::fabs(org[2] - 50) < 1e-3 && std::fabs(vel[2] - 100) < 0.5f);
+
+	// cuts
+	CHECK(s.ActiveCamera(0) == 0);
+	CHECK(s.AddCut(c1, 0) && s.AddCut(c2, 2'000'000) && !s.AddCut(c2, 2'000'000) && !s.AddCut(v, 3'000'000));
+	CHECK(s.ActiveCamera(1'999'999) == c1 && s.ActiveCamera(2'000'000) == c2 && s.ActiveCamera(9'000'000) == c2);
+	CHECK(s.AddCut(c1, 2'000'000) && s.ActiveCamera(2'500'000) == c1 && s.Find(c2)->cuts.empty());	// one cut per time
+	CHECK(s.Undo() && s.Undo() && s.ActiveCamera(2'500'000) == c2);	// the move was two steps (remove + add)
+	CHECK(s.Cuts().size() == 2 && s.Cuts()[0].first == 0 && s.Cuts()[1].second == c2);
+	CHECK(!s.MoveCut(c2, 2'000'000, 0, false) && s.MoveCut(c2, 2'000'000, 3'000'000, true) && s.MoveCut(c2, 3'000'000, 3'500'000, true));
+	CHECK(s.ActiveCamera(3'200'000) == c1 && s.Undo() && s.ActiveCamera(2'100'000) == c2);
+	CHECK(s.RemoveCut(c2, 2'000'000) && s.ActiveCamera(5'000'000) == c1);
+
+	// look-at, shake, fov
+	CHECK(s.SetCameraLook(c1, v) && s.Find(c1)->lookAt == v && !s.SetCameraLook(v, c1));
+	CHECK(s.SetCameraShake(c1, 3, true) && s.SetCameraShake(c1, 99, true) && s.Find(c1)->shake == 10);
+	CHECK(s.Undo() && s.Find(c1)->shake == 0);
+	CHECK(s.SetCameraShake(c1, 2, false) && s.SetCameraFov(c2, 1, false) && s.Find(c2)->fov == 5);
+
+	// a recorded move replaces the keys in its range in one step
+	std::vector<TransformKey> rec;
+	for (int i = 0; i < 5; i++) { TransformKey k; k.tUs = 200'000 + i * 100'000; k.origin[0] = static_cast<float>(i); k.fov = 70; rec.push_back(k); }
+	const std::vector<TransformKey> before = s.Find(c1)->keys;
+	CHECK(s.ReplaceKeys(c1, 200'000, 600'000, rec) && s.Find(c1)->keys.size() == 7);
+	CHECK(s.ReplaceKeys(c1, 0, 999'999, rec) && s.Find(c1)->keys.size() == 6);	// k0 replaced away, k1 kept
+	CHECK(s.Undo() && s.Undo() && s.Find(c1)->keys == before);
+	CHECK(!s.ReplaceKeys(c1, 5'000'000, 6'000'000, {}));		// nothing there
+
+	CHECK(s.Save("P6"));
+	Scene l(&h);
+	std::vector<std::string> warn;
+	CHECK(l.Load("P6", false, false, warn) && warn.empty());
+	const Object* lc = l.Find(c1);
+	CHECK(lc && lc->keys == s.Find(c1)->keys && lc->cuts == s.Find(c1)->cuts && lc->lookAt == v && lc->shake == 2);
+	CHECK(l.Find(c2)->fov == 5 && l.ActiveCamera(5'000'000) == c1);
+}
+
 int main()
 {
+	TestPhase6();
 	TestPhase5();
 	TestPhase4();
 	TestPhase3();

@@ -135,15 +135,18 @@ namespace cs
 		int64_t tUs = 0;
 		float origin[3] = { 0, 0, 0 };
 		float yaw = 0;
+		float pitch = 0, roll = 0, fov = 0;	// cameras (Phase 6)
 		Interp interp = Interp::Smooth;	// how it moves from this key to the next
 		bool operator==(const TransformKey& o) const
 		{
 			return tUs == o.tUs && origin[0] == o.origin[0] && origin[1] == o.origin[1] && origin[2] == o.origin[2] &&
-				yaw == o.yaw && interp == o.interp;
+				yaw == o.yaw && pitch == o.pitch && roll == o.roll && fov == o.fov && interp == o.interp;
 		}
 	};
 	// position and facing from keys at a time (holds the first / last key outside them); velocity in units/s
 	bool EvaluateKeys(const std::vector<TransformKey>& keys, int64_t t, float origin[3], float& yaw, float velocity[3]);
+	// a camera's keys: position, angles (pitch yaw roll) and fov
+	bool EvaluateCameraKeys(const std::vector<TransformKey>& keys, int64_t t, float origin[3], float angles[3], float& fov);
 
 	struct Object
 	{
@@ -170,6 +173,9 @@ namespace cs
 
 		// camera
 		float fov = 80.0f;
+		std::vector<int64_t> cuts;	// scene times the director cuts to this camera (sorted)
+		int lookAt = 0;			// actor it aims at (0 = its own angles)
+		float shake = 0;		// handheld shake, 0-10
 
 		// events track (ObjType::Events): starts at eventsStartUs on the scene clock
 		int64_t eventsStartUs = 0;
@@ -285,7 +291,18 @@ namespace cs
 		bool MoveKey(int id, int64_t fromUs, int64_t toUs, bool coalesce);
 		bool RemoveKey(int id, int64_t tUs);
 		bool SetKeyInterp(int id, int64_t tUs, Interp interp);
+		// replaces the keys from..to (inclusive) with `keys`, one undo step (a recorded camera move; empty = delete them)
+		bool ReplaceKeys(int id, int64_t fromUs, int64_t toUs, const std::vector<TransformKey>& keys);
 		static const Take* ActiveTake(const Object& o);
+		// cameras (Phase 6): cuts, look-at, shake, fov (undoable)
+		int ActiveCamera(int64_t t) const;					// the camera cut to at t (0 = none)
+		std::vector<std::pair<int64_t, int>> Cuts() const;	// (time, camera id), sorted
+		bool AddCut(int camId, int64_t t);					// one cut per time
+		bool RemoveCut(int camId, int64_t t);
+		bool MoveCut(int camId, int64_t from, int64_t to, bool coalesce);
+		bool SetCameraLook(int camId, int targetId);
+		bool SetCameraShake(int camId, float amount, bool coalesce);
+		bool SetCameraFov(int camId, float fov, bool coalesce);
 		static Take* FindTake(Object& o, int takeId);
 		int selectedTake = 0;	// take id in the selected object (0 = none)
 
