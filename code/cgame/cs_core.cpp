@@ -632,7 +632,7 @@ namespace cs
 		if (!o) return false;
 		const int64_t now = host_->NowMs();
 		if (coalesce && !undo_.empty() && undo_.back().kind == Op::Change && undo_.back().after.id == after.id &&
-			undo_.back().tag == tag && now - undo_.back().timeMs < 1000)
+			undo_.back().tag == tag && (tag == "xform" || now - undo_.back().timeMs < 1000))	// a transform: one step however long
 		{
 			undo_.back().after = after;
 			undo_.back().timeMs = now;

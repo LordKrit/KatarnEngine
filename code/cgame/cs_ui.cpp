@@ -71,7 +71,7 @@ namespace
 	{
 		ACT_CLOSE, ACT_PANELS, ACT_PLAY, ACT_STOP, ACT_STEP_BACK, ACT_STEP_FWD, ACT_UNDO, ACT_REDO, ACT_SAVE,
 		ACT_DELETE, ACT_FOCUS, ACT_FREEZE, ACT_LEFT, ACT_RIGHT, ACT_FWD, ACT_BACK, ACT_UP, ACT_DOWN, ACT_TURN_L, ACT_TURN_R,
-		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_DIRECTOR, ACT_PREV_KEY, ACT_NEXT_KEY, ACT_LOOK, ACT_CLEAN, ACT_SCALE, ACT_MARK_IN, ACT_MARK_OUT, ACT_COUNT
+		ACT_PLAYER_VIEW, ACT_DUPLICATE, ACT_SPLIT, ACT_KEY, ACT_SNAP, ACT_DIRECTOR, ACT_PREV_KEY, ACT_NEXT_KEY, ACT_LOOK, ACT_CLEAN, ACT_SCALE, ACT_MARK_IN, ACT_MARK_OUT, ACT_GRAB, ACT_ROTATE, ACT_COUNT
 	};
 	struct Hotkey { const char* name; int key; bool ctrl; };
 	Hotkey g_keys[ACT_COUNT] = {
@@ -85,7 +85,7 @@ namespace
 		{ "turn_left", A_LOW_Q, false }, { "turn_right", A_LOW_E, false }, { "player_view", A_LOW_V, false },
 		{ "duplicate", A_LOW_D, true }, { "split", A_LOW_B, true }, { "set_key", A_LOW_K, false }, { "snap", A_LOW_N, false }, { "director", A_LOW_C, false },
 		{ "prev_key", A_OPEN_BRACKET, false }, { "next_key", A_CLOSE_BRACKET, false }, { "look_through", A_LOW_L, false }, { "clean_view", A_LOW_H, false }, { "scale_mode", A_LOW_S, false },
-		{ "mark_in", A_LOW_I, false }, { "mark_out", A_LOW_O, false },
+		{ "mark_in", A_LOW_I, false }, { "mark_out", A_LOW_O, false }, { "grab", A_LOW_G, false }, { "rotate", A_LOW_R, false },
 	};
 
 	struct KeyName { const char* n; int k; };
@@ -248,6 +248,24 @@ namespace
 		std::map<int, int> idleApplied, eyeApplied;	// per entity: idle on (1) / off (0); eyes mode + 1
 		bool soundsStarted = false;				// the studio started sounds (stopped when playback stops)
 		bool musicStarted = false;
+		// ---- Blender-style transforms: G / R / S (+ X Y Z, numbers, CTRL snap) and the viewport gizmo
+		struct Xform
+		{
+			int mode = 0;			// 0 none, 1 move, 2 rotate, 3 scale
+			int axis = -1;			// 0 1 2 = X Y Z, -1 free
+			int plane = -1;			// move in the plane without this axis (SHIFT+X/Y/Z), -1 none
+			bool gizmo = false;		// started by dragging a gizmo handle: ends when the button is released
+			int id = 0;
+			int target = 0;			// 0 the object itself, 1 its key at the playhead, 2 its take
+			int64_t keyT = 0;
+			float org0[3] = { 0, 0, 0 }, ang0[3] = { 0, 0, 0 }, scale0 = 1, fov0 = 80;
+			float takeOff0[3] = { 0, 0, 0 }, takeYaw0 = 0;
+			float cx0 = 0, cy0 = 0;
+			float hit0[3] = { 0, 0, 0 };	// where the move started on its plane / axis
+			std::string num;		// typed amount
+			bool changed = false;
+		} xf;
+		int gizmoMode = 1;			// 0 off, 1 move, 2 rotate, 3 scale, 4 all
 		// ---- scale mode (S): drag / wheel scales the selected prop or actor
 		bool scaleMode = false;
 		bool scaleDrag = false;
@@ -301,6 +319,8 @@ namespace
 	void Close();
 	void ReleasePreview();
 	void StartRecording(int target);
+	bool ShownTransform(const Object& o, float org[3], float& yaw);
+	void XfStart(int mode, int axis, bool gizmo, int plane);
 	bool PropPose(const Object& o, int64_t t, float org[3], float ang[3]);
 	bool CamPose(const Object& cam, int64_t t, float org[3], float ang[3], float& fov, bool effects);
 	void CameraRecordFrame();
@@ -857,7 +877,7 @@ namespace
 			if (Button(x + kRightW - 86, y, 12, 9, "-")) s.scene.SetScale(o->id, o->scale / (s.shift ? 1.25f : 1.05f), true);
 			if (Button(x + kRightW - 72, y, 12, 9, "+")) s.scene.SetScale(o->id, o->scale * (s.shift ? 1.25f : 1.05f), true);
 			if (Button(x + kRightW - 58, y, 24, 9, "1x")) s.scene.SetScale(o->id, 1, false);
-			if (Button(x + kRightW - 32, y, 20, 9, "S", s.scaleMode)) s.scaleMode = !s.scaleMode;
+			if (Button(x + kRightW - 32, y, 20, 9, "S")) XfStart(3, -1, false, -1);
 			y += kRow + 1;
 			if (Button(x, y, kRightW - 60, 11, "ANIMATIONS...")) s.tab = TAB_ANIMS;
 			if (Button(x + kRightW - 58, y, 46, 11, "KEY (K)")) SetKeyAtPlayhead();
@@ -2325,7 +2345,7 @@ namespace
 		if (Button(x + w - 74, y, 12, 9, "-")) s.scene.SetScale(o->id, o->scale / (s.shift ? 1.25f : 1.05f), true);
 		if (Button(x + w - 60, y, 12, 9, "+")) s.scene.SetScale(o->id, o->scale * (s.shift ? 1.25f : 1.05f), true);
 		if (Button(x + w - 46, y, 24, 9, "1x")) s.scene.SetScale(o->id, 1, false);
-		if (Button(x + w - 20, y, 20, 9, "S", s.scaleMode)) s.scaleMode = !s.scaleMode;
+		if (Button(x + w - 20, y, 20, 9, "S")) XfStart(3, -1, false, -1);
 		y += kRow + 1;
 		const float bw = (w - 4) / 3;
 		if (Button(x, y, bw, 11, "KEY (K)")) SetKeyAtPlayhead();
@@ -2458,6 +2478,553 @@ namespace
 		y += 14;
 		Text(ix, y, "double-click spawns; keys like 'model',", kDim, 0.34f); y += 9;
 		Text(ix, y, "'health', 'fxFile', 'spawnflags', 'target'", kDim, 0.34f);
+	}
+
+	// ---- Blender-style transforms -------------------------------------------------------------
+	const vec4_t kAxisCol[3] = { { 0.93f, 0.27f, 0.32f, 1 }, { 0.55f, 0.82f, 0.22f, 1 }, { 0.30f, 0.56f, 1.00f, 1 } };
+	const vec4_t kGizmoWhite = { 0.92f, 0.92f, 0.92f, 0.9f };
+	const char* kAxisName[3] = { "X", "Y", "Z" };
+	void Col4Copy(const float* a, float* b) { for (int i = 0; i < 4; i++) b[i] = a[i]; }
+
+	// a line in the 2D overlay (dots every half unit)
+	void Line(const float x0, const float y0, const float x1, const float y1, const float* c, const float th = 1.0f)
+	{
+		const float dx = x1 - x0, dy = y1 - y0;
+		const int n = std::max(1, static_cast<int>(sqrtf(dx * dx + dy * dy) * 2.0f));
+		for (int i = 0; i <= n; i++)
+		{
+			const float f = static_cast<float>(i) / static_cast<float>(n);
+			Rect(x0 + dx * f - th * 0.5f, y0 + dy * f - th * 0.5f, th, th, c);
+		}
+	}
+
+	void Circle2D(const float cx, const float cy, const float r, const float* c, const float th = 1.0f)
+	{
+		const int n = std::max(24, static_cast<int>(r * 1.5f));
+		float px = cx + r, py = cy;
+		for (int i = 1; i <= n; i++)
+		{
+			const float a = 6.2831853f * static_cast<float>(i) / static_cast<float>(n);
+			const float x = cx + cosf(a) * r, y = cy + sinf(a) * r;
+			Line(px, py, x, y, c, th);
+			px = x; py = y;
+		}
+	}
+
+	float SegDist(const float px, const float py, const float x0, const float y0, const float x1, const float y1)
+	{
+		const float dx = x1 - x0, dy = y1 - y0, l2 = dx * dx + dy * dy;
+		const float t = l2 > 0 ? std::max(0.0f, std::min(1.0f, ((px - x0) * dx + (py - y0) * dy) / l2)) : 0.0f;
+		return hypotf(px - (x0 + dx * t), py - (y0 + dy * t));
+	}
+
+	// full angles (pitch yaw roll) from an axis set (forward, left, up)
+	void AxisToAnglesFull(vec3_t ax[3], float ang[3])
+	{
+		vec3_t a;
+		vectoangles(ax[0], a);
+		vec3_t ref[3];
+		const vec3_t noRoll = { a[PITCH], a[YAW], 0 };
+		AnglesToAxis(noRoll, ref);
+		float roll = RAD2DEG(atan2f(DotProduct(ax[2], ref[1]), DotProduct(ax[2], ref[2])));
+		// check the sign by rebuilding (conventions differ between the engine's helpers)
+		vec3_t test[3];
+		const vec3_t t1 = { a[PITCH], a[YAW], roll };
+		AnglesToAxis(t1, test);
+		if (DotProduct(test[2], ax[2]) < 0.99f) roll = -roll;
+		ang[PITCH] = AngleNormalize180(a[PITCH]);
+		ang[YAW] = AngleNormalize180(a[YAW]);
+		ang[ROLL] = AngleNormalize180(roll);
+	}
+
+	// where the cursor's ray meets a plane
+	bool RayPlane(const float sx, const float sy, const float* point, const float* normal, float out[3])
+	{
+		float dir[3];
+		ViewRay(sx, sy, dir);
+		const float den = DotProduct(dir, normal);
+		if (fabsf(den) < 1e-4f) return false;
+		vec3_t d;
+		VectorSubtract(point, cg.refdef.vieworg, d);
+		const float t = DotProduct(d, normal) / den;
+		if (t < 0) return false;
+		VectorMA(cg.refdef.vieworg, t, dir, out);
+		return true;
+	}
+
+	bool XfTransformable(const Object* o)
+	{
+		return o && (o->type == ObjType::Actor || o->type == ObjType::Prop || o->type == ObjType::Camera) &&
+			(o->type == ObjType::Camera || o->entNum >= 0);
+	}
+
+	// the pose a transform starts from / shows
+	void XfPose(const Object& o, float org[3], float ang[3], float& fov)
+	{
+		Studio& s = S();
+		fov = o.fov;
+		if (o.type == ObjType::Camera) { CamPose(o, s.scene.clock.timeUs, org, ang, fov, false); return; }
+		if (o.type == ObjType::Prop) { PropPose(o, s.scene.clock.timeUs, org, ang); return; }
+		float yaw;
+		ShownTransform(o, org, yaw);
+		ang[PITCH] = 0; ang[YAW] = yaw; ang[ROLL] = 0;
+	}
+
+	// size of the gizmo in world units: about the same on screen at any distance
+	float GizmoSize(const float* org)
+	{
+		vec3_t d;
+		VectorSubtract(org, cg.refdef.vieworg, d);
+		return std::max(4.0f, VectorLength(d) * tanf(DEG2RAD(cg.refdef.fov_x * 0.5f)) * 0.22f);
+	}
+
+	void XfApply(const float org[3], const float ang[3], const float scale)
+	{
+		Studio& s = S();
+		const Object* o = s.scene.Find(s.xf.id);
+		if (!o) return;
+		Object e = *o;
+		e.scale = scale;
+		if (s.xf.target == 2)
+		{
+			Take* tk = Scene::FindTake(e, e.activeTake);
+			if (!tk) return;
+			for (int i = 0; i < 3; i++) tk->offset[i] = s.xf.takeOff0[i] + (org[i] - s.xf.org0[i]);
+			tk->yawOffset = AngleNormalize180(s.xf.takeYaw0 + (ang[YAW] - s.xf.ang0[YAW]));
+		}
+		else if (s.xf.target == 1)
+		{
+			TransformKey* k = nullptr;
+			for (auto& q : e.keys) if (q.tUs == s.xf.keyT) k = &q;
+			if (!k)
+			{
+				TransformKey nk;
+				nk.tUs = s.xf.keyT;
+				nk.fov = s.xf.fov0;
+				for (auto& q : e.keys) if (q.tUs <= s.xf.keyT) nk.interp = q.interp;
+				e.keys.push_back(nk);
+				k = &e.keys.back();
+			}
+			VectorCopy(org, k->origin);
+			k->yaw = ang[YAW];
+			k->pitch = e.type == ObjType::Actor ? 0 : ang[PITCH];
+			k->roll = e.type == ObjType::Actor ? 0 : ang[ROLL];
+			if (e.type == ObjType::Camera && k->fov <= 0) k->fov = s.xf.fov0;
+		}
+		else
+		{
+			VectorCopy(org, e.origin);
+			e.angles[YAW] = ang[YAW];
+			e.angles[PITCH] = e.type == ObjType::Actor ? 0 : ang[PITCH];
+			e.angles[ROLL] = e.type == ObjType::Actor ? 0 : ang[ROLL];
+		}
+		if (s.scene.Edit(e, true, "xform")) s.xf.changed = true;
+		if (s.xf.target == 1) { s.keyObj = e.id; s.keyUs = s.xf.keyT; }
+	}
+
+	void XfStart(const int mode, const int axis, const bool gizmo, const int plane)
+	{
+		Studio& s = S();
+		const Object* o = s.scene.Find(s.scene.selected);
+		if (!XfTransformable(o)) { s.host.Log(1, "Select an actor, a prop or a camera first"); return; }
+		if (o->type == ObjType::Prop && o->attachTo) { s.host.Log(1, o->name + " is held by an actor: use its offset / turn"); return; }
+		if (mode == 3 && o->type == ObjType::Camera) { s.host.Log(1, "Cameras don't scale (FOV is their zoom)"); return; }
+		Studio::Xform& x = s.xf;
+		x = Studio::Xform();
+		x.mode = mode;
+		x.axis = axis;
+		x.plane = plane;
+		x.gizmo = gizmo;
+		x.id = o->id;
+		XfPose(*o, x.org0, x.ang0, x.fov0);
+		x.scale0 = o->scale;
+		x.cx0 = s.cx;
+		x.cy0 = s.cy;
+		const Take* tk = o->type == ObjType::Actor && o->prop ? Scene::ActiveTake(*o) : nullptr;
+		if (tk) { x.target = 2; VectorCopy(tk->offset, x.takeOff0); x.takeYaw0 = tk->yawOffset; }
+		else if (!o->keys.empty() && (o->type != ObjType::Actor || o->prop))
+		{
+			// a keyed object: the key at the playhead (made there if there's none)
+			const int64_t frameUs = 1'000'000 / s.scene.clock.fps;
+			x.target = 1;
+			x.keyT = s.scene.clock.timeUs / frameUs * frameUs;
+		}
+		s.scene.clock.Pause();
+		ReleasePreview();
+		x.hit0[0] = x.hit0[1] = x.hit0[2] = 0;
+	}
+
+	void XfEnd(const bool keep)
+	{
+		Studio& s = S();
+		if (!s.xf.mode) return;
+		if (!keep && s.xf.changed) s.scene.Undo();	// all of it was one step
+		s.xf = Studio::Xform();
+	}
+
+	// the transform follows the mouse (or the typed number)
+	void XfUpdate()
+	{
+		Studio& s = S();
+		Studio::Xform& x = s.xf;
+		if (!x.mode) return;
+		const Object* o = s.scene.Find(x.id);
+		if (!o) { x = Studio::Xform(); return; }
+		if (x.gizmo && !s.lmb) { XfEnd(true); return; }
+		float org[3], ang[3];
+		VectorCopy(x.org0, org);
+		VectorCopy(x.ang0, ang);
+		float scale = x.scale0;
+		const bool hasNum = !x.num.empty() && x.num != "-" && x.num != ".";
+		const float num = hasNum ? static_cast<float>(atof(x.num.c_str())) : 0.0f;
+		float sx0, sy0;
+		const bool onScreen = Project(x.org0, sx0, sy0);
+		vec3_t fwd;
+		VectorCopy(cg.refdef.viewaxis[0], fwd);
+		if (x.mode == 1)
+		{
+			vec3_t delta = { 0, 0, 0 };
+			if (x.axis >= 0)
+			{
+				vec3_t a = { 0, 0, 0 };
+				a[x.axis] = 1;
+				if (hasNum) VectorScale(a, num, delta);
+				else
+				{
+					// the point on the axis under the cursor: a plane through the axis, facing the camera
+					vec3_t side, n;
+					CrossProduct(fwd, a, side);
+					CrossProduct(a, side, n);
+					if (VectorNormalize(n) > 0.01f)
+					{
+						float h0[3], h1[3];
+						if (RayPlane(x.cx0, x.cy0, x.org0, n, h0) && RayPlane(s.cx, s.cy, x.org0, n, h1))
+						{
+							float t = (h1[x.axis] - h0[x.axis]);
+							if (s.ctrl) t = roundf(t / 8.0f) * 8.0f;
+							delta[x.axis] = t;
+						}
+					}
+				}
+			}
+			else
+			{
+				// free, or in a plane: where the cursor's ray meets the plane through the start
+				vec3_t n = { 0, 0, 0 };
+				if (x.plane >= 0) n[x.plane] = 1; else VectorCopy(fwd, n);
+				float h0[3], h1[3];
+				if (RayPlane(x.cx0, x.cy0, x.org0, n, h0) && RayPlane(s.cx, s.cy, x.org0, n, h1))
+				{
+					VectorSubtract(h1, h0, delta);
+					if (x.plane >= 0) delta[x.plane] = 0;
+					if (s.ctrl) for (int i = 0; i < 3; i++) delta[i] = roundf(delta[i] / 8.0f) * 8.0f;
+				}
+			}
+			VectorAdd(x.org0, delta, org);
+		}
+		else if (x.mode == 2)
+		{
+			// the angle swept around the object's centre on screen (or the typed degrees)
+			float deg = 0;
+			if (hasNum) deg = num;
+			else if (onScreen)
+			{
+				const float a0 = atan2f(x.cy0 - sy0, x.cx0 - sx0), a1 = atan2f(s.cy - sy0, s.cx - sx0);
+				deg = RAD2DEG(a1 - a0);
+				while (deg > 180) deg -= 360;
+				while (deg < -180) deg += 360;
+				if (s.shift) deg *= 0.2f;
+				if (s.ctrl) deg = roundf(deg / 15.0f) * 15.0f;
+			}
+			vec3_t axis = { 0, 0, 0 };
+			if (x.axis >= 0) axis[x.axis] = 1;
+			else if (o->type == ObjType::Actor) axis[2] = 1;	// actors turn about up only
+			else VectorScale(fwd, -1.0f, axis);					// free: about the view direction
+			if (o->type == ObjType::Actor && x.axis >= 0 && x.axis != 2) deg = 0;
+			// turning the screen's way round: against the axis when it points at us
+			if (DotProduct(axis, fwd) > 0) deg = -deg;
+			if (hasNum) deg = num;
+			if (o->type == ObjType::Actor) ang[YAW] = AngleNormalize180(x.ang0[YAW] + deg);
+			else
+			{
+				vec3_t ax[3], r[3];
+				AnglesToAxis(x.ang0, ax);
+				for (int i = 0; i < 3; i++) RotatePointAroundVector(r[i], axis, ax[i], deg);
+				AxisToAnglesFull(r, ang);
+			}
+		}
+		else if (x.mode == 3)
+		{
+			float f = 1;
+			if (hasNum) f = num;
+			else if (onScreen)
+			{
+				const float d0 = std::max(2.0f, hypotf(x.cx0 - sx0, x.cy0 - sy0)), d1 = hypotf(s.cx - sx0, s.cy - sy0);
+				f = d1 / d0;
+				if (s.shift) f = 1 + (f - 1) * 0.2f;
+				if (s.ctrl) f = std::max(0.1f, roundf(f * 10.0f) / 10.0f);
+			}
+			scale = std::max(0.05f, std::min(20.0f, x.scale0 * f));
+		}
+		XfApply(org, ang, scale);
+	}
+
+	// keys while a transform runs (true = used)
+	bool XfKey(const int key)
+	{
+		Studio& s = S();
+		Studio::Xform& x = s.xf;
+		if (!x.mode) return false;
+		if (key == A_ESCAPE || key == A_MOUSE2) { XfEnd(false); return true; }
+		if (key == A_ENTER || key == A_KP_ENTER || (key == A_MOUSE1 && !x.gizmo)) { XfEnd(true); return true; }
+		if (key == A_LOW_X || key == A_LOW_Y || key == A_LOW_Z)
+		{
+			const int a = key == A_LOW_X ? 0 : (key == A_LOW_Y ? 1 : 2);
+			if (s.shift) { x.plane = x.plane == a ? -1 : a; x.axis = -1; }	// SHIFT: the other two (a plane)
+			else { x.axis = x.axis == a ? -1 : a; x.plane = -1; }			// again: free
+			return true;
+		}
+		if ((key >= A_0 && key <= A_9) || key == A_PERIOD || key == A_MINUS)
+		{
+			const char c = key == A_PERIOD ? '.' : (key == A_MINUS ? '-' : static_cast<char>('0' + (key - A_0)));
+			if (c == '-') { if (!x.num.empty() && x.num[0] == '-') x.num.erase(0, 1); else x.num.insert(0, "-"); }
+			else if (x.num.size() < 10) x.num += c;
+			return true;
+		}
+		if (key == A_BACKSPACE) { if (!x.num.empty()) x.num.pop_back(); return true; }
+		if (key == A_LOW_G || key == A_LOW_R || key == A_LOW_S)
+		{
+			// switch between move / rotate / scale, starting again from where it is now
+			const int mode = key == A_LOW_G ? 1 : (key == A_LOW_R ? 2 : 3);
+			XfEnd(true);
+			XfStart(mode, -1, false, -1);
+			return true;
+		}
+		return true;	// everything else waits until the transform ends
+	}
+
+	void DrawXformInfo()
+	{
+		Studio& s = S();
+		const Studio::Xform& x = s.xf;
+		if (!x.mode) return;
+		const Object* o = s.scene.Find(x.id);
+		if (!o) return;
+		static const char* kMode[] = { "", "MOVE", "ROTATE", "SCALE" };
+		std::string what = kMode[x.mode];
+		if (x.axis >= 0) what += std::string("  along ") + kAxisName[x.axis];
+		else if (x.plane >= 0) what += std::string("  in the plane without ") + kAxisName[x.plane];
+		else what += x.mode == 2 && o->type != ObjType::Actor ? "  about the view" : "  free";
+		float org[3], ang[3], fov;
+		XfPose(*o, org, ang, fov);
+		std::string val;
+		if (x.mode == 1) val = Fmt("D %.1f %.1f %.1f", org[0] - x.org0[0], org[1] - x.org0[1], org[2] - x.org0[2]);
+		else if (x.mode == 2) val = Fmt("%.1f %.1f %.1f deg", ang[0], ang[1], ang[2]);
+		else val = Fmt("%.2fx", o->scale);
+		if (!x.num.empty()) val += "   typed: " + x.num;
+		const char* target = x.target == 2 ? "  (its take)" : (x.target == 1 ? "  (key at the playhead)" : "");
+		Rect(kLeftW + 2, kPanelY + 22, kRightX - kLeftW - 4, 22, kPanelDark);
+		Text(kLeftW + 6, kPanelY + 24, what + "   " + val + target, kAccent, 0.42f);
+		Text(kLeftW + 6, kPanelY + 34, x.gizmo ? "release to finish   CTRL snap   SHIFT fine" :
+			"X Y Z axis (SHIFT: plane)   type a number   CTRL snap   SHIFT fine   click / ENTER ok   right-click / ESC cancel", kDim, 0.34f);
+		// the axis it's locked to, through the object
+		if (x.axis >= 0)
+		{
+			vec3_t a = { 0, 0, 0 }, p0, p1;
+			a[x.axis] = 1;
+			VectorMA(x.org0, -4000, a, p0);
+			VectorMA(x.org0, 4000, a, p1);
+			// clip to in front of the camera by sampling
+			float lx = 0, ly = 0;
+			bool have = false;
+			for (int i = 0; i <= 80; i++)
+			{
+				vec3_t q;
+				VectorMA(p0, static_cast<float>(i) * 100.0f, a, q);
+				float qx, qy;
+				if (!Project(q, qx, qy)) { have = false; continue; }
+				if (have) Line(lx, ly, qx, qy, kAxisCol[x.axis], 0.8f);
+				lx = qx; ly = qy; have = true;
+			}
+		}
+	}
+
+	// ---- the viewport gizmo (like Blender's): arrows, plane squares and a centre circle to move; rings to
+	// turn; cube ends and an outer ring to scale. Drag a handle; release to finish.
+	struct GizmoHit { int mode = 0, axis = -1, plane = -1; };
+
+	GizmoHit DrawGizmoHandles(const bool pick, const float px, const float py)
+	{
+		Studio& s = S();
+		GizmoHit hit;
+		float best = 4.0f;
+		const auto tryHit = [&](const float d, const int mode, const int axis, const int plane)
+		{
+			if (pick && d < best) { best = d; hit.mode = mode; hit.axis = axis; hit.plane = plane; }
+		};
+		if (!s.gizmoMode || s.clean) return hit;
+		const Object* o = s.scene.Find(s.scene.selected);
+		if (!XfTransformable(o) || (o->type == ObjType::Prop && o->attachTo)) return hit;
+		float org[3], ang[3], fov;
+		XfPose(*o, org, ang, fov);
+		float cx, cy;
+		if (!Project(org, cx, cy)) return hit;
+		const float L = GizmoSize(org);
+		const bool actor = o->type == ObjType::Actor, cam = o->type == ObjType::Camera;
+		const bool mv = s.gizmoMode == 1 || s.gizmoMode == 4, rt = s.gizmoMode == 2 || s.gizmoMode == 4, sc = (s.gizmoMode == 3 || s.gizmoMode == 4) && !cam;
+		const bool active = s.xf.mode && s.xf.gizmo;
+		// rotate: rings about X Y Z (actors: Z only) and the white view ring
+		if (rt)
+		{
+			for (int a = 0; a < 3; a++)
+			{
+				if (actor && a != 2) continue;
+				const int u = (a + 1) % 3, v = (a + 2) % 3;
+				float lx = 0, ly = 0;
+				bool have = false;
+				vec4_t col;
+				Col4Copy(kAxisCol[a], col);
+				if (active && !(s.xf.mode == 2 && s.xf.axis == a)) col[3] = 0.25f;
+				for (int i = 0; i <= 64; i++)
+				{
+					const float t = 6.2831853f * static_cast<float>(i) / 64.0f;
+					vec3_t q;
+					VectorCopy(org, q);
+					q[u] += cosf(t) * L * 0.85f;
+					q[v] += sinf(t) * L * 0.85f;
+					float qx, qy;
+					if (!Project(q, qx, qy)) { have = false; continue; }
+					// the half facing away is fainter (as in Blender)
+					vec3_t toQ;
+					VectorSubtract(q, org, toQ);
+					vec4_t c2;
+					Col4Copy(col, c2);
+					if (DotProduct(toQ, cg.refdef.viewaxis[0]) > 0) c2[3] *= 0.35f;
+					if (have)
+					{
+						Line(lx, ly, qx, qy, c2, 1.2f);
+						tryHit(SegDist(px, py, lx, ly, qx, qy), 2, a, -1);
+					}
+					lx = qx; ly = qy; have = true;
+				}
+			}
+			if (!actor)
+			{
+				vec3_t edge;
+				VectorMA(org, L * 1.05f, cg.refdef.viewaxis[1], edge);
+				float ex, ey;
+				if (Project(edge, ex, ey))
+				{
+					const float r = hypotf(ex - cx, ey - cy);
+					Circle2D(cx, cy, r, active && !(s.xf.mode == 2 && s.xf.axis < 0) ? kLineSoft : kGizmoWhite, 0.9f);
+					tryHit(fabsf(hypotf(px - cx, py - cy) - r), 2, -1, -1);
+				}
+			}
+		}
+		// move: arrows, plane squares, centre circle
+		for (int a = 0; a < 3; a++)
+		{
+			if (!mv && !sc) break;
+			vec3_t tip;
+			VectorCopy(org, tip);
+			tip[a] += L * (rt && mv ? 1.25f : 1.0f);
+			float tx, ty;
+			if (!Project(tip, tx, ty)) continue;
+			vec4_t col;
+			Col4Copy(kAxisCol[a], col);
+			if (active) col[3] = s.xf.axis == a ? 1.0f : 0.25f;
+			Line(cx, cy, tx, ty, col, 1.3f);
+			if (mv)
+			{
+				// arrow head
+				const float dx = tx - cx, dy = ty - cy, l = std::max(1.0f, hypotf(dx, dy));
+				const float ux = dx / l, uy = dy / l;
+				for (int k = 0; k < 5; k++)
+				{
+					const float w2 = 2.6f * (1.0f - k / 5.0f);
+					Line(tx + ux * k - uy * w2, ty + uy * k + ux * w2, tx + ux * k + uy * w2, ty + uy * k - ux * w2, col, 1.0f);
+				}
+				tryHit(SegDist(px, py, cx, cy, tx + ux * 4, ty + uy * 4), 1, a, -1);
+			}
+			if (sc)
+			{
+				// a cube at the end (scale): our scale is the same on all axes
+				vec3_t ct;
+				VectorCopy(org, ct);
+				ct[a] += L * 0.75f;
+				float bx, by;
+				if (Project(ct, bx, by))
+				{
+					Rect(bx - 2.2f, by - 2.2f, 4.4f, 4.4f, col);
+					tryHit(hypotf(px - bx, py - by) - 1.5f, 3, -1, -1);
+				}
+			}
+		}
+		if (mv)
+		{
+			// plane squares: move in two axes (the third's colour)
+			for (int a = 0; a < 3; a++)
+			{
+				const int u = (a + 1) % 3, v = (a + 2) % 3;
+				vec3_t q;
+				VectorCopy(org, q);
+				q[u] += L * 0.38f;
+				q[v] += L * 0.38f;
+				float qx, qy;
+				if (!Project(q, qx, qy)) continue;
+				vec4_t col;
+				Col4Copy(kAxisCol[a], col);
+				col[3] = active ? (s.xf.plane == a ? 0.9f : 0.2f) : 0.6f;
+				Rect(qx - 2.2f, qy - 2.2f, 4.4f, 4.4f, col);
+				tryHit(hypotf(px - qx, py - qy) - 1.5f, 1, -1, a);
+			}
+			// centre circle: free move in the view plane
+			Circle2D(cx, cy, 4.5f, kGizmoWhite, 0.9f);
+			tryHit(hypotf(px - cx, py - cy) < 5.5f ? 0.0f : 99.0f, 1, -1, -1);
+		}
+		if (sc)
+		{
+			// outer ring: scale (from Blender's scale gizmo)
+			vec3_t edge;
+			VectorMA(org, L * 1.45f, cg.refdef.viewaxis[1], edge);
+			float ex, ey;
+			if (Project(edge, ex, ey))
+			{
+				const float r = hypotf(ex - cx, ey - cy);
+				Circle2D(cx, cy, r, active && s.xf.mode != 3 ? kLineSoft : kGizmoWhite, 0.7f);
+				tryHit(fabsf(hypotf(px - cx, py - cy) - r), 3, -1, -1);
+			}
+		}
+		return hit;
+	}
+
+	bool GizmoClick()
+	{
+		Studio& s = S();
+		if (!s.gizmoMode || s.xf.mode) return false;
+		const GizmoHit h = DrawGizmoHandles(true, s.clickX, s.clickY);
+		if (!h.mode) return false;
+		XfStart(h.mode, h.axis, true, h.plane);
+		// the start point is where the click was (not where the cursor is now)
+		s.xf.cx0 = s.clickX;
+		s.xf.cy0 = s.clickY;
+		return true;
+	}
+
+	void DrawGizmoBar()
+	{
+		Studio& s = S();
+		static const char* kNames[] = { "OFF", "MOVE", "ROTATE", "SCALE", "ALL" };
+		float x = kLeftW + 4;
+		const float y = kTransportY - 12;
+		Text(x, y + 1, "GIZMO", kDim, 0.34f);
+		x += 26;
+		for (int i = 1; i <= 4; i++)
+		{
+			if (Button(x, y, 34, 10, kNames[i], s.gizmoMode == i)) s.gizmoMode = s.gizmoMode == i ? 0 : i;
+			x += 36;
+		}
+		Text(x + 4, y + 1, "G move  R rotate  S scale  (then X Y Z, a number, CTRL snap)", kDim, 0.32f);
 	}
 
 	// ---- moving actors with the mouse ----
@@ -3297,7 +3864,7 @@ namespace
 			TextClip(4, sy + 1, m.second, kW - 8, m.first >= 2 ? kRed : (m.first == 1 ? kWarn : kTextCol));
 		}
 		else
-			Text(4, sy + 1, "F10 close  H clean view  TAB panels  SPACE play  , . step  [ ] keys  CTRL+Z/Y undo  CTRL+S save  "
+			Text(4, sy + 1, "F10 close  G/R/S move/rotate/scale  H clean  TAB panels  SPACE play  [ ] keys  CTRL+Z/Y undo  CTRL+S save  "
 				"right mouse + WASD fly   F focus   P freeze   K key   CTRL+B split   N snap", kDim, 0.36f);
 	}
 
@@ -3934,6 +4501,7 @@ namespace
 		if (!s.open) return;
 		if (s.render != Studio::RENDER_IDLE) EndRender(false);
 		s.previewing = false;
+		XfEnd(true);
 		s.open = false;
 		s.field = FIELD_NONE;
 		s.rmb = s.lmb = s.scrubbing = false;
@@ -4140,6 +4708,9 @@ int CS_KeyEvent(int key, const int down)
 	// held-state keys
 	if (key == A_CTRL) { s.ctrl = down != 0; return 1; }
 	if (key == A_SHIFT) { s.shift = down != 0; return 1; }
+	// a transform in progress takes the keys and the buttons (Blender: X Y Z, numbers, click / right-click)
+	if (s.xf.mode && down && XfKey(key)) return 1;
+	if (s.xf.mode && !down && key == A_MOUSE1) { s.lmb = false; return 1; }
 	if (key == A_MOUSE1)
 	{
 		s.lmb = down != 0;
@@ -4157,6 +4728,7 @@ int CS_KeyEvent(int key, const int down)
 	}
 	if (key == A_MOUSE2)
 	{
+		if (s.xf.mode) { if (down) XfEnd(false); return 1; }
 		s.rmb = down != 0;
 		if (down) StartFreeCam();
 		return 1;
@@ -4224,7 +4796,9 @@ int CS_KeyEvent(int key, const int down)
 	else if (is(ACT_CLEAN)) { if (s.previewing) StopPreview(); else { s.clean = !s.clean; s.cleanHintMs = NowMs(); } }
 	else if (is(ACT_MARK_IN)) { s.markIn = c.timeUs; s.host.Log(0, "In at " + c.Timecode()); }
 	else if (is(ACT_MARK_OUT)) { s.markOut = c.timeUs; s.host.Log(0, "Out at " + c.Timecode()); }
-	else if (is(ACT_SCALE)) { s.scaleMode = !s.scaleMode; s.host.Log(0, s.scaleMode ? "Scale mode: drag the selection or use the wheel (SHIFT: faster), S to leave" : "Scale mode off"); }
+	else if (is(ACT_SCALE)) XfStart(3, -1, false, -1);
+	else if (is(ACT_GRAB)) XfStart(1, -1, false, -1);
+	else if (is(ACT_ROTATE)) XfStart(2, -1, false, -1);
 	else if (is(ACT_PREV_KEY)) JumpKey(-1);
 	else if (is(ACT_NEXT_KEY)) JumpKey(1);
 	else if (is(ACT_LOOK))
@@ -4376,8 +4950,10 @@ void CS_Draw2D()
 		s.doubleClick = false;
 		return;
 	}
+	XfUpdate();
 	UpdateDrag();
 	DrawGizmo();
+	DrawGizmoHandles(false, 0, 0);
 	DrawFrameGuides();
 	if (s.panels)
 	{
@@ -4393,6 +4969,11 @@ void CS_Draw2D()
 		DrawViewportOverlay();
 		Text(4, 4, "TAB: panels   H: clean view", kDim, 0.34f);
 	}
+	DrawXformInfo();
+	if (s.panels && !s.xf.mode)
+	{
+		DrawGizmoBar();
+	}
 	// clicks no panel took are viewport picks (only in the viewport area while panels are up)
 	if (s.scaleMode && s.wheel)
 	{
@@ -4402,7 +4983,7 @@ void CS_Draw2D()
 			s.scene.SetScale(o->id, o->scale * powf(s.shift ? 1.25f : 1.05f, static_cast<float>(s.wheel)), true);
 		s.wheel = 0;
 	}
-	if (s.scaleMode)
+	if (s.scaleMode && !s.xf.mode)
 	{
 		const Object* o = s.scene.Find(s.scene.selected);
 		const bool ok = o && (o->type == ObjType::Actor || o->type == ObjType::Prop);
@@ -4412,7 +4993,7 @@ void CS_Draw2D()
 	if (s.clicked)
 	{
 		const bool inViewport = !s.panels || Inside(s.clickX, s.clickY, kLeftW, kPanelY, kRightX - kLeftW, kTransportY - kPanelY);
-		if (inViewport && !TryStartDrag()) PickInViewport();
+		if (inViewport && !GizmoClick() && !TryStartDrag()) PickInViewport();
 		s.clicked = false;
 	}
 	s.doubleClick = false;

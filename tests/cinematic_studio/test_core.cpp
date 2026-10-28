@@ -822,8 +822,27 @@ static void TestScale()
 	CHECK(l.Load("PS", false, false, warn) && l.Find(p)->scale == 3 && l.Find(v)->scale == 20 && h.ents[l.Find(p)->entNum].scale == 3);
 }
 
+static void TestXformUndo()
+{
+	FakeHost h;
+	Scene s(&h);
+	const float o[3] = { 0, 0, 0 };
+	const int p = s.AddProp("cs_model", { { "model", "m.md3" } }, o, o);
+	Object e = *s.Find(p);
+	for (int i = 1; i <= 5; i++)
+	{
+		h.now += 5000;		// a slow drag: seconds apart
+		e.origin[0] = static_cast<float>(i * 10);
+		e.angles[2] = static_cast<float>(i);
+		CHECK(s.Edit(e, true, "xform"));
+	}
+	CHECK(s.Find(p)->origin[0] == 50 && h.ents[s.Find(p)->entNum].a[2] == 5);
+	CHECK(s.Undo() && s.Find(p)->origin[0] == 0 && s.Find(p)->angles[2] == 0);	// all of it in one step
+}
+
 int main()
 {
+	TestXformUndo();
 	TestScale();
 	TestEase();
 	TestPhase8();
