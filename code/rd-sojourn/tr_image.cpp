@@ -2778,8 +2778,10 @@ R_CreateImage
 This is the only way any image_t are created
 ================
 */
+qboolean sj_traceImages = qfalse; // Sojourn: log each built-in image while bringing the port up
 image_t *R_CreateImage( const char *name, byte *pic, int width, int height, imgType_t type, int flags, int internalFormat ) {
 	image_t		*image;
+	if (sj_traceImages) ri.Printf(PRINT_ALL, "  create %s %ix%i (%i ms)\n", name, width, height, ri.Milliseconds());
 	qboolean	isLightmap = qfalse;
 	long		hash;
 	int         glWrapClampMode;
@@ -4364,8 +4366,10 @@ uint32_t crc32c(uint32_t crc, const unsigned char *buf, size_t len)
 extern int skyImageNum;
 extern byte *skyImagesData[6];
 
+extern qboolean sj_traceImages;
 image_t	*R_FindImageFile(const char *name, imgType_t type, int flags)
 {
+	if (sj_traceImages && name) ri.Printf(PRINT_ALL, "  find %s (%i ms)\n", name, ri.Milliseconds());
 	image_t	*image = NULL;
 	int		width, height;
 	byte	*pic = NULL;
@@ -6045,10 +6049,14 @@ R_InitImages
 void	R_InitImages( void ) {
 	Com_Memset(hashTable, 0, sizeof(hashTable));
 	// build brightness translation tables
+	ri.Printf(PRINT_ALL, "...R_SetColorMappings (%i ms)\n", ri.Milliseconds());
 	R_SetColorMappings();
 
 	// create default texture and white texture
+	ri.Printf(PRINT_ALL, "...R_CreateBuiltinImages (%i ms)\n", ri.Milliseconds());
+	sj_traceImages = qtrue;
 	R_CreateBuiltinImages();
+	sj_traceImages = qfalse;
 }
 
 /*

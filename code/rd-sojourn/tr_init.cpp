@@ -608,12 +608,15 @@ static void InitOpenGL( void )
 		}
 
 		// set default state
+		ri.Printf(PRINT_ALL, "...GL_SetDefaultState (%i ms)\n", ri.Milliseconds());
 		GL_SetDefaultState();
 
 		qglUseProgram(0);
 		glState.currentProgram = NULL;
 
+		ri.Printf(PRINT_ALL, "...GL default state set, R_Splash (%i ms)\n", ri.Milliseconds());
 		R_Splash();	//get something on screen asap
+		ri.Printf(PRINT_ALL, "...R_Splash done (%i ms)\n", ri.Milliseconds());
 	}
 	else
 	{
