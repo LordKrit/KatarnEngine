@@ -2914,6 +2914,7 @@ static void R_LoadLightGridArray(world_t* worldData, lump_t* l)
 R_LoadEntities
 ================
 */
+static qboolean tr_distanceCullFromMap = qfalse; // worldspawn set "distanceCull"
 static void R_LoadEntities(world_t* worldData, lump_t* l)
 {
 	const char* p = nullptr;
@@ -2930,6 +2931,7 @@ static void R_LoadEntities(world_t* worldData, lump_t* l)
 	w->lightGridSize[2] = 128;
 
 	tr.distanceCull = 12000;//DEFAULT_DISTANCE_CULL;
+	tr_distanceCullFromMap = qfalse;
 
 	p = (char*)(fileBase + l->fileofs);
 
@@ -2993,6 +2995,7 @@ static void R_LoadEntities(world_t* worldData, lump_t* l)
 		if (!Q_stricmp(keyname, "distanceCull")) {
 			int unused = sscanf(value, "%f", &tr.distanceCull);
 			(void)unused;
+			tr_distanceCullFromMap = qtrue;
 			continue;
 		}
 		// check for a different grid size
@@ -4225,6 +4228,14 @@ static void R_BuildLightGridTexture(world_t* world)
 		return;
 	}
 
+	// large worlds: the light grid can be wider than a 3D texture may be (2048 per side on most cards)
+	if (world->lightGridBounds[0] > 2048 || world->lightGridBounds[1] > 2048 || world->lightGridBounds[2] > 2048)
+	{
+		ri.Printf(PRINT_WARNING, "WARNING: light grid %ix%ix%i is too large for the volumetric fog texture, fog lighting is off\n",
+			world->lightGridBounds[0], world->lightGridBounds[1], world->lightGridBounds[2]);
+		return;
+	}
+
 	// Upload light grid as a 3D texture
 	// For volumetric fog, we don't need directionality, so just merge ambient and direct contributions
 	// I tried using the directionality with phase function and it looked bad. Created like visable noodles in the air.
@@ -4408,6 +4419,20 @@ world_t* R_LoadBSP(const char* name, int* bspIndex)
 	R_LoadVisibility(worldData, &header->lumps[LUMP_VISIBILITY]);
 	R_LoadLightGrid(worldData, &header->lumps[LUMP_LIGHTGRID]);
 	R_LoadLightGridArray(worldData, &header->lumps[LUMP_LIGHTARRAY]);
+
+	// Large worlds (MAX_WORLD_COORD 524288, WzMap): zFar is clamped to distanceCull * 1.732 and the default 12000 cut the
+	// view off at ~20800 units. A map bigger than a stock one (32768) without its own worldspawn "distanceCull" now sees
+	// all of itself; r_distanceCull > 0 overrides both.
+	if (bspIndex == nullptr)
+	{
+		const float worldDiag = Distance(worldData->bmodels[0].bounds[0], worldData->bmodels[0].bounds[1]);
+		if (!tr_distanceCullFromMap && worldDiag > 32768.0f)
+			tr.distanceCull = worldDiag / 1.732f + 1024.0f;
+		if (r_distanceCull && r_distanceCull->value > 0.0f)
+			tr.distanceCull = r_distanceCull->value;
+		tr.distanceCullSquared = tr.distanceCull * tr.distanceCull;
+		ri.Printf(PRINT_ALL, "World is %.0f units across, view distance %.0f\n", worldDiag, tr.distanceCull * 1.732f);
+	}
 
 	// Add a plane to the volumetric fog to see skyboxes and stuff
 	// This bascially makes it a height fog

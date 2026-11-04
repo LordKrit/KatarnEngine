@@ -64,6 +64,7 @@ cvar_t* r_ignore;
 cvar_t* r_detailTextures;
 
 cvar_t* r_znear;
+cvar_t* r_distanceCull;
 cvar_t* r_zproj;
 cvar_t* r_stereoSeparation;
 
@@ -1708,6 +1709,7 @@ static void R_Register(void)
 	r_lodbias = ri_Cvar_Get_NoComm("r_lodbias", "0", CVAR_ARCHIVE, "");
 	r_flares = ri_Cvar_Get_NoComm("r_flares", "1", CVAR_ARCHIVE, "");
 	r_znear = ri_Cvar_Get_NoComm("r_znear", "4", CVAR_CHEAT, "");
+	r_distanceCull = ri_Cvar_Get_NoComm("r_distanceCull", "0", CVAR_ARCHIVE, "View distance in units (0 = worldspawn distanceCull key, or the whole map when it is larger than 32768 units)");
 	ri.Cvar_CheckRange(r_znear, 0.001f, 200, qfalse);
 	r_autolodscalevalue = ri_Cvar_Get_NoComm("r_autolodscalevalue", "0", CVAR_ROM, "");
 	r_zproj = ri_Cvar_Get_NoComm("r_zproj", "64", CVAR_ARCHIVE, "");
