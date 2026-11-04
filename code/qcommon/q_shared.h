@@ -921,8 +921,8 @@ constexpr auto MAX_SECURITY_KEY_MESSSAGE = 24;
 
 constexpr auto MAX_PS_EVENTS = 2; // this must be a power of 2 unless you change some &'s to %'s -ste;
 
-#define MAX_WORLD_COORD		( 64*1024 )
-#define MIN_WORLD_COORD		( -64*1024 )
+#define MAX_WORLD_COORD		( 512*1024 )	// Sojourn: large worlds (Warzone uses the same 524288; was 64*1024)
+#define MIN_WORLD_COORD		( -512*1024 )
 #define WORLD_SIZE			( MAX_WORLD_COORD - MIN_WORLD_COORD )
 
 using waterHeightLevel_t = enum waterHeightLevel_e

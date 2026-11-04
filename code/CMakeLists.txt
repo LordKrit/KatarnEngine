@@ -30,6 +30,9 @@ endif(BuildSPGame)
 add_subdirectory("${SPDir}/rd-vanilla")
 
 #	Add rend2 JKA Renderer Project
+if(BuildSPSojourn)
+	add_subdirectory("${SPDir}/rd-sojourn")
+endif(BuildSPSojourn)
 if(BuildSPRend2 OR BuildJK2SPRdRend2)
 	add_subdirectory("${SPDir}/rd-rend2")
 endif(BuildSPRend2 OR BuildJK2SPRdRend2)

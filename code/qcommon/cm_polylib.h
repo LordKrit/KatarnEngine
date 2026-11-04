@@ -41,7 +41,7 @@ constexpr auto SIDE_CROSS = 3;
 
 constexpr auto CLIP_EPSILON = 0.1f;
 
-constexpr auto MAX_MAP_BOUNDS = 65535;
+constexpr auto MAX_MAP_BOUNDS = 524288;	// Sojourn: large worlds (was 65535)
 
 // you can define on_epsilon in the makefile as tighter
 #ifndef	ON_EPSILON

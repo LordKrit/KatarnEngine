@@ -39,6 +39,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # Customizable options
 
+option(BuildSPSojourn "rd-sojourn: large-world renderer ported from Warzone (MovieDuels-rdsp-sojourn)" ON)
 option(BuildSPRend2 "Whether to create projects for the EXPERIMENTAL SP rend2 renderer (MovieDuels-rdsp-rend2_x86.dll)" ON)
 
 option(BuildSPEngine "Whether to create projects for the SP engine (MovieDuels-SP.exe)" ON)
@@ -149,6 +150,7 @@ set(SPEngine "MovieDuels-SP.${Architecture}")
 set(SPGame "MovieDuels-game${Architecture}")
 set(SPRDVanillaRenderer "MovieDuels-rdsp_${Architecture}")
 set(SPRend2 "MovieDuels-rdsp-rend2_${Architecture}")
+set(SPSojourn "MovieDuels-rdsp-sojourn_${Architecture}")
 
 set(MPEngine "MD_MP.${Architecture}")
 set(MPVanillaRenderer "rdmp_md_${Architecture}")
