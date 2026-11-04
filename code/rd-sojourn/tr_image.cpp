@@ -2475,6 +2475,7 @@ Upload32
 ===============
 */
 extern qboolean charSet;
+extern qboolean sj_traceImages;
 static void Upload32( byte *data, int width, int height, imgType_t type, int flags,
 	qboolean lightMap, GLenum internalFormat, int *pUploadWidth, int *pUploadHeight, int texnum)
 {
@@ -2485,6 +2486,7 @@ static void Upload32( byte *data, int width, int height, imgType_t type, int fla
 	int			i, c;
 	byte		*scan = NULL;
 
+	if (sj_traceImages) ri.Printf(PRINT_ALL, "    Upload32 %ix%i (%i ms)\n", width, height, ri.Milliseconds());
 	if ( !IsPowerOfTwo (width) || !IsPowerOfTwo (height) )
 	{
 		RawImage_ScaleToPower2(&data, &width, &height, &scaled_width, &scaled_height, type, flags, &resampledBuffer);
@@ -2637,7 +2639,9 @@ static void Upload32( byte *data, int width, int height, imgType_t type, int fla
 	*pUploadWidth = scaled_width;
 	*pUploadHeight = scaled_height;
 
+	if (sj_traceImages) ri.Printf(PRINT_ALL, "    upload %ix%i fmt 0x%x (%i ms)\n", scaled_width, scaled_height, internalFormat, ri.Milliseconds());
 	RawImage_UploadTexture(scaledBuffer, 0, 0, scaled_width, scaled_height, internalFormat, type, flags, qfalse);
+	if (sj_traceImages) ri.Printf(PRINT_ALL, "    uploaded (%i ms)\n", ri.Milliseconds());
 
 done:
 
@@ -2669,6 +2673,7 @@ done:
 	}
 
 	GL_CheckErrors();
+	if (sj_traceImages) ri.Printf(PRINT_ALL, "    Upload32 done (%i ms)\n", ri.Milliseconds());
 
 	if ( scaledBuffer != NULL )
 		Hunk_FreeTempMemory( scaledBuffer );
