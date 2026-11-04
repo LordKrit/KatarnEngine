@@ -2334,6 +2334,7 @@ static qboolean ShouldUseImmutableTextures(int imageFlags, GLenum internalformat
 	return glRefConfig.immutableTextures;
 }
 
+extern qboolean sj_traceImages;
 static void RawImage_UploadTexture( byte *data, int x, int y, int width, int height, GLenum internalFormat, imgType_t type, int flags, qboolean subtexture )
 {
 	int dataFormat, dataType;
@@ -2371,8 +2372,11 @@ static void RawImage_UploadTexture( byte *data, int x, int y, int width, int hei
 		{
 			int numLevels = ((flags & IMGFLAG_MIPMAP) && r_mipMapTextures->integer) ? CalcNumMipmapLevels (width, height) : 1;
 
+			if (sj_traceImages) ri.Printf(PRINT_ALL, "      TexStorage2D levels %i (%p %p)\n", numLevels, (void*)qglTexStorage2D, (void*)qglTexSubImage2D);
 			qglTexStorage2D (GL_TEXTURE_2D, numLevels, internalFormat, width, height);
+			if (sj_traceImages) ri.Printf(PRINT_ALL, "      TexSubImage2D\n");
 			qglTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, width, height, dataFormat, dataType, data);
+			if (sj_traceImages) ri.Printf(PRINT_ALL, "      level 0 done\n");
 		}
 		else
 		{
@@ -2391,6 +2395,7 @@ static void RawImage_UploadTexture( byte *data, int x, int y, int width, int hei
 		
 		while (width > 1 || height > 1)
 		{
+			if (sj_traceImages) ri.Printf(PRINT_ALL, "      mip %i from %ix%i\n", miplevel + 1, width, height);
 			if (data)
 			{
 				if (type == IMGTYPE_NORMAL || type == IMGTYPE_NORMALHEIGHT)

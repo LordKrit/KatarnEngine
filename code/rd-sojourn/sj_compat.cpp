@@ -76,3 +76,40 @@ qboolean SkipBracedSection_Depth(const char **program, int depth)
 	} while (depth && *program);
 	return (qboolean)(depth == 0);
 }
+
+// ---- Sojourn bring-up: log access violations inside the renderer (exception code + offset into this DLL) so a crash
+// that the engine's signal handler turns into a hang still shows where it happened in qconsole.log
+#include <windows.h>
+static LONG CALLBACK SJ_VectoredHandler(PEXCEPTION_POINTERS info)
+{
+	static int reported = 0;
+	const DWORD code = info->ExceptionRecord->ExceptionCode;
+	if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_INT_DIVIDE_BY_ZERO
+		&& code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_PRIV_INSTRUCTION)
+		return EXCEPTION_CONTINUE_SEARCH;
+	if (reported++ > 2) return EXCEPTION_CONTINUE_SEARCH;
+	HMODULE self = NULL;
+	GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&SJ_VectoredHandler, &self);
+	const ULONG_PTR pc = (ULONG_PTR)info->ExceptionRecord->ExceptionAddress;
+	HMODULE where = NULL;
+	GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)pc, &where);
+	char mod[MAX_PATH] = "?";
+	if (where) GetModuleFileNameA(where, mod, sizeof(mod));
+	ri.Printf(PRINT_ALL, "^1SOJOURN CRASH: exception 0x%08lx at %s+0x%llx (self %s) addr 0x%llx\n", code, mod,
+		(unsigned long long)(pc - (ULONG_PTR)where), where == self ? "yes" : "no",
+		(unsigned long long)(info->ExceptionRecord->NumberParameters > 1 ? info->ExceptionRecord->ExceptionInformation[1] : 0));
+	// a short return-address walk of the frame pointer chain is unreliable with -O2; print the stack words that land in this DLL
+	if (self)
+	{
+		const ULONG_PTR base = (ULONG_PTR)self;
+		const ULONG_PTR *sp = (const ULONG_PTR*)info->ContextRecord->Rsp;
+		int shown = 0;
+		for (int i = 0; i < 512 && shown < 24; i++)
+		{
+			const ULONG_PTR v = sp[i];
+			if (v > base && v < base + 0x2000000) { ri.Printf(PRINT_ALL, "  stack +0x%llx\n", (unsigned long long)(v - base)); shown++; }
+		}
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+static struct SJ_InstallHandler { SJ_InstallHandler() { AddVectoredExceptionHandler(1, SJ_VectoredHandler); } } sj_installHandler;
