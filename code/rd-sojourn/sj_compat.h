@@ -278,3 +278,24 @@ using std::vector;
 using std::string;
 using std::make_pair;
 void G2_SetSurfaceOnOffFromSkin(CGhoul2Info* ghlInfo, const qhandle_t render_skin);
+
+// Sojourn: string member for structs that Warzone zeroes with memset (shaderProgram_t in tr). A zeroed std::string is a
+// valid empty string with MSVC's library but not with libstdc++ (assigning to one crashed GLSL init). This one is a single
+// heap pointer: all-zero bits = empty, trivially copyable (so the old printf("%s", program->name) calls still work).
+#include <string>
+#include <cstring>
+#include <cstdlib>
+struct sj_string
+{
+	char *p;
+	const char *c_str() const { return p ? p : ""; }
+	size_t length() const { return p ? strlen(p) : 0; }
+	size_t size() const { return length(); }
+	bool empty() const { return !p || !*p; }
+	void clear() { if (p) { free(p); p = NULL; } }
+	void set(const char *s, size_t n) { char *q = (char*)malloc(n + 1); memcpy(q, s, n); q[n] = 0; if (p) free(p); p = q; }
+	sj_string &operator=(const std::string &s) { set(s.c_str(), s.length()); return *this; }
+	sj_string &operator=(const char *s) { if (!s) clear(); else set(s, strlen(s)); return *this; }
+	operator const char *() const { return c_str(); }
+	operator std::string() const { return std::string(c_str()); }
+};

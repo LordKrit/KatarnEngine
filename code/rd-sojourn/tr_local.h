@@ -1983,7 +1983,7 @@ typedef enum
 // GLSL vertex and one GLSL fragment shader
 typedef struct shaderProgram_s
 {
-	std::string					name;
+	sj_string					name;
 
 	GLuint						program;
 	GLuint						vertexShader;
@@ -2005,11 +2005,11 @@ typedef struct shaderProgram_s
 	GLuint						instances_mvp = 0;
 	GLuint						instances_buffer = 0;
 
-	std::string					vertexText;
-	std::string					fragText;
-	std::string					tessControlText;
-	std::string					tessEvaluationText;
-	std::string					geometryText;
+	sj_string					vertexText;
+	sj_string					fragText;
+	sj_string					tessControlText;
+	sj_string					tessEvaluationText;
+	sj_string					geometryText;
 
 	// keep the glsl source code around so we can live edit it
 	char						vertexTextChar[MAX_GLSL_LENGTH];
