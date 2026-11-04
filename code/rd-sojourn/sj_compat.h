@@ -227,8 +227,11 @@ void SJ_BoxTrace(trace_t* results, const vec3_t start, const vec3_t end, const v
 
 #include <algorithm>
 // mixed-type min / max like the old macros (Warzone's code relies on them)
-template <class A, class B> inline auto min(A a, B b) -> decltype(a < b ? a : b) { return a < b ? a : b; }
-template <class A, class B> inline auto max(A a, B b) -> decltype(a > b ? a : b) { return a > b ? a : b; }
+// (by value: decltype(a < b ? a : b) is a reference for same-type arguments, which returned a dangling reference to the
+//  parameter and gave garbage - 31 mip levels for an 8x8 texture, an endless log2 loop for 256x256)
+#include <type_traits>
+template <class A, class B> inline typename std::common_type<A, B>::type min(A a, B b) { return a < b ? a : b; }
+template <class A, class B> inline typename std::common_type<A, B>::type max(A a, B b) { return a > b ? a : b; }
 
 // --- Warzone engine extensions Movie Duels SP doesn't have (never set here)
 #define RT_PLANT			(RT_MAX_REF_ENTITY_TYPE + 1)
