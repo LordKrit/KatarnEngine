@@ -26,11 +26,23 @@ void GLimp_Init(void)
 	glConfig.renderer_string = (const char*)qglGetString(GL_RENDERER);
 	glConfig.version_string = (const char*)qglGetString(GL_VERSION);
 	glConfig.extensions_string = (const char*)qglGetString(GL_EXTENSIONS);
+	if (!glConfig.extensions_string) glConfig.extensions_string = "";
+	// Warzone's GLimp_HaveExtension searches this one (its sdl/win32 GLimp_Init set it)
+	glConfigExt.glConfig = &glConfig;
+	glConfigExt.originalExtensionString = glConfig.extensions_string;
 	qglGetIntegerv(GL_MAX_TEXTURE_SIZE, &glConfig.maxTextureSize);
-	// Warzone loads everything it uses in GLimp_InitExtraExtensions (tr_extensions.cpp)
-	glConfig.maxActiveTextures = 32;
+	if (glConfig.maxTextureSize <= 0) glConfig.maxTextureSize = 0;
+	// the rest of what Warzone's GLimp_InitExtensions did (everything else is loaded in tr_extensions.cpp)
+	glConfig.maxActiveTextures = 0;
+	qglGetIntegerv(0x84E2 /*GL_MAX_TEXTURE_UNITS*/, &glConfig.maxActiveTextures);
+	if (glConfig.maxActiveTextures < 2) glConfig.maxActiveTextures = 8;
 	glConfig.textureCompression = TC_NONE;
 	glConfig.textureEnvAddAvailable = qtrue;
+	glConfig.clampToEdgeAvailable = qtrue;
+	glConfig.maxTextureFilterAnisotropy = 0;
+	if (strstr(glConfig.extensions_string, "GL_EXT_texture_filter_anisotropic"))
+		qglGetFloatv(0x84FF /*GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT*/, &glConfig.maxTextureFilterAnisotropy);
+	ri.Printf(PRINT_ALL, "GL_VENDOR: %s\nGL_RENDERER: %s\nGL_VERSION: %s\n", glConfig.vendor_string, glConfig.renderer_string, glConfig.version_string);
 }
 qboolean sj_menuIsOpen = qfalse;
 

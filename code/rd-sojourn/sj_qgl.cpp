@@ -61,8 +61,11 @@ void ( APIENTRY * qglVertex2f )(GLfloat x, GLfloat y) = NULL;
 void ( APIENTRY * qglVertex3fv )(const GLfloat *v) = NULL;
 void ( APIENTRY * qglViewport )(GLint x, GLint y, GLsizei width, GLsizei height) = NULL;
 
+void ( APIENTRY * qglGetFloatv )(GLenum pname, GLfloat *params) = NULL;
+
 void SJ_LoadQGL(void)
 {
+	*(void**)&qglGetFloatv = ri.GL_GetProcAddress("glGetFloatv");
 	*(void**)&qglActiveTextureARB = ri.GL_GetProcAddress("glActiveTextureARB");
 	*(void**)&qglAlphaFunc = ri.GL_GetProcAddress("glAlphaFunc");
 	*(void**)&qglBegin = ri.GL_GetProcAddress("glBegin");
