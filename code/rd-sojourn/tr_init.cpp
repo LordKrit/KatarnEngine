@@ -2168,22 +2168,31 @@ void R_Init( void ) {
 #endif //__VR__
 
 	R_InitImages();
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "R_InitImages", ri.Milliseconds());
 
 	FBO_Init();
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "FBO_Init", ri.Milliseconds());
 
 	int shadersStartTime = GLSL_BeginLoadGPUShaders();
+	ri.Printf(PRINT_ALL, "...GLSL_BeginLoadGPUShaders done (%i ms)\n", ri.Milliseconds());
 
 	R_InitVBOs();
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "R_InitVBOs", ri.Milliseconds());
 
 	R_InitShaders (qfalse);
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "R_InitShaders", ri.Milliseconds());
 
 	R_InitSkins();
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "R_InitSkins", ri.Milliseconds());
 
 	R_InitFonts();
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "R_InitFonts", ri.Milliseconds());
 
 	R_ModelInit();
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "R_ModelInit", ri.Milliseconds());
 
 	R_InitDecals();
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "R_InitDecals", ri.Milliseconds());
 
 #ifdef __JKA_WEATHER__
 extern void R_InitWorldEffects(void);
@@ -2191,8 +2200,10 @@ extern void R_InitWorldEffects(void);
 #endif //__JKA_WEATHER__
 
 	R_InitQueries();
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "R_InitQueries", ri.Milliseconds());
 
 	GLSL_EndLoadGPUShaders (shadersStartTime);
+	ri.Printf(PRINT_ALL, "...%s done (%i ms)\n", "GLSL_EndLoadGPUShaders", ri.Milliseconds());
 
 	err = qglGetError();
 	if ( err != GL_NO_ERROR )

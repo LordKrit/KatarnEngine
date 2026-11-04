@@ -2899,25 +2899,60 @@ image_t *R_CreateImage( const char *name, byte *pic, int width, int height, imgT
 			{
 				pVolume = new GLubyte[size];
 
-				anl::CKernel kernel;
-				anl::CArray3Dd img(XDIM, XDIM, XDIM);
-				//anl::CArray3Drgba img(XDIM, XDIM, XDIM);
-
-				anl::SMappingRanges ranges;
-				ranges.mapx0 = 0.0; ranges.mapy0 = 0.0; ranges.mapz0 = 0.0;
-				ranges.mapx1 = 10.0; ranges.mapy1 = 10.0; ranges.mapz1 = 10.0;
-				ranges.loopx0 = 0.0; ranges.loopy0 = 0.0; ranges.loopz0 = 0.0;
-				ranges.loopx1 = 10.0; ranges.loopy1 = 10.0; ranges.loopz1 = 10.0;
-
-				auto r = kernel.simplefBm(anl::BASIS_SIMPLEX/*anl::BASIS_GRADIENT*/, anl::INTERP_LINEAR/*anl::INTERP_QUINTIC*/, 6/*4*/ /* octaves */, 0.125 /* freq */, 1234 /* seed */);
-				//auto g = r;// kernel.simplefBm(anl::BASIS_SIMPLEX/*anl::BASIS_GRADIENT*/, anl::INTERP_LINEAR/*anl::INTERP_QUINTIC*/, 6/*4*/ /* octaves */, 0.250 /* freq */, 5678 /* seed */);
-				//auto b = r;// kernel.simplefBm(anl::BASIS_SIMPLEX/*anl::BASIS_GRADIENT*/, anl::INTERP_LINEAR/*anl::INTERP_QUINTIC*/, 6/*4*/ /* octaves */, 0.500 /* freq */, 101112 /* seed */);
-				//auto a = r;// kernel.simplefBm(anl::BASIS_SIMPLEX/*anl::BASIS_GRADIENT*/, anl::INTERP_LINEAR/*anl::INTERP_QUINTIC*/, 6/*4*/ /* octaves */, 1.000 /* freq */, 9101112 /* seed */);
-				auto col = kernel.scaleDomain(r, kernel.constant(1));
-				
-				//anl::mapRGBA3D(anl::SEAMLESS_XYZ, img, kernel, anl::SMappingRanges(), col);
-				anl::map3D(anl::SEAMLESS_XYZ, img, kernel, anl::SMappingRanges(), col);
-				memcpy(pVolume, img.getData(), size);
+				// Sojourn: tileable value-noise fBm (6 octaves). Warzone used the anl noise library here, which takes many
+				// minutes for the 256^3 volume and looked like a hang on the splash screen (and copied doubles as bytes).
+				{
+					const int octaves = 6;
+					float *acc = new float[size];
+					memset(acc, 0, sizeof(float) * size);
+					float amp = 1.0f, total = 0.0f;
+					unsigned int seed = 1234;
+					for (int o = 0; o < octaves; o++)
+					{
+						const int cells = 4 << o;
+						if (cells > XDIM) break;
+						float *lat = new float[cells * cells * cells];
+						for (int n = 0; n < cells * cells * cells; n++)
+						{
+							seed = seed * 1664525u + 1013904223u;
+							lat[n] = (float)((seed >> 8) & 0xFFFF) / 65535.0f;
+						}
+						const float step = (float)cells / (float)XDIM;
+						for (int z = 0; z < ZDIM; z++)
+						{
+							const float fz0 = z * step; const int z0 = (int)fz0; const int z1 = (z0 + 1) % cells;
+							float tz = fz0 - z0; tz = tz * tz * (3.0f - 2.0f * tz);
+							for (int y = 0; y < YDIM; y++)
+							{
+								const float fy0 = y * step; const int y0 = (int)fy0; const int y1 = (y0 + 1) % cells;
+								float ty = fy0 - y0; ty = ty * ty * (3.0f - 2.0f * ty);
+								float *row = acc + (z * YDIM + y) * XDIM;
+								for (int x = 0; x < XDIM; x++)
+								{
+									const float fx0 = x * step; const int x0 = (int)fx0; const int x1 = (x0 + 1) % cells;
+									float tx = fx0 - x0; tx = tx * tx * (3.0f - 2.0f * tx);
+#define SJ_L(a, b, c) lat[((c) * cells + (b)) * cells + (a)]
+									const float c00 = SJ_L(x0, y0, z0) + (SJ_L(x1, y0, z0) - SJ_L(x0, y0, z0)) * tx;
+									const float c10 = SJ_L(x0, y1, z0) + (SJ_L(x1, y1, z0) - SJ_L(x0, y1, z0)) * tx;
+									const float c01 = SJ_L(x0, y0, z1) + (SJ_L(x1, y0, z1) - SJ_L(x0, y0, z1)) * tx;
+									const float c11 = SJ_L(x0, y1, z1) + (SJ_L(x1, y1, z1) - SJ_L(x0, y1, z1)) * tx;
+#undef SJ_L
+									const float c0 = c00 + (c10 - c00) * ty;
+									const float c1 = c01 + (c11 - c01) * ty;
+									row[x] += amp * (c0 + (c1 - c0) * tz);
+								}
+							}
+						}
+						delete[] lat;
+						total += amp;
+						amp *= 0.5f;
+					}
+					float lo = 1e9f, hi = -1e9f;
+					for (int n = 0; n < size; n++) { if (acc[n] < lo) lo = acc[n]; if (acc[n] > hi) hi = acc[n]; }
+					const float sc = (hi > lo) ? 255.0f / (hi - lo) : 0.0f;
+					for (int n = 0; n < size; n++) pVolume[n] = (GLubyte)((acc[n] - lo) * sc);
+					delete[] acc;
+				}
 
 				// Write file so that we don't need to generate on each load...
 				ri.FS_WriteFile(filename, pVolume, size);
