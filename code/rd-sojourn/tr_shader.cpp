@@ -9652,7 +9652,7 @@ static void ScanAndLoadShaderFiles( void )
 
 		// Do a simple check on the shader structure in that file to make sure one bad shader file cannot fuck up all other shaders.
 		p = buffers[i];
-		COM_BeginParseSession(filename);
+		COM_BeginParseSession();
 		while(1)
 		{
 			token = COM_ParseExt(&p, qtrue);
@@ -9687,6 +9687,7 @@ static void ScanAndLoadShaderFiles( void )
 				break;
 			}
 		}
+		COM_EndParseSession(); // Sojourn: SP parse sessions nest (MP's just reset); one per shader file overflowed the stack
 
 
 		if (buffers[i])

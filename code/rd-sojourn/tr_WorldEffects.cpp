@@ -2454,7 +2454,8 @@ void RE_WorldEffectCommand_REAL(const char *command, qboolean noHelp)
 		return;
 	}
 	
-	COM_BeginParseSession ("RE_WorldEffectCommand");
+	// Sojourn: SP parse sessions nest and must be ended (MP's just reset) - end it on every return
+	struct SJParseGuard { SJParseGuard() { COM_BeginParseSession(); } ~SJParseGuard() { COM_EndParseSession(); } } sjParseGuard;
 
 	const char	*token;//, *origCommand;
 

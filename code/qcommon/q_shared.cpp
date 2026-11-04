@@ -131,6 +131,11 @@ void COM_ParseInit()
 
 void COM_BeginParseSession()
 {
+#ifdef RD_SOJOURN
+	// rd-sojourn (Warzone code) begins sessions like MP: no nesting, often without an end - reuse the top slot
+	if (parseDataCount >= MAX_PARSE_DATA - 1)
+		parseDataCount = MAX_PARSE_DATA - 2;
+#endif
 	parseDataCount++;
 #ifdef _DEBUG
 	if (parseDataCount >= MAX_PARSE_DATA)
@@ -145,6 +150,10 @@ void COM_BeginParseSession()
 
 void COM_EndParseSession()
 {
+#ifdef RD_SOJOURN
+	if (parseDataCount < 0)
+		return;
+#endif
 	parseDataCount--;
 #ifdef _DEBUG
 	assert(parseDataCount >= -1 && "COM_EndParseSession: called without a starting COM_BeginParseSession.\n");
@@ -153,6 +162,10 @@ void COM_EndParseSession()
 
 int COM_GetCurrentParseLine(void)
 {
+#ifdef RD_SOJOURN
+	if (parseDataCount < 0)
+		COM_BeginParseSession(); // MP-style callers parse without a session
+#endif
 	if (parseDataCount < 0)
 		Com_Error(ERR_FATAL, "COM_GetCurrentParseLine: parseDataCount < 0 (be sure to call COM_BeginParseSession!)");
 
@@ -183,6 +196,10 @@ const char* SkipWhitespace(const char* data, qboolean* hasNewLines)
 {
 	int c = 0;
 
+#ifdef RD_SOJOURN
+	if (parseDataCount < 0)
+		COM_BeginParseSession();
+#endif
 	if (parseDataCount < 0)
 		Com_Error(ERR_FATAL, "SkipWhitespace: parseDataCount < 0");
 
@@ -314,6 +331,10 @@ char* COM_ParseExt(const char** data_p, const qboolean allow_line_breaks)
 		return com_token;
 	}
 
+#ifdef RD_SOJOURN
+	if (parseDataCount < 0)
+		COM_BeginParseSession(); // MP-style callers parse without a session
+#endif
 	if (parseDataCount < 0)
 		Com_Error(ERR_FATAL, "COM_ParseExt: parseDataCount < 0 (be sure to call COM_BeginParseSession!)");
 
@@ -569,6 +590,10 @@ void SkipRestOfLine(const char** data)
 {
 	int c = 0;
 
+#ifdef RD_SOJOURN
+	if (parseDataCount < 0)
+		COM_BeginParseSession();
+#endif
 	if (parseDataCount < 0)
 		Com_Error(ERR_FATAL, "SkipRestOfLine: parseDataCount < 0");
 
