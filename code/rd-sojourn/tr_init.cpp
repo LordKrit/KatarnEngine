@@ -2002,7 +2002,7 @@ void R_Register( void )
 	r_aviMotionJpegQuality = ri.Cvar_Get("r_aviMotionJpegQuality", "90", CVAR_ARCHIVE);
 	r_screenshotJpegQuality = ri.Cvar_Get("r_screenshotJpegQuality", "90", CVAR_ARCHIVE);
 
-	r_maxpolys = ri.Cvar_Get( "r_maxpolys", va("%d", 8192), 0);
+	r_maxpolys = ri.Cvar_Get( "r_maxpolys", va("%d", MAX_POLYS), 0); // Sojourn: each srfPoly_t holds MAX_POLYVERTS verts inline (8192 x 3000 = 600 MB)
 
 	r_shadowMaxDepthError = ri.Cvar_Get("r_shadowMaxDepthError", "0.000000059604644775390625", CVAR_ARCHIVE);
 	r_shadowSolidityValue = ri.Cvar_Get("r_shadowSolidityValue", "0.5", CVAR_ARCHIVE);

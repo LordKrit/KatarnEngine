@@ -1156,7 +1156,7 @@ vec3 getIBLCubeMap(vec3 dir, float lod, vec4 position)
 	float NE = clamp(length(dot(N, E)), 0.0, 1.0);
 
 #ifdef _CUBEMAPS_
-	if (CUBEMAP_ENABLED > 0.0 && && NE > 0.0 && u_CubeMapStrength > 0.0)
+	if (CUBEMAP_ENABLED > 0.0 && NE > 0.0 && u_CubeMapStrength > 0.0)
 	{// Cubemaps enabled...
 		float curDist = distance(u_ViewOrigin.xyz, position.xyz);
 		float cubeDist = distance(u_CubeMapInfo.xyz, position.xyz);
@@ -1177,7 +1177,7 @@ vec3 getIBLCubeMap(vec3 dir, float lod, vec4 position)
 		if (cubeFade > 0.0)
 		{
 			skyColor = textureLod(u_CubeMap, rayDir + parallax, lod).rgb;
-			skyColor *= clamp(NE * cubeFade * u_CubeMapStrength, 0.0, 1.0));
+			skyColor *= clamp(NE * cubeFade * u_CubeMapStrength, 0.0, 1.0);
 		}
 
 		if (length(skyColor) <= 0.0)

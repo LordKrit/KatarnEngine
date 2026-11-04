@@ -174,9 +174,9 @@
 // --- MP renderer types missing from the SP headers
 #ifndef MAX_POLYVERTS
 #ifndef MAX_POLYS
-#define MAX_POLYS 8192
+#define MAX_POLYS 2048
 #endif
-#define MAX_POLYVERTS 3000
+#define MAX_POLYVERTS 1000
 #endif
 #ifndef MAX_KEYS
 #define MAX_KEYS 512
