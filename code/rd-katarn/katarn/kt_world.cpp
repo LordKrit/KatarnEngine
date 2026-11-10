@@ -3,6 +3,7 @@
 #include "kt_render.h"
 #include "kworld_format.h"
 #include "../tr_local.h"
+cvar_t* KtCvar(const char* name, const char* value, int flags);   // kt_render.cpp
 #include <math.h>
 #include <stdio.h>
 #include <vector>
@@ -58,9 +59,9 @@ static D3D12_SHADER_BYTECODE BCode(const Shader& s)
 static bool CreateWorldPipelines()
 {
 	if (W.pipelines) return true;
-	kt_lodError = ri.Cvar_Get("kt_lodError", "1.0", CVAR_ARCHIVE);
-	kt_lodLock = ri.Cvar_Get("kt_lodLock", "-1", 0);
-	kt_worldPath = ri.Cvar_Get("kt_worldPath", "", CVAR_ARCHIVE);   // extra folder holding <map>.kworld (checked first)
+	kt_lodError = KtCvar("kt_lodError", "1.0", CVAR_ARCHIVE);
+	kt_lodLock = KtCvar("kt_lodLock", "-1", 0);
+	kt_worldPath = KtCvar("kt_worldPath", "", CVAR_ARCHIVE);   // extra folder holding <map>.kworld (checked first)
 	W.vs = R_Shader("world", "VS", "vs_5_1");
 	W.ps = R_Shader("world", "PS", "ps_5_1");
 	W.shadowPS = R_Shader("world", "ShadowPS", "ps_5_1");

@@ -13,6 +13,16 @@
 #include "kt_world.h"
 #include "kt_shaders_gen.h"
 #include "../tr_local.h"
+
+// SP and MP renderers share this module; MP's Cvar_Get takes a description
+cvar_t* KtCvar(const char* name, const char* value, int flags)
+{
+#ifdef KT_MP
+	return ri.Cvar_Get(name, value, flags, "");
+#else
+	return ri.Cvar_Get(name, value, flags);
+#endif
+}
 #include <math.h>
 #include <unordered_map>
 #include <vector>
@@ -35,43 +45,43 @@ static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetr
 
 static void RegisterCvars()
 {
-	kt_debug = ri.Cvar_Get("kt_debug", "0", CVAR_LATCH);
-	kt_ssao = ri.Cvar_Get("kt_ssao", "1", CVAR_ARCHIVE);
-	kt_shadows = ri.Cvar_Get("kt_shadows", "1", CVAR_ARCHIVE);
-	kt_shadowRes = ri.Cvar_Get("kt_shadowRes", "2048", CVAR_ARCHIVE | CVAR_LATCH);
-	kt_shadowDist = ri.Cvar_Get("kt_shadowDist", "6000", CVAR_ARCHIVE);
-	kt_bloom = ri.Cvar_Get("kt_bloom", "0.06", CVAR_ARCHIVE);
-	kt_exposure = ri.Cvar_Get("kt_exposure", "0", CVAR_ARCHIVE);
-	kt_tonemap = ri.Cvar_Get("kt_tonemap", "1", CVAR_ARCHIVE);           // HD worlds: 1 AgX (Blender's look), 0 ACES
-	kt_fogScale = ri.Cvar_Get("kt_fogScale", "0.25", CVAR_ARCHIVE);      // HD world fog density (Blender renders have none)
-	kt_manualExposure = ri.Cvar_Get("kt_manualExposure", "0", CVAR_ARCHIVE);
-	kt_fxaa = ri.Cvar_Get("kt_fxaa", "1", CVAR_ARCHIVE);
-	kt_glowBoost = ri.Cvar_Get("kt_glowBoost", "3", CVAR_ARCHIVE);
-	kt_debugView = ri.Cvar_Get("kt_debugView", "0", 0);
-	kt_shaderDir = ri.Cvar_Get("kt_shaderDir", "", CVAR_ARCHIVE | CVAR_LATCH);
-	kt_legacyDeferred = ri.Cvar_Get("kt_legacyDeferred", "1", CVAR_ARCHIVE);
-	kt_sun = ri.Cvar_Get("kt_sun", "1", CVAR_ARCHIVE);
-	kt_fog = ri.Cvar_Get("kt_fog", "1", CVAR_ARCHIVE);
-	kt_aoRadius = ri.Cvar_Get("kt_aoRadius", "40", CVAR_ARCHIVE);
-	kt_aoIntensity = ri.Cvar_Get("kt_aoIntensity", "1.0", CVAR_ARCHIVE);
-	kt_lights = ri.Cvar_Get("kt_lights", "1", CVAR_ARCHIVE);
-	kt_dlightScale = ri.Cvar_Get("kt_dlightScale", "1.0", CVAR_ARCHIVE);
-	kt_speeds = ri.Cvar_Get("kt_speeds", "0", 0);
-	kt_contactShadows = ri.Cvar_Get("kt_contactShadows", "1", CVAR_ARCHIVE); // screen-space contact shadows (sun)
-	kt_lightShadows = ri.Cvar_Get("kt_lightShadows", "1", CVAR_ARCHIVE);     // screen-space shadows for sabers / dynamic lights
-	kt_dynGlow = ri.Cvar_Get("kt_dynamicGlow", "1", CVAR_ARCHIVE);   // rend2-style dynamic glow strength (glow stages blurred into the bloom)
-	kt_ssr = ri.Cvar_Get("kt_ssr", "1", CVAR_ARCHIVE);                 // screen-space reflections (HD worlds)
-	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
-	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
-	kt_saberGlow = ri.Cvar_Get("kt_saberGlowScale", "1", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene (1 = as authored, like rend2)
-	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);
-	kt_probes = ri.Cvar_Get("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
-	kt_probeScale = ri.Cvar_Get("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
-	kt_parallax = ri.Cvar_Get("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
-	kt_wind = ri.Cvar_Get("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)   // 1: Katarn draws its own procedural blades instead of the game's
+	kt_debug = KtCvar("kt_debug", "0", CVAR_LATCH);
+	kt_ssao = KtCvar("kt_ssao", "1", CVAR_ARCHIVE);
+	kt_shadows = KtCvar("kt_shadows", "1", CVAR_ARCHIVE);
+	kt_shadowRes = KtCvar("kt_shadowRes", "2048", CVAR_ARCHIVE | CVAR_LATCH);
+	kt_shadowDist = KtCvar("kt_shadowDist", "6000", CVAR_ARCHIVE);
+	kt_bloom = KtCvar("kt_bloom", "0.06", CVAR_ARCHIVE);
+	kt_exposure = KtCvar("kt_exposure", "0", CVAR_ARCHIVE);
+	kt_tonemap = KtCvar("kt_tonemap", "1", CVAR_ARCHIVE);           // HD worlds: 1 AgX (Blender's look), 0 ACES
+	kt_fogScale = KtCvar("kt_fogScale", "0.25", CVAR_ARCHIVE);      // HD world fog density (Blender renders have none)
+	kt_manualExposure = KtCvar("kt_manualExposure", "0", CVAR_ARCHIVE);
+	kt_fxaa = KtCvar("kt_fxaa", "1", CVAR_ARCHIVE);
+	kt_glowBoost = KtCvar("kt_glowBoost", "3", CVAR_ARCHIVE);
+	kt_debugView = KtCvar("kt_debugView", "0", 0);
+	kt_shaderDir = KtCvar("kt_shaderDir", "", CVAR_ARCHIVE | CVAR_LATCH);
+	kt_legacyDeferred = KtCvar("kt_legacyDeferred", "1", CVAR_ARCHIVE);
+	kt_sun = KtCvar("kt_sun", "1", CVAR_ARCHIVE);
+	kt_fog = KtCvar("kt_fog", "1", CVAR_ARCHIVE);
+	kt_aoRadius = KtCvar("kt_aoRadius", "40", CVAR_ARCHIVE);
+	kt_aoIntensity = KtCvar("kt_aoIntensity", "1.0", CVAR_ARCHIVE);
+	kt_lights = KtCvar("kt_lights", "1", CVAR_ARCHIVE);
+	kt_dlightScale = KtCvar("kt_dlightScale", "1.0", CVAR_ARCHIVE);
+	kt_speeds = KtCvar("kt_speeds", "0", 0);
+	kt_contactShadows = KtCvar("kt_contactShadows", "1", CVAR_ARCHIVE); // screen-space contact shadows (sun)
+	kt_lightShadows = KtCvar("kt_lightShadows", "1", CVAR_ARCHIVE);     // screen-space shadows for sabers / dynamic lights
+	kt_dynGlow = KtCvar("kt_dynamicGlow", "1", CVAR_ARCHIVE);   // rend2-style dynamic glow strength (glow stages blurred into the bloom)
+	kt_ssr = KtCvar("kt_ssr", "1", CVAR_ARCHIVE);                 // screen-space reflections (HD worlds)
+	kt_volumetric = KtCvar("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
+	kt_saberLight = KtCvar("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
+	kt_saberGlow = KtCvar("kt_saberGlowScale", "1", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene (1 = as authored, like rend2)
+	kt_saberDraw = KtCvar("kt_saberDraw2", "0", CVAR_ARCHIVE);
+	kt_probes = KtCvar("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
+	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
+	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
+	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)   // 1: Katarn draws its own procedural blades instead of the game's
 
 	// settings saved by older builds (tuning experiments) are put back to the current defaults once
-	cvar_t* ver = ri.Cvar_Get("kt_configVersion", "0", CVAR_ARCHIVE);
+	cvar_t* ver = KtCvar("kt_configVersion", "0", CVAR_ARCHIVE);
 	if (ver->integer < 2) {
 		const char* reset[][2] = { { "kt_bloom", "0.06" }, { "kt_dynamicGlow", "1" }, { "kt_glowBoost", "3" }, { "kt_saberGlowScale", "1" },
 			{ "kt_saberLight", "1" }, { "kt_saberDraw2", "0" }, { "kt_exposure", "0" }, { "kt_manualExposure", "0" } };
@@ -477,7 +487,7 @@ bool R_Init(void* hwnd, int width, int height)
 	InstallCrashHandler();
 	RegisterCvars();
 	Config cfg;
-	cvar_t* swap = ri.Cvar_Get("r_swapInterval", "0", CVAR_ARCHIVE);
+	cvar_t* swap = KtCvar("r_swapInterval", "0", CVAR_ARCHIVE);
 	cfg.vsync = swap->integer != 0;
 	cfg.debug = kt_debug->integer != 0;
 	std::string err;
