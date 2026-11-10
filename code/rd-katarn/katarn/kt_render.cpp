@@ -1108,7 +1108,7 @@ static void RenderWorldView()
 			if (i > 0) { dw = Q_max(1u, (uint32_t)(R.bloomDown[i - 1].width / 2)); dh = Q_max(1u, (uint32_t)(R.bloomDown[i - 1].height / 2)); }
 			dw = Q_min(dw, d.width); dh = Q_min(dh, d.height);
 			uint32_t k[8] = { src, d.uav[0], 0, 0, d.width, d.height, 0, i == 0 ? 0u : 1u };
-			if (i == 0) { k[2] = R.glow.srv; float gs = kt_dynGlow->value / Q_max(1e-3f, kt_bloom->value); memcpy(&k[6], &gs, 4); }
+			if (i == 0) { k[2] = R.glow.srv; float gs = kt_dynGlow->value / (Q_max(1e-3f, kt_bloom->value) * (float)R.bloomLevels); memcpy(&k[6], &gs, 4); }
 			Dispatch(cl, R.csBloomDown, k, 8, (d.width + 7) / 8, (d.height + 7) / 8);
 			Transition(cl, d, srvAll);
 			src = d.srv;
