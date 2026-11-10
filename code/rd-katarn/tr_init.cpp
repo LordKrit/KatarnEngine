@@ -2099,6 +2099,7 @@ extern "C" Q_EXPORT refexport_t* QDECL GetRefAPI(const int api_version, const re
 	G2EX(SetBoneAnglesOffset);
 	G2EX(SetBoneAnglesIndex);
 	G2EX(SetBoneAnglesMatrix);
+	G2EX(SetBoneAnglesMatrixIndex);   // face rigs (cg_face) call it: a null pointer here crashed BF2 heads
 	G2EX(SetBoneIKState);
 	G2EX(SetGhoul2ModelFlags);
 	G2EX(SetGhoul2ModelIndexes);

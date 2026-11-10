@@ -1860,6 +1860,10 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	}
 	shaderStage_t* st = &input->xstages[0];
 	if (!st->active || st->bundle[0].isLightmap || (st->ss && st->ss->surfaceSpriteType)) return 0;
+	// self-lit content stays forward, as the old renderer drew it: glow stages (saber blades, lights) and models whose
+	// colour is not lit (rgbGen identity / const / entity / vertex on an entity = full bright)
+	if (st->glow) return 0;
+	if (!world && st->rgbGen != CGEN_LIGHTING_DIFFUSE && st->rgbGen != CGEN_LIGHTING_DIFFUSE_ENTITY) return 0;
 	image_t* albedo = KT_StageImage(&st->bundle[0]);
 	if (!albedo) return 0;
 	const uint32_t bits = st->stateBits;
