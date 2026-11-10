@@ -1849,12 +1849,16 @@ static image_t* KT_StageImage(const textureBundle_t* b)
 static uint32_t KT_TryDeferred(shaderCommands_t* input)
 {
 	static cvar_t* kt_legacyDeferredVar = nullptr;
-	if (!kt_legacyDeferredVar) kt_legacyDeferredVar = ri.Cvar_Get("kt_legacyDeferred", "1", CVAR_ARCHIVE);
-	if (!kt_legacyDeferredVar->integer || backEnd.projection2D || !kt::R_ViewIsWorld() || !kt::World_Active()) return 0;
+	if (!kt_legacyDeferredVar) kt_legacyDeferredVar = ri.Cvar_Get("kt_legacyDeferred2", "2", CVAR_ARCHIVE);
+	// 1: HD worlds; 2 (default): also characters and models in old BSP maps, lit from the map's light grid like rend2
+	if (!kt_legacyDeferredVar->integer || backEnd.projection2D || !kt::R_ViewIsWorld()) return 0;
+	const bool bspMode = !kt::World_Active();
+	if (bspMode && kt_legacyDeferredVar->integer < 2) return 0;
 	shader_t* sh = input->shader;
 	if (sh->sort > SS_OPAQUE || sh->sky || sh->polygonOffset || sh == tr.distortionShader || g_bRenderGlowingObjects) return 0;
 	const trRefEntity_t* ent = backEnd.currentEntity;
 	bool world = !ent || ent == &tr.worldEntity;
+	if (bspMode && world) return 0;   // BSP surfaces keep their lightmaps in the forward path
 	if (!world) {
 		const int rf = ent->e.renderfx;
 		if (rf & (RF_DISINTEGRATE1 | RF_DISINTEGRATE2 | RF_DISTORTION | RF_FORCE_ENT_ALPHA | RF_DEPTHHACK | RF_NODEPTH)) return 0;
@@ -1952,6 +1956,15 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	else if (sh->cullType == CT_BACK_SIDED) d.cull = backEnd.viewParms.isMirror ? 1 : 2;
 	else d.cull = backEnd.viewParms.isMirror ? 2 : 1;
 	d.castShadow = world || !(ent->e.renderfx & RF_NOSHADOW);
+	if (bspMode && ent) {
+		// light grid (as rend2 / the old renderer light models): ambient + one directed light, in world space
+		for (int k = 0; k < 3; k++) {
+			d.gridAmbient[k] = ent->ambientLight[k];
+			d.gridDirected[k] = ent->directedLight[k];
+			d.gridDir[k] = ent->e.axis[0][k] * ent->lightDir[0] + ent->e.axis[1][k] * ent->lightDir[1] + ent->e.axis[2][k] * ent->lightDir[2];
+		}
+		d.flags |= 16;
+	}
 	kt::R_AppendDeferred(d);
 	return taken;
 }

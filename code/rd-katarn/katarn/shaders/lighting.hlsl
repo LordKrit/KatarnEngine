@@ -308,7 +308,7 @@ void CS(uint3 id : SV_DispatchThreadID)
 	}
 	if (baked) {
 		Lo += g2 * ao;
-		Lo += spec * env * specOcc * 0.35;
+		Lo += spec * env * specOcc * 0.35 * skyParams.w;   // (old BSP maps: their light grid / lightmaps carry it)
 	}
 	else {
 		Lo += SkyAmbient(N) * diff * ao * skyParams.z;

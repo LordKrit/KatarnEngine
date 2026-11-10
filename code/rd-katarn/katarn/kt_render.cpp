@@ -670,7 +670,7 @@ void R_BeginView(const ViewDesc& v)
 	Norm3(sd);
 	c.sunDir[0] = sd[0]; c.sunDir[1] = sd[1]; c.sunDir[2] = sd[2]; c.sunDir[3] = Q_max(0.004f, env.sunAngle);
 	c.sunColor[0] = env.sunColor[0]; c.sunColor[1] = env.sunColor[1]; c.sunColor[2] = env.sunColor[2];
-	c.sunColor[3] = kt_sun->integer ? env.sunIntensity : 0.0f;
+	c.sunColor[3] = (kt_sun->integer && World_Active()) ? env.sunIntensity : 0.0f;   // old BSP maps: their own baked light only
 	c.skyParams[0] = env.haze; c.skyParams[1] = env.skyIntensity; c.skyParams[2] = env.ambient; c.skyParams[3] = World_Active() ? 1.0f : 0.0f;
 	if (env.envSrv) { c.indices2[0] = env.envSrv; c.skyParams[1] = env.envStrength; float rs = env.envLight / Q_max(1e-4f, env.envStrength); memcpy(&c.indices2[2], &rs, 4); }
 	if (env.hasSH) { c.indices2[1] = 1; for (int k = 0; k < 9; k++) for (int q = 0; q < 3; q++) c.ambientSH[k][q] = env.sh[k][q]; }
@@ -799,6 +799,9 @@ void R_AppendDeferred(const DeferredDraw& d)
 		uint32_t pbr[4] = { R_TextureSrv(tn, false), R_TextureSrv(tr2, false), (uint32_t)d.rmoOrder, 0 };
 		memcpy(&pbr[3], &d.skin, 4);
 		memcpy(c + 160, pbr, 16);
+		float grid[12] = { d.gridAmbient[0], d.gridAmbient[1], d.gridAmbient[2], 0, d.gridDirected[0], d.gridDirected[1], d.gridDirected[2], 0,
+			d.gridDir[0], d.gridDir[1], d.gridDir[2], 0 };
+		memcpy(c + 176, grid, 48);
 	}
 	DeferredRec r;
 	r.vb = vb.gpu; r.ib = ib.gpu; r.cb = cb.gpu;

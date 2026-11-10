@@ -101,6 +101,7 @@ struct DeferredDraw {
 	uint32_t normalTex, rmoTex;                // GL names, 0 = none (rend2-style PBR maps)
 	int rmoOrder;
 	float skin;                                // subsurface strength (rend2 skin keyword), 0 = none
+	float gridAmbient[3], gridDirected[3], gridDir[3];   // flag 16: light-grid lighting (0-255 scale, world-space direction)
 	uint32_t flags;                            // see legacy_gbuffer.hlsl gflags
 	float alphaRef, roughness, metallic, bakedScale;
 	float tint[4];
