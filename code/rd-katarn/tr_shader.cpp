@@ -1667,7 +1667,15 @@ static qboolean ParseStage(shaderStage_t* stage, const char** text)
 			}
 			SkipRestOfLine(text);
 		}
-		else if (!Q_stricmp(token, "skin") || !Q_stricmp(token, "normalScale") || !Q_stricmp(token, "specularScale") || !Q_stricmp(token, "parallaxDepth")
+		else if (!Q_stricmp(token, "skin"))
+		{
+			// skin <r> <g> <b> <strength> (scatter colour is fixed in Katarn's lighting; keep the strength)
+			float v[4] = { 1, 0.45f, 0.3f, 0.5f };
+			for (int k = 0; k < 4; k++) { token = COM_ParseExt(text, qfalse); if (!token[0]) break; v[k] = (float)atof(token); }
+			stage->ktSkin = v[3] > 0 ? v[3] : 0.5f;
+			SkipRestOfLine(text);
+		}
+		else if (!Q_stricmp(token, "normalScale") || !Q_stricmp(token, "specularScale") || !Q_stricmp(token, "parallaxDepth")
 			|| !Q_stricmp(token, "gloss") || !Q_stricmp(token, "roughness") || !Q_stricmp(token, "specularReflectance") || !Q_stricmp(token, "specularExponent")
 			|| !Q_stricmp(token, "cubeMapScale") || !Q_stricmp(token, "parallaxBias") || !Q_stricmp(token, "metallic") || !Q_stricmp(token, "emissiveScale"))
 		{

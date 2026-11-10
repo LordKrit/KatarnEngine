@@ -1934,6 +1934,7 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	d.normalTex = st->ktNormal ? st->ktNormal->texnum : 0;
 	d.rmoTex = st->ktRmo ? st->ktRmo->texnum : 0;
 	d.rmoOrder = st->ktRmoOrder;
+	d.skin = st->ktSkin;
 	d.specTex = st->ktSpec ? st->ktSpec->texnum : 0;
 	d.flags = flags;
 	d.roughness = world ? 0.7f : 0.78f;   // characters: cloth / skin (0.55 read as plastic)

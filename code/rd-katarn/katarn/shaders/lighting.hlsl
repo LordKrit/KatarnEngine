@@ -187,8 +187,9 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 g2 = Tex2D[indices0.z].Load(int3(px, 0)).rgb;
 	float3 N = DecodeNormal(g1.xy);
 	bool baked = g1.z < 0;
-	bool plainLegacy = g1.w > 1.5;               // old model without PBR maps
-	float rough = abs(g1.z), metal = plainLegacy ? g1.w - 2.0 : g1.w;
+	bool skin = g1.w > 3.5;                      // rend2 skin keyword: soft, subsurface-scattered diffuse
+	bool plainLegacy = !skin && g1.w > 1.5;      // old model without PBR maps
+	float rough = abs(g1.z), metal = skin ? g1.w - 4.0 : plainLegacy ? g1.w - 2.0 : g1.w;
 	float3 albedo = g0.rgb;
 	float ao = g0.a;
 	if (lflags & 1) ao *= Tex2D[aoTex].Load(int3(px, 0)).r;
@@ -199,7 +200,16 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 Lo = 0;
 	// sun
 	float3 L = sunDir.xyz;
-	if (sunColor.w > 0 && dot(N, L) > 0) {
+	if (skin && sunColor.w > 0) {
+		// wrapped diffuse with a warm scattered terminator (light bleeding through skin), GGX on top
+		float nl = dot(N, L);
+		float wrap = saturate((nl + 0.45) / 1.45);
+		float sh = Shadow(P, N, viewZ);
+		float3 scatter = lerp(float3(1.0, 0.35, 0.22), 1.0, saturate(nl * 2.0));
+		Lo += diff / PI * wrap * scatter * sunColor.rgb * sunColor.w * lerp(0.35, 1.0, sh);
+		if (nl > 0) Lo += (Brdf(N, V, L, 0, f0, rough)) * sunColor.rgb * sunColor.w * sh;
+	}
+	else if (sunColor.w > 0 && dot(N, L) > 0) {
 		float sh = Shadow(P, N, viewZ);
 		Lo += Brdf(N, V, L, diff, f0, rough) * sunColor.rgb * sunColor.w * sh;
 	}

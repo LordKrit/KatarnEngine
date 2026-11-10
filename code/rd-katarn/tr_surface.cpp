@@ -409,6 +409,11 @@ static void DoLine_Oriented(const vec3_t start, const vec3_t end, const vec3_t u
 //-----------------
 static void RB_SurfaceLine()
 {
+	if (kt::SaberDraw() && tess.shader) {
+		// the saber core line (KatarnEngine draws the whole blade)
+		char n[MAX_QPATH]; Q_strncpyz(n, tess.shader->name, sizeof(n)); Q_strlwr(n);
+		if (strstr(n, "saber") && !strstr(n, "trail")) return;
+	}
 	vec3_t		right;
 	vec3_t		start, end;
 	vec3_t		v1, v2;
@@ -1282,6 +1287,11 @@ static void RB_SurfaceSaberGlow()
 			for (auto& m : map) if (strstr(n, m.k)) { rgba[0] = m.c[0]; rgba[1] = m.c[1]; rgba[2] = m.c[2]; break; }
 		}
 		if (rgba[0] | rgba[1] | rgba[2]) kt::R_AddSaberLight(e->origin, e->axis[0], e->saberLength, rgba);
+		if (kt::SaberDraw()) {
+			// KatarnEngine draws the blade itself (core + glow, HDR); the glow sprites are skipped
+			kt::R_AddSaberBlade(e->origin, e->axis[0], e->saberLength + e->radius * 0.5f, e->radius, rgba);
+			return;
+		}
 	}
 
 	// Render the glow part of the blade

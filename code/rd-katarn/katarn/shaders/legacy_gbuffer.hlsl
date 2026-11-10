@@ -27,7 +27,7 @@ cbuffer DrawG : register(b2)
 	uint normalTex;     // rend2-style normal map (tangent space, from the stage's normalMap), 0 = none
 	uint rmoTex;        // roughness / metal / occlusion map, 0 = none
 	uint rmoOrder;      // 0 rmo, 1 orm
-	uint pbrPad;
+	float skinAmount;   // rend2 skin keyword (subsurface), 0 = none
 };
 
 struct VsIn { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float2 lmuv : TEXCOORD1; float4 color : COLOR; };
@@ -93,7 +93,7 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	GBufferOut o;
 	o.albedo = float4(a.rgb, matAO);
 	rough = clamp(rough, 0.045, 1.0);
-	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (authored ? 0.0 : 2.0));
+	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (skinAmount > 0 ? 4.0 : (authored ? 0.0 : 2.0)));
 	o.emissive = float4(hasBaked ? baked * a.rgb : 0, 0);
 	return o;
 }

@@ -26,7 +26,7 @@ void GL_ResetState();
 // ------------------------------------------------------------------------------------------------ cvars
 static cvar_t* kt_debug, * kt_ssao, * kt_shadows, * kt_shadowRes, * kt_shadowDist, * kt_bloom, * kt_exposure, * kt_manualExposure;
 static cvar_t* kt_fxaa, * kt_glowBoost, * kt_debugView, * kt_shaderDir, * kt_legacyDeferred, * kt_sun, * kt_fog, * kt_aoRadius, * kt_aoIntensity;
-static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow;
+static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
 static void RegisterCvars()
 {
@@ -53,7 +53,8 @@ static void RegisterCvars()
 	kt_ssr = ri.Cvar_Get("kt_ssr", "1", CVAR_ARCHIVE);                 // screen-space reflections (HD worlds)
 	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
 	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
-	kt_saberGlow = ri.Cvar_Get("kt_saberGlow", "2", CVAR_ARCHIVE);     // brightness of the blade glow sprites in the HDR scene
+	kt_saberGlow = ri.Cvar_Get("kt_saberGlow", "2", CVAR_ARCHIVE);     // blade brightness
+	kt_saberDraw = ri.Cvar_Get("kt_saberDraw", "1", CVAR_ARCHIVE);     // 1: Katarn draws the blades (the old glow sprites / core lines are skipped)
 }
 
 // ------------------------------------------------------------------------------------------------ math
@@ -126,6 +127,9 @@ static struct RState {
 	Texture hdrPrev;                 // last frame's lit scene (screen-space reflections)
 	bool hdrPrevValid = false;
 	std::vector<GpuLight> tubes;     // lightsaber blades this view (line lights)
+	struct Blade { float a[3], glowR, b[3], coreR, color[3], intensity; };
+	std::vector<Blade> blades;       // lightsaber blades to draw
+	ID3D12PipelineState* bladePSO = nullptr;
 	Texture bloomDown[6], bloomUp[6];
 	int bloomLevels = 0;
 	Buffer exposure, sh;
@@ -177,7 +181,7 @@ static std::string ShaderSource(const char* file)
 	static const E table[] = {
 		{ "legacy", kt_src_legacy_parts }, { "present", kt_src_present_parts }, { "world", kt_src_world_parts },
 		{ "legacy_gbuffer", kt_src_legacy_gbuffer_parts }, { "sky", kt_src_sky_parts }, { "lighting", kt_src_lighting_parts },
-		{ "ssao", kt_src_ssao_parts }, { "post", kt_src_post_parts },
+		{ "ssao", kt_src_ssao_parts }, { "post", kt_src_post_parts }, { "saber", kt_src_saber_parts },
 	};
 	for (auto& e : table) if (!strcmp(e.name, file)) { std::string s; for (int i = 0; e.parts[i]; i++) s += e.parts[i]; return s; }
 	return std::string();
@@ -320,6 +324,20 @@ static bool CreatePipelines()
 	}
 	R.presentPSO = FullscreenPSO(R.presentPS, DXGI_FORMAT_R8G8B8A8_UNORM, "present");
 	R.tonemapPSO = FullscreenPSO(R.tonemapPS, DXGI_FORMAT_R8G8B8A8_UNORM, "tonemap");
+	{
+		Shader bvs = R_Shader("saber", "VS", "vs_5_1"), bps = R_Shader("saber", "PS", "ps_5_1");
+		if (bvs.ok && bps.ok) {
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC d = BasePso();
+			d.VS = BC(bvs); d.PS = BC(bps);
+			auto& rt = d.BlendState.RenderTarget[0];
+			rt.BlendEnable = TRUE; rt.SrcBlend = D3D12_BLEND_ONE; rt.DestBlend = D3D12_BLEND_ONE;
+			rt.SrcBlendAlpha = D3D12_BLEND_ZERO; rt.DestBlendAlpha = D3D12_BLEND_ONE;
+			d.DepthStencilState.DepthEnable = FALSE;
+			d.NumRenderTargets = 1;
+			d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+			R.bladePSO = CreateGraphicsPSO(d, "saber blades");
+		}
+	}
 	R.fxaaPSO = FullscreenPSO(R.fxaaPS, DXGI_FORMAT_R8G8B8A8_UNORM, "fxaa");
 
 	// legacy -> GBuffer, one per cull mode
@@ -630,6 +648,7 @@ void R_BeginView(const ViewDesc& v)
 	MatMul(R.viewProj, R.proj, v.worldToEye);
 	R.deferred.clear();
 	R.tubes.clear();
+	R.blades.clear();
 
 	// view constants
 	ViewConstants& c = R.vc;
@@ -774,6 +793,7 @@ void R_AppendDeferred(const DeferredDraw& d)
 		GLTexture* tr2 = d.rmoTex ? R_GLTexture(d.rmoTex, false) : nullptr;
 		R_ResolveTexture(tn); R_ResolveTexture(tr2);
 		uint32_t pbr[4] = { R_TextureSrv(tn, false), R_TextureSrv(tr2, false), (uint32_t)d.rmoOrder, 0 };
+		memcpy(&pbr[3], &d.skin, 4);
 		memcpy(c + 160, pbr, 16);
 	}
 	DeferredRec r;
@@ -993,6 +1013,21 @@ static void RenderWorldView()
 
 	// ---- camera: exposure
 	D3D12_RESOURCE_STATES srvAll = srv;
+	// lightsaber blades (after the legacy content, so the depth holds characters and BSP surfaces)
+	if (!R.blades.empty() && R.bladePSO) {
+		Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
+		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		cl->OMSetRenderTargets(1, &R.hdr.rtv[0], FALSE, nullptr);
+		cl->RSSetViewports(1, &vp);
+		cl->RSSetScissorRects(1, &rect);
+		cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
+		cl->SetPipelineState(R.bladePSO);
+		cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		for (const auto& bl : R.blades) {
+			cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 12, &bl, 0);
+			cl->DrawInstanced(6, 1, 0, 0);
+		}
+	}
 	// keep this frame's lit scene for next frame's screen-space reflections
 	if (hd && kt_ssr->integer) {
 		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1077,6 +1112,20 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 	R.tubes.push_back(l);
 }
 float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }
+bool SaberDraw() { return kt_saberDraw && kt_saberDraw->integer != 0; }
+void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba)
+{
+	if (!R.inView || length < 0.5f || R.blades.size() >= 128) return;
+	RState::Blade b = {};
+	float c[3] = { rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f };
+	float mx = Q_max(c[0], Q_max(c[1], c[2]));
+	if (mx < 0.01f) return;
+	for (int q = 0; q < 3; q++) { b.a[q] = start[q]; b.b[q] = start[q] + dir[q] * length; b.color[q] = powf(c[q] / mx, 2.2f); }
+	b.glowR = Q_max(1.0f, radius);
+	b.coreR = Q_max(0.6f, radius * 0.22f);
+	b.intensity = kt_saberGlow ? kt_saberGlow->value * 0.5f : 1.0f;
+	R.blades.push_back(b);
+}
 
 void R_EndView()
 {
