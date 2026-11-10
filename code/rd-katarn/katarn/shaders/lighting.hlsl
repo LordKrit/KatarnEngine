@@ -114,6 +114,27 @@ float Shadow(float3 P, float3 N, float viewZ)
 	return lerp(1, s, c == 3 ? fade : 1);
 }
 
+// screen-space shadow: march from P towards the light through the depth buffer (contact shadows; shadows of
+// characters / props for lights that have no shadow map - sabers, dynamic lights)
+float ScreenShadow(float3 P, float3 N, float3 L, float dist, int steps, float thick, float jitter)
+{
+	float3 O = P + N * 1.0 + L * 1.0;
+	float stepLen = dist / steps;
+	float occ = 0;
+	[loop] for (int i = 0; i < steps; i++) {
+		float3 Q = O + L * stepLen * (i + jitter);
+		float4 cp = mul(viewProj, float4(Q, 1));
+		if (cp.w <= 0) break;
+		float2 suv = cp.xy / cp.w * float2(0.5, -0.5) + 0.5;
+		if (any(suv < 0) || any(suv > 1)) break;
+		float sd = Tex2D[indices0.w].Load(int3(viewport.xy + suv * viewport.zw, 0)).r;
+		if (sd <= 0) continue;
+		float dz = ViewDepth(cp.z / cp.w) - ViewDepth(sd);
+		if (dz > 0.4 && dz < thick) { occ = max(occ, saturate(1 - (float)i / steps) * 0.5 + 0.5); if (occ > 0.99) break; }
+	}
+	return 1 - occ;
+}
+
 // one shadow tap (volumetric fog marching)
 float ShadowFast(float3 P, float viewZ)
 {
@@ -197,6 +218,7 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 f0 = lerp(0.04, albedo, metal);
 	if (plainLegacy) f0 *= 0.3;                  // old models without PBR maps: barely any specular (rend2 gives them almost none)
 	float viewZ = ViewDepth(depth);
+	float pxJitter = frac(52.9829189 * frac(dot(float2(px), float2(0.06711056, 0.00583715)) + indices2.w * 0.618));
 
 	float3 Lo = 0;
 	// sun
@@ -212,9 +234,11 @@ void CS(uint3 id : SV_DispatchThreadID)
 	}
 	else if (sunColor.w > 0 && dot(N, L) > 0) {
 		float sh = Shadow(P, N, viewZ);
+		if ((lflags & 8) && sh > 0.01) sh *= ScreenShadow(P, N, L, 24 + viewZ * 0.004, 10, 6 + viewZ * 0.002, pxJitter);
 		Lo += Brdf(N, V, L, diff, f0, rough) * sunColor.rgb * sunColor.w * sh;
 	}
-	// local lights
+	// local lights (the strongest few get screen-space shadows)
+	uint shadowed = 0;
 	for (uint i = 0; i < lightCount; i++) {
 		Light l = LoadLight(i);
 		if (l.type == 2) {
@@ -235,6 +259,12 @@ void CS(uint3 id : SV_DispatchThreadID)
 			float3 Cs = A + Bv * tR - P;
 			float3 Ldiff = Cd * rsqrt(max(dd2, 1e-4)), Lspec = Cs * rsqrt(max(dot(Cs, Cs), 1e-4));
 			float NoLd = saturate(dot(N, Ldiff));
+			if ((lflags & 16) && shadowed < 3 && NoLd > 0 && att * Luminance(l.color) > 0.02) {
+				shadowed++;
+				float sdist = min(sqrt(dd2), 320.0);
+				float s = ScreenShadow(P, N, Ldiff, sdist, 14, 40, pxJitter);
+				att *= s;
+			}
 			Lo += diff / PI * NoLd * l.color * att;
 			Lo += (Brdf(N, V, Lspec, 0, f0, max(rough, 0.12)) ) * l.color * att;
 			continue;
@@ -249,6 +279,10 @@ void CS(uint3 id : SV_DispatchThreadID)
 		float att = l.invSquare > 0 ? w * l.invSquare / max(d2, 64.0) : w;
 		if (l.type == 1) att *= smoothstep(l.spotCos, l.spotInner, dot(-Ld, l.dir));
 		if (att <= 0) continue;
+		if ((lflags & 16) && shadowed < 3 && dot(N, Ld) > 0 && att * Luminance(l.color) > 0.02) {
+			shadowed++;
+			att *= ScreenShadow(P, N, Ld, min(dl, 320.0), 14, 40, pxJitter);
+		}
 		Lo += Brdf(N, V, Ld, diff, f0, rough) * l.color * att;
 	}
 	// ambient

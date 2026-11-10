@@ -26,7 +26,7 @@ void GL_ResetState();
 // ------------------------------------------------------------------------------------------------ cvars
 static cvar_t* kt_debug, * kt_ssao, * kt_shadows, * kt_shadowRes, * kt_shadowDist, * kt_bloom, * kt_exposure, * kt_manualExposure;
 static cvar_t* kt_fxaa, * kt_glowBoost, * kt_debugView, * kt_shaderDir, * kt_legacyDeferred, * kt_sun, * kt_fog, * kt_aoRadius, * kt_aoIntensity;
-static cvar_t* kt_dynGlow;
+static cvar_t* kt_dynGlow, * kt_taa, * kt_taaBlend, * kt_contactShadows, * kt_lightShadows;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
 static void RegisterCvars()
@@ -51,6 +51,10 @@ static void RegisterCvars()
 	kt_lights = ri.Cvar_Get("kt_lights", "1", CVAR_ARCHIVE);
 	kt_dlightScale = ri.Cvar_Get("kt_dlightScale", "1.0", CVAR_ARCHIVE);
 	kt_speeds = ri.Cvar_Get("kt_speeds", "0", 0);
+	kt_taa = ri.Cvar_Get("kt_taa", "1", CVAR_ARCHIVE);                       // temporal anti-aliasing (replaces FXAA)
+	kt_taaBlend = ri.Cvar_Get("kt_taaBlend", "0.1", CVAR_ARCHIVE);           // weight of the new frame
+	kt_contactShadows = ri.Cvar_Get("kt_contactShadows", "1", CVAR_ARCHIVE); // screen-space contact shadows (sun)
+	kt_lightShadows = ri.Cvar_Get("kt_lightShadows", "1", CVAR_ARCHIVE);     // screen-space shadows for sabers / dynamic lights
 	kt_dynGlow = ri.Cvar_Get("kt_dynamicGlow", "1", CVAR_ARCHIVE);   // rend2-style dynamic glow strength (glow stages blurred into the bloom)
 	kt_ssr = ri.Cvar_Get("kt_ssr", "1", CVAR_ARCHIVE);                 // screen-space reflections (HD worlds)
 	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
@@ -107,6 +111,7 @@ struct ViewConstants {
 	float postParams[4];
 	float ambientSH[9][4];
 	float extraParams[4];      // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float viewProjNoJitter[16];   // this frame's view-projection without the TAA jitter
 };
 
 struct LVert { float pos[3]; float normal[3]; float uv[2]; float lmuv[2]; uint32_t color; };
@@ -151,6 +156,11 @@ static struct RState {
 	bool inView = false, viewWorld = false, reversedZ = false;
 	ViewDesc view;
 	float proj[16] = {}, viewProj[16] = {}, prevViewProj[16] = {};
+	float vpNoJitter[16] = {}, lastVpNoJitter[16] = {};   // TAA: unjittered, this and the last full-screen world view
+	bool taaView = false, taaHistoryValid = false;
+	uint32_t taaIndex = 0;
+	Texture taaOut;
+	ID3D12PipelineState* csTaa = nullptr;
 	D3D12_GPU_VIRTUAL_ADDRESS viewCB = 0, defaultCB = 0;
 	ViewConstants vc;
 	int lastMsec = 0;
@@ -381,13 +391,14 @@ static bool CreatePipelines()
 	R.csExposure = CreateComputePSO(R_Shader("post", "ExposureCS", "cs_5_1"), "exposure");
 	R.csBloomDown = CreateComputePSO(R_Shader("post", "BloomDownCS", "cs_5_1"), "bloom down");
 	R.csBloomUp = CreateComputePSO(R_Shader("post", "BloomUpCS", "cs_5_1"), "bloom up");
+	R.csTaa = CreateComputePSO(R_Shader("post", "TaaCS", "cs_5_1"), "taa");
 	return R.presentPSO != nullptr;
 }
 
 // ------------------------------------------------------------------------------------------------ targets
 static void DestroyTargets()
 {
-	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
+	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.hdrPrev, &R.taaOut, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
 	for (Texture* t : all) DestroyTexture(*t);
 	for (auto& t : R.bloomDown) DestroyTexture(t);
 	for (auto& t : R.bloomUp) DestroyTexture(t);
@@ -403,6 +414,8 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 	ok &= CreateTexture(R.screenDepth, w, h, 1, DXGI_FORMAT_D32_FLOAT, TEX_DEPTH, 1, zero, "screen depth");
 	ok &= CreateTexture(R.ldr, w, h, 1, DXGI_FORMAT_R8G8B8A8_UNORM, TEX_RT, 1, black, "ldr");
 	ok &= CreateTexture(R.hdr, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT | TEX_UAV, 1, black, "hdr");
+	ok &= CreateTexture(R.taaOut, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "taa");
+	R.taaHistoryValid = false;
 	ok &= CreateTexture(R.glow, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "glow");
 	ok &= CreateTexture(R.hdrPrev, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, nullptr, "hdr previous");
 	R.hdrPrevValid = false;
@@ -658,7 +671,18 @@ void R_BeginView(const ViewDesc& v)
 	float sy = 1.0f / tanf(v.fovY * (float)M_PI / 360.0f);
 	memset(R.proj, 0, 64);
 	R.proj[0] = sx; R.proj[5] = sy; R.proj[11] = -1.0f; R.proj[14] = v.zNear;
-	memcpy(R.prevViewProj, R.viewProj, 64);
+	// TAA: the full-screen world view gets a sub-pixel jitter (Halton 2,3); history is reprojected unjittered
+	R.taaView = kt_taa->integer && v.world && v.w == (int)R.w && v.h == (int)R.h && R.csTaa;
+	MatMul(R.vpNoJitter, R.proj, v.worldToEye);
+	if (R.taaView) {
+		auto halton = [](uint32_t i, uint32_t b) { float f = 1, r = 0; while (i) { f /= b; r += f * (i % b); i /= b; } return r; };
+		uint32_t n = (R.taaIndex++ % 8) + 1;
+		R.proj[8] = -(halton(n, 2) - 0.5f) * 2.0f / v.w;
+		R.proj[9] = -(halton(n, 3) - 0.5f) * 2.0f / v.h;
+		memcpy(R.prevViewProj, R.taaHistoryValid ? R.lastVpNoJitter : R.vpNoJitter, 64);
+		memcpy(R.lastVpNoJitter, R.vpNoJitter, 64);
+	}
+	else memcpy(R.prevViewProj, R.viewProj, 64);
 	MatMul(R.viewProj, R.proj, v.worldToEye);
 	R.deferred.clear();
 	R.tubes.clear();
@@ -671,6 +695,7 @@ void R_BeginView(const ViewDesc& v)
 	MatInverse(R.viewProj, c.invViewProj);
 	memcpy(c.worldToEye, v.worldToEye, 64);
 	memcpy(c.prevViewProj, R.prevViewProj, 64);
+	memcpy(c.viewProjNoJitter, R.vpNoJitter, 64);
 	c.camPos[0] = v.origin[0]; c.camPos[1] = v.origin[1]; c.camPos[2] = v.origin[2]; c.camPos[3] = v.zNear;
 	c.viewport[0] = (float)v.x; c.viewport[1] = (float)((int)R.h - (v.y + v.h)); c.viewport[2] = (float)v.w; c.viewport[3] = (float)v.h;
 	c.invTargetSize[0] = 1.0f / R.w; c.invTargetSize[1] = 1.0f / R.h; c.invTargetSize[2] = (float)R.w; c.invTargetSize[3] = (float)R.h;
@@ -1004,7 +1029,7 @@ static void RenderWorldView()
 	Transition(cl, R.hdr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	{
 		uint32_t k[8] = { R.hdr.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, R.ao.srv,
-			(ao ? 1u : 0u) | (shadows ? 2u : 0u) | (kt_volumetric->integer ? 4u : 0u), (uint32_t)Q_max(0, kt_debugView->integer),
+			(ao ? 1u : 0u) | (shadows ? 2u : 0u) | (kt_volumetric->integer ? 4u : 0u) | (kt_contactShadows->integer ? 8u : 0u) | (kt_lightShadows->integer ? 16u : 0u), (uint32_t)Q_max(0, kt_debugView->integer),
 			(kt_ssr->integer && R.hdrPrevValid) ? R.hdrPrev.srv : 0u };
 		Dispatch(cl, R.csLighting, k, 8, gx, gy);
 	}
@@ -1057,13 +1082,27 @@ static void RenderWorldView()
 				cl->DrawInstanced(6, 1, 0, 0);
 			}
 	}
-	// keep this frame's lit scene for next frame's screen-space reflections
-	if (kt_ssr->integer) {
+	// ---- TAA: resolve against the reprojected history (last frame's resolved scene)
+	const bool taa = R.taaView && R.csTaa;
+	if (taa && R.taaHistoryValid && R.hdrPrevValid) {
+		Transition(cl, R.hdr, srv);
+		Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
+		Transition(cl, R.taaOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t k[8] = { R.hdr.srv, R.taaOut.uav[0], R.hdrPrev.srv, 0, 0, 0, 0, 0 };
+		float fb = Q_max(0.02f, Q_min(0.5f, kt_taaBlend->value)); memcpy(&k[6], &fb, 4);
+		Dispatch(cl, R.csTaa, k, 8, gx, gy);
+		Transition(cl, R.taaOut, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_DEST);
+		cl->CopyResource(R.hdr.res, R.taaOut.res);
+	}
+	// keep this frame's lit scene for next frame's screen-space reflections / TAA history
+	if (taa || (kt_ssr->integer && !kt_taa->integer)) {
 		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_SOURCE);
 		Transition(cl, R.hdrPrev, D3D12_RESOURCE_STATE_COPY_DEST);
 		cl->CopyResource(R.hdrPrev.res, R.hdr.res);
 		Transition(cl, R.hdrPrev, srvAll);
 		R.hdrPrevValid = true;
+		if (taa) R.taaHistoryValid = true;
 	}
 	Transition(cl, R.hdr, srvAll);
 	Transition(cl, R.exposure, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1107,7 +1146,7 @@ static void RenderWorldView()
 
 	// ---- tone map (+ FXAA) into the screen
 	cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
-	bool fxaa = kt_fxaa->integer && R.fxaaPSO;
+	bool fxaa = kt_fxaa->integer && R.fxaaPSO && !(R.taaView && kt_taa->integer);
 	Texture& tmTarget = fxaa ? R.ldr : R.screen;
 	Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
 	Transition(cl, tmTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
