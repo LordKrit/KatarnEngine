@@ -1652,6 +1652,27 @@ static qboolean ParseStage(shaderStage_t* stage, const char** text)
 		{
 			stage->glow = true;
 		}
+		// KatarnEngine: rend2 / Sojourn PBR stage maps (used by the deferred path), other rend2 keywords skipped
+		else if (!Q_stricmp(token, "normalMap") || !Q_stricmp(token, "normalHeightMap") || !Q_stricmp(token, "rmoMap") || !Q_stricmp(token, "rmosMap")
+			|| !Q_stricmp(token, "ormMap") || !Q_stricmp(token, "ormsMap") || !Q_stricmp(token, "specularMap"))
+		{
+			char kw[64];
+			Q_strncpyz(kw, token, sizeof(kw));
+			token = COM_ParseExt(text, qfalse);
+			if (token[0]) {
+				image_t* im = R_FindImageFile(token, static_cast<qboolean>(!shader.noMipMaps), static_cast<qboolean>(!shader.noPicMip), qfalse, GL_REPEAT);
+				if (!Q_stricmpn(kw, "normal", 6)) stage->ktNormal = im;
+				else if (!Q_stricmp(kw, "specularMap")) stage->ktSpec = im;
+				else { stage->ktRmo = im; stage->ktRmoOrder = !Q_stricmpn(kw, "orm", 3) ? 1 : 0; }
+			}
+			SkipRestOfLine(text);
+		}
+		else if (!Q_stricmp(token, "skin") || !Q_stricmp(token, "normalScale") || !Q_stricmp(token, "specularScale") || !Q_stricmp(token, "parallaxDepth")
+			|| !Q_stricmp(token, "gloss") || !Q_stricmp(token, "roughness") || !Q_stricmp(token, "specularReflectance") || !Q_stricmp(token, "specularExponent")
+			|| !Q_stricmp(token, "cubeMapScale") || !Q_stricmp(token, "parallaxBias") || !Q_stricmp(token, "metallic") || !Q_stricmp(token, "emissiveScale"))
+		{
+			SkipRestOfLine(text);
+		}
 		//
 		// surfaceSprites <type> ...
 		//

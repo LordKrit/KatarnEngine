@@ -385,6 +385,12 @@ using shaderStage_t = struct shaderStage_t {
 
 	// Whether this object emits a glow or not.
 	bool			glow;
+
+	// KatarnEngine: PBR maps from rend2-style stages (normalMap / rmoMap / ormMap / specularMap)
+	image_t* ktNormal;
+	image_t* ktRmo;
+	int				ktRmoOrder;     // 0 r=rough g=metal b=ao (rmo), 1 r=ao g=rough b=metal (orm)
+	image_t* ktSpec;
 };
 
 struct shaderCommands_s;

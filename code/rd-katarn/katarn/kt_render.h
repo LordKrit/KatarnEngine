@@ -93,6 +93,8 @@ struct DeferredDraw {
 	float mvp[16];                             // P_katarn * modelview (as the GL translation would build it)
 	float objToWorld[12];                      // 3 rows
 	uint32_t albedoTex, lightmapTex, specTex;  // GL names, 0 = none
+	uint32_t normalTex, rmoTex;                // GL names, 0 = none (rend2-style PBR maps)
+	int rmoOrder;
 	uint32_t flags;                            // see legacy_gbuffer.hlsl gflags
 	float alphaRef, roughness, metallic, bakedScale;
 	float tint[4];

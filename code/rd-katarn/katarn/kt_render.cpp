@@ -769,6 +769,13 @@ void R_AppendDeferred(const DeferredDraw& d)
 	memcpy(c + 128, f, 12);
 	memcpy(c + 140, &spec, 4);
 	memcpy(c + 144, d.tint, 16);
+	{
+		GLTexture* tn = d.normalTex ? R_GLTexture(d.normalTex, false) : nullptr;
+		GLTexture* tr2 = d.rmoTex ? R_GLTexture(d.rmoTex, false) : nullptr;
+		R_ResolveTexture(tn); R_ResolveTexture(tr2);
+		uint32_t pbr[4] = { R_TextureSrv(tn, false), R_TextureSrv(tr2, false), (uint32_t)d.rmoOrder, 0 };
+		memcpy(c + 160, pbr, 16);
+	}
 	DeferredRec r;
 	r.vb = vb.gpu; r.ib = ib.gpu; r.cb = cb.gpu;
 	r.vbSize = d.numVerts * sizeof(LVert);
