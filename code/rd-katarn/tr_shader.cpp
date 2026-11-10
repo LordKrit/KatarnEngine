@@ -31,6 +31,8 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 // tr_shader.c -- this file deals with the parsing and definition of shaders
 
 static char* s_shaderText;
+static const char* s_shaderSegments[8192];   // one per shader / material file (see ScanAndLoadShaderFiles)
+static int s_numShaderSegments = 0;
 
 // the shader is parsed into these global variables, then copied into
 // dynamically allocated memory if it is valid.
@@ -3690,17 +3692,19 @@ void	R_ShaderList_f() {
 //
 static void SetupShaderEntryPtrs()
 {
-	const char* p = s_shaderText;
-
 	ShaderEntryPtrs_Clear();	// extra safe, though done elsewhere already
 
-	if (!p)
+	if (!s_shaderText)
 		return;
+
+	for (int seg = 0; seg < s_numShaderSegments; seg++)
+	{
+	const char* p = s_shaderSegments[seg];
 
 	// FIXED this nasty little bugger --eez
 	COM_BeginParseSession();
 
-	while (true)
+	while (p)
 	{
 		char* token = COM_ParseExt(&p, qtrue);
 		if (token[0] == 0)
@@ -3719,6 +3723,7 @@ static void SetupShaderEntryPtrs()
 	}
 
 	COM_EndParseSession();
+	}
 }
 #endif
 
@@ -3809,9 +3814,13 @@ static void ScanAndLoadShaderFiles(void)
 		BUILD SINGLE LARGE SHADER TEXT BUFFER
 	==========================================================
 	*/
-	s_shaderText = static_cast<char*>(R_Hunk_Alloc(sum + numShaderFiles * 2, qtrue));
+	// KatarnEngine: every file is kept as its own NUL-terminated block and indexed on its own (as rend2 does). In one
+	// joined text a single file with unbalanced braces swallowed every shader name after it - MD's saber shaders then
+	// were "not found" and became implicit 2D shaders (alpha-blended, no depth test: the black blocky blades).
+	s_shaderText = static_cast<char*>(R_Hunk_Alloc(sum + numShaderFiles * 3 + 1, qtrue));
 	s_shaderText[0] = '\0';
 	char* textEnd = s_shaderText;
+	s_numShaderSegments = 0;
 
 	// Free in reverse order so temp files are dumped predictably
 	for (i = numShaderFiles - 1; i >= 0; i--)
@@ -3821,15 +3830,18 @@ static void ScanAndLoadShaderFiles(void)
 			continue;
 		}
 
-		strcat(textEnd, s_shaderBuffers[i]);
-		strcat(textEnd, "\n");
-		textEnd += strlen(textEnd);
+		const size_t len = strlen(s_shaderBuffers[i]);
+		memcpy(textEnd, s_shaderBuffers[i], len);
+		textEnd[len] = '\n';
+		textEnd[len + 1] = '\0';
+		COM_Compress(textEnd);
+		if (s_numShaderSegments < MAX_SHADER_FILES) s_shaderSegments[s_numShaderSegments++] = textEnd;
+		textEnd += strlen(textEnd) + 1;
+		*textEnd = '\0';
 
 		ri.FS_FreeFile(s_shaderBuffers[i]);
 		s_shaderBuffers[i] = nullptr;
 	}
-
-	COM_Compress(s_shaderText);
 
 	// Free file list
 	if (shaderFiles) ri.FS_FreeFileList(shaderFiles);
