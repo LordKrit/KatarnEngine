@@ -126,7 +126,9 @@ float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 	float amount = camDens * lineInt * rayLen;
 	float opacity = min(1 - exp(-amount), fogColor.w);
 	float3 hd = normalize(float3(-V.xy, 0.05));
-	float3 inscatter = SkyRadiance(hd) * fogColor.rgb;
+	// a blurred sky (top mips): the raw horizon row of a sky texture has sharp vertical detail, which the fog would
+	// smear into streaks running up the whole screen
+	float3 inscatter = (indices2.x ? SkyRadianceLod(hd, max(SkyMips() - 4, 0)) : SkyRadiance(hd)) * fogColor.rgb;
 	inscatter += sunColor.rgb * sunColor.w * pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 * fogColor.rgb;
 	return lerp(col, inscatter, opacity);
 }

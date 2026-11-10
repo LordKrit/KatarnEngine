@@ -169,13 +169,31 @@ void ShadowPS(VsOut i)
 }
 
 // ---- FX pass: water and flowing water, drawn into the lit HDR scene (blend: rgb + dst * a)
-float3 FxSky(float3 d)
+float3 FxSky(float3 d, float lod)
 {
 	if (indices2.x) {
 		float2 uv = float2(0.5 - atan2(d.y, d.x) / (2 * PI), 0.5 - asin(clamp(d.z, -1, 1)) / PI);
-		return Tex2D[indices2.x].SampleLevel(sWrap, uv, 1).rgb * skyParams.y * asfloat(indices2.z);
+		uint w, h, mips;
+		Tex2D[indices2.x].GetDimensions(0, w, h, mips);
+		return Tex2D[indices2.x].SampleLevel(sWrap, uv, min(lod, mips - 1.0)).rgb * skyParams.y;
 	}
 	return EvalSH(d) * PI;
+}
+// height fog as the lighting pass applies it (inscatter, opacity)
+float4 FxFog(float3 P, float3 V, float dist)
+{
+	if (fogParams.x <= 0) return 0;
+	float rayLen = max(dist - fogParams.w, 0);
+	float dz = P.z - camPos.z;
+	float f = fogParams.y;
+	float camDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
+	float fz = f * dz;
+	float lineInt = abs(fz) > 1e-4 ? (1 - exp(-fz)) / fz : 1 - 0.5 * fz;
+	float opacity = min(1 - exp(-camDens * lineInt * rayLen), fogColor.w);
+	float3 hd = normalize(float3(-V.xy, 0.05));
+	float3 inscatter = FxSky(hd, 8) * fogColor.rgb;
+	inscatter += sunColor.rgb * sunColor.w * pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 * fogColor.rgb;
+	return float4(inscatter, opacity);
 }
 float WaveHeight(float2 p, float t, out float2 grad)
 {
@@ -212,7 +230,7 @@ float4 FxPS(VsOut i, bool front : SV_IsFrontFace) : SV_Target0
 		float F = 0.02 + 0.98 * pow(1 - NdV, 5);
 		float3 R = reflect(-V, n);
 		R.z = abs(R.z);                                  // no reflections from below the horizon
-		float3 refl = FxSky(R);
+		float3 refl = FxSky(R, 1) * asfloat(indices2.z);
 		float3 H = normalize(L + V);
 		float a2 = max(m.roughness, 0.02); a2 *= a2;
 		float NdH = saturate(dot(n, H));
@@ -226,7 +244,9 @@ float4 FxPS(VsOut i, bool front : SV_IsFrontFace) : SV_Target0
 		float3 scatter = m.baseColor.rgb * (EvalSH(float3(0, 0, 1)) * PI + sunC * saturate(L.z) * 0.15);
 		float3 body = scatter * (1 - Tr);
 		float3 rgb = refl * F + spec + body * (1 - F);
-		return float4(rgb, T * (1 - F));
+		float a = T * (1 - F);
+		float4 fog = FxFog(i.wpos, V, length(camPos.xyz - i.wpos));
+		return float4(lerp(rgb, fog.rgb * (1 - a), fog.a), a);
 	}
 	if (m.mflags & 64) {
 		// ---- flowing water sheet: alpha from the scrolling channels of the flow record
@@ -250,9 +270,15 @@ float4 FxPS(VsOut i, bool front : SV_IsFrontFace) : SV_Target0
 			}
 			a = op == 0 ? v : op == 1 ? a + v : a * v;
 		}
+		// softer than the raw sum (the Blender sheets fade out by vertex colour, which is not cooked): a gentler
+		// curve, and edge-on sheets fade away
 		a = saturate(a * mul);
+		a = a * a * (3 - 2 * a) * 0.85;
+		a *= saturate(abs(dot(normalize(i.normal), V)) * 3);
 		float3 light = EvalSH(ng) * PI + sunC * saturate(dot(ng, L)) / PI;
-		float3 col = m.baseColor.rgb * light + m.emissive * 4.0;
+		float3 col = m.baseColor.rgb * light * 0.8 + m.emissive;
+		float4 fog = FxFog(i.wpos, V, length(camPos.xyz - i.wpos));
+		col = lerp(col, fog.rgb, fog.a);
 		return float4(col * a, 1 - a);
 	}
 	return float4(0, 0, 0, 1);

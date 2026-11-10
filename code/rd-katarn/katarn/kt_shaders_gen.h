@@ -624,7 +624,9 @@ float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 	float amount = camDens * lineInt * rayLen;
 	float opacity = min(1 - exp(-amount), fogColor.w);
 	float3 hd = normalize(float3(-V.xy, 0.05));
-	float3 inscatter = SkyRadiance(hd) * fogColor.rgb;
+	// a blurred sky (top mips): the raw horizon row of a sky texture has sharp vertical detail, which the fog would
+	// smear into streaks running up the whole screen
+	float3 inscatter = (indices2.x ? SkyRadianceLod(hd, max(SkyMips() - 4, 0)) : SkyRadiance(hd)) * fogColor.rgb;
 	inscatter += sunColor.rgb * sunColor.w * pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 * fogColor.rgb;
 	return lerp(col, inscatter, opacity);
 }
@@ -695,13 +697,13 @@ void CS(uint3 id : SV_DispatchThreadID)
 		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
 		float3 b = cross(R, t);
 		float cone = rough * rough * 1.2;
-		if (indices2.x) spec = SkyRadianceLod(R, rough * (SkyMips() - 1) * 0.8) * asfloat(indices2.z);
+		if (indices2.x) spec = SkyRadianceL)KTSRC",
+R"KTSRC(od(R, rough * (SkyMips() - 1) * 0.8) * asfloat(indices2.z);
 		else {
 			float3 acc = SkyRadiance(R);
 			[unroll] for (int k = 0; k < 6; k++) {
 				float a = k * (2 * PI / 6);
-				acc += SkyRadiance(normalize(R + (t * cos(a) )KTSRC",
-R"KTSRC(+ b * sin(a)) * cone));
+				acc += SkyRadiance(normalize(R + (t * cos(a) + b * sin(a)) * cone));
 			}
 			spec = acc / 7.0;
 		}
@@ -1872,19 +1874,38 @@ void ShadowPS(VsOut i)
 }
 
 // ---- FX pass: water and flowing water, drawn into the lit HDR scene (blend: rgb + dst * a)
-float3 FxSky(float3 d)
+float3 FxSky(float3 d, float lod)
 {
 	if (indices2.x) {
 		float2 uv = float2(0.5 - atan2(d.y, d.x) / (2 * PI), 0.5 - asin(clamp(d.z, -1, 1)) / PI);
-		return Tex2D[indices2.x].SampleLevel(sWrap, uv, 1).rgb * skyParams.y * asfloat(indices2.z);
+		uint w, h, mips;
+		Tex2D[indices2.x].GetDimensions(0, w, h, mips);
+		return Tex2D[indices2.x].SampleLevel(sWrap, uv, min(lod, mips - 1.0)).rgb * skyParams.y;
 	}
 	return EvalSH(d) * PI;
+}
+// height fog as the lighting pass applies it (inscatter, opacity)
+float4 FxFog(float3 P, float3 V, float dist)
+{
+	if (fogParams.x <= 0) return 0;
+	float rayLen = max(dist - fogParams.w, 0);
+	float dz = P.z - camPos.z;
+	float f = fogParams.y;
+	float camDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
+	float fz = f * dz;
+	float lineInt = abs(fz) > 1e-4 ? (1 - exp(-fz)) / fz : 1 - 0.5 * fz;
+	float opacity = min(1 - exp(-camDens * lineInt * rayLen), fogColor.w);
+	float3 hd = normalize(float3(-V.xy, 0.05));
+	float3 inscatter = FxSky(hd, 8) * fogColor.rgb;
+	inscatter += sunColor.rgb * sunColor.w * pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 * fogColor.rgb;
+	return float4(inscatter, opacity);
 }
 float WaveHeight(float2 p, float t, out float2 grad)
 {
 	// a few directional waves + two scrolling octaves of ripples (metres, seconds)
 	static const float4 W[6] = {
-		float4(0.80, 0.60, 0.55, 1.10), float4(-0.45, 0.89, 0.90, 1.50), float4(0.20, -0.98, 1.70, 2.10),
+		float4(0.80, 0.60,)KTSRC",
+R"KTSRC( 0.55, 1.10), float4(-0.45, 0.89, 0.90, 1.50), float4(0.20, -0.98, 1.70, 2.10),
 		float4(-0.92, -0.38, 2.60, 2.90), float4(0.60, -0.80, 4.30, 3.70), float4(0.98, 0.20, 6.10, 4.30) };
 	float h = 0; grad = 0;
 	[unroll] for (int k = 0; k < 6; k++) {
@@ -1903,8 +1924,7 @@ float4 FxPS(VsOut i, bool front : SV_IsFrontFace) : SV_Target0
 	Material m = LoadMaterial(i.mat);
 	float3 V = normalize(camPos.xyz - i.wpos);
 	float t = projParams.w;
-	float3 L = sunDir.xyz, sunC = sunC)KTSRC",
-R"KTSRC(olor.rgb * sunColor.w;
+	float3 L = sunDir.xyz, sunC = sunColor.rgb * sunColor.w;
 	float3 ng = normalize(i.normal);
 	if (dot(ng, V) < 0) ng = -ng;
 	if (m.mflags & 32) {
@@ -1916,7 +1936,7 @@ R"KTSRC(olor.rgb * sunColor.w;
 		float F = 0.02 + 0.98 * pow(1 - NdV, 5);
 		float3 R = reflect(-V, n);
 		R.z = abs(R.z);                                  // no reflections from below the horizon
-		float3 refl = FxSky(R);
+		float3 refl = FxSky(R, 1) * asfloat(indices2.z);
 		float3 H = normalize(L + V);
 		float a2 = max(m.roughness, 0.02); a2 *= a2;
 		float NdH = saturate(dot(n, H));
@@ -1930,7 +1950,9 @@ R"KTSRC(olor.rgb * sunColor.w;
 		float3 scatter = m.baseColor.rgb * (EvalSH(float3(0, 0, 1)) * PI + sunC * saturate(L.z) * 0.15);
 		float3 body = scatter * (1 - Tr);
 		float3 rgb = refl * F + spec + body * (1 - F);
-		return float4(rgb, T * (1 - F));
+		float a = T * (1 - F);
+		float4 fog = FxFog(i.wpos, V, length(camPos.xyz - i.wpos));
+		return float4(lerp(rgb, fog.rgb * (1 - a), fog.a), a);
 	}
 	if (m.mflags & 64) {
 		// ---- flowing water sheet: alpha from the scrolling channels of the flow record
@@ -1954,9 +1976,15 @@ R"KTSRC(olor.rgb * sunColor.w;
 			}
 			a = op == 0 ? v : op == 1 ? a + v : a * v;
 		}
+		// softer than the raw sum (the Blender sheets fade out by vertex colour, which is not cooked): a gentler
+		// curve, and edge-on sheets fade away
 		a = saturate(a * mul);
+		a = a * a * (3 - 2 * a) * 0.85;
+		a *= saturate(abs(dot(normalize(i.normal), V)) * 3);
 		float3 light = EvalSH(ng) * PI + sunC * saturate(dot(ng, L)) / PI;
-		float3 col = m.baseColor.rgb * light + m.emissive * 4.0;
+		float3 col = m.baseColor.rgb * light * 0.8 + m.emissive;
+		float4 fog = FxFog(i.wpos, V, length(camPos.xyz - i.wpos));
+		col = lerp(col, fog.rgb, fog.a);
 		return float4(col * a, 1 - a);
 	}
 	return float4(0, 0, 0, 1);
