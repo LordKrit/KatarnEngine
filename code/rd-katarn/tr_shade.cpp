@@ -1944,8 +1944,15 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	}
 	ComputeTexCoords(st);
 	if (flags & (2 | 8)) {
-		ComputeColors(st, static_cast<alphaGen_t>(0), static_cast<colorGen_t>(0));
-		d.colors = reinterpret_cast<const uint8_t*>(input->svars.colors);
+		if ((flags & 8) && (st->rgbGen == CGEN_LIGHTING_DIFFUSE || st->rgbGen == CGEN_LIGHTING_DIFFUSE_ENTITY)) {
+			// model shaders on map surfaces (misc_model trees, props baked into the BSP): the old renderer lit them from
+			// the world entity, which has no light (black silhouettes); their vertex colours hold the light the compiler baked
+			d.colors = reinterpret_cast<const uint8_t*>(input->vertexColors);
+		}
+		else {
+			ComputeColors(st, static_cast<alphaGen_t>(0), static_cast<colorGen_t>(0));
+			d.colors = reinterpret_cast<const uint8_t*>(input->svars.colors);
+		}
 	}
 	d.xyz = input->xyz[0]; d.xyzStride = sizeof(input->xyz[0]);
 	d.normal = input->normal[0]; d.normalStride = sizeof(input->normal[0]);
@@ -2328,21 +2335,6 @@ void RB_StageIteratorGeneric()
 	// call shader function
 	//
 	kt_skipStages = KT_TryDeferred(input);
-	{
-		// diagnostics: what saber shaders look like to this renderer (katarn_log.txt, once per shader)
-		static std::set<std::string> logged;
-		char n[MAX_QPATH]; Q_strncpyz(n, input->shader->name, sizeof(n)); Q_strlwr(n);
-		if ((strstr(n, "saber") || strstr(n, "blade")) && logged.size() < 200 && logged.insert(n).second) {
-			const shader_t* sh = input->shader;
-			kt::Log("saber shader '%s': explicit %d default %d sort %.1f stages %d entity reType %d deferred %u\n", sh->name, sh->explicitlyDefined ? 1 : 0,
-				sh->defaultShader ? 1 : 0, sh->sort, sh->numUnfoggedPasses, backEnd.currentEntity ? (int)backEnd.currentEntity->e.reType : -1, kt_skipStages);
-			for (int k = 0; k < sh->numUnfoggedPasses && k < 4; k++) {
-				const shaderStage_t* x = &input->xstages[k];
-				kt::Log("   stage %d: active %d image '%s' stateBits 0x%08x rgbGen %d alphaGen %d glow %d\n", k, x->active ? 1 : 0,
-					x->bundle[0].image ? x->bundle[0].image->imgName : "-", x->stateBits, (int)x->rgbGen, (int)x->alphaGen, x->glow ? 1 : 0);
-			}
-		}
-	}
 	RB_IterateStagesGeneric(input);
 	kt::GL_SetStage(nullptr, false);
 	const bool kt_deferred = kt_skipStages != 0;
