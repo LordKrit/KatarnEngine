@@ -219,12 +219,11 @@ static bool s_alpha_to_coverage_on = false;
 
 void GL_State(const uint32_t stateBits)
 {
-	const uint32_t diff = stateBits ^ glState.glStateBits;
-
-	if (!diff)
-	{
-		return;
-	}
+	// KatarnEngine: always re-apply every state. The GL calls only set fields of the D3D12 translation, and the deferred
+	// path (stages captured, not drawn) could leave the cached bits out of step with the translation's state - which
+	// drew additive saber blades and glows with blending off (opaque dark rods, black blocks).
+	const uint32_t diff = 0xffffffffu;
+	(void)glState.glStateBits;
 
 	//
 	// check depthFunc bits
