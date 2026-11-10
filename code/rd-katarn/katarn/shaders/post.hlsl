@@ -66,7 +66,7 @@ void ExposureCS(uint gi : SV_GroupIndex)
 }
 
 // ---------------------------------------------------------------- bloom
-float3 Fetch(uint tex, float2 uv) { return Tex2D[tex].SampleLevel(sClamp, uv, 0).rgb; }
+float3 Fetch(uint tex, float2 uv) { return Sane(Tex2D[tex].SampleLevel(sClamp, uv, 0).rgb); }
 
 [numthreads(8, 8, 1)]
 void BloomDownCS(uint3 id : SV_DispatchThreadID)
@@ -132,7 +132,7 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
 	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
 	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
-	float3 c = Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb * Exposure();
+	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 	if (skyParams.w > 0.5) {
 		c = ACESFitted(c * 1.4);

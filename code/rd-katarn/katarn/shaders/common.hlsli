@@ -57,6 +57,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float3 Sane(float3 c) { return (any(isnan(c)) || any(isinf(c))) ? 0 : min(c, 32000.0); }   // no NaN / inf into the HDR chain
 float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }

@@ -1066,7 +1066,7 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 	if (mx < 0.01f) { c[0] = c[1] = c[2] = 1; mx = 1; }
 	for (int q = 0; q < 3; q++) l.color[q] = powf(c[q] / mx, 2.2f) * 1.0f;
 	l.type = 2;
-	l.invSquare = 5000.0f;
+	l.invSquare = 1500.0f;
 	R.tubes.push_back(l);
 }
 float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }

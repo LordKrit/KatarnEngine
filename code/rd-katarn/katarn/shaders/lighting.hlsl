@@ -215,13 +215,13 @@ void CS(uint3 id : SV_DispatchThreadID)
 			float dd2 = dot(Cd, Cd);
 			if (dd2 > l.radius * l.radius) continue;
 			float wnd = saturate(1 - pow(dd2 / (l.radius * l.radius), 2)); wnd *= wnd;
-			float att = wnd * l.invSquare / max(dd2, 16.0);
+			float att = wnd * l.invSquare / max(dd2, 400.0);
 			float3 Rr = reflect(-V, N);
 			float3 A0 = A - P;
 			float rb = dot(Rr, Bv), ra = dot(Rr, A0);
 			float tR = saturate((dot(A0, Bv) * 0 + ra * rb - dot(A0, Bv)) / max(len2 - rb * rb, 1e-3));
 			float3 Cs = A + Bv * tR - P;
-			float3 Ldiff = Cd * rsqrt(max(dd2, 1e-4)), Lspec = normalize(Cs);
+			float3 Ldiff = Cd * rsqrt(max(dd2, 1e-4)), Lspec = Cs * rsqrt(max(dot(Cs, Cs), 1e-4));
 			float NoLd = saturate(dot(N, Ldiff));
 			Lo += diff / PI * NoLd * l.color * att;
 			Lo += (Brdf(N, V, Lspec, 0, f0, max(rough, 0.12)) ) * l.color * att;
@@ -309,5 +309,5 @@ void CS(uint3 id : SV_DispatchThreadID)
 	else if (debugMode == 3) Lo = ao;
 	else if (debugMode == 4) Lo = Shadow(P, N, viewZ);
 	if (debugMode) Lo /= max(Exposure(), 1e-6);
-	UavTex[outUav][px] = float4(Lo, 1);
+	UavTex[outUav][px] = float4(Sane(Lo), 1);
 }

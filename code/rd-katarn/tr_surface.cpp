@@ -1270,7 +1270,19 @@ static void DoSprite(vec3_t origin, const float radius, const float rotation)
 static void RB_SurfaceSaberGlow()
 {
 	refEntity_t* e = &backEnd.currentEntity->e;
-	kt::R_AddSaberLight(e->origin, e->axis[0], e->saberLength, e->shaderRGBA);
+	{
+		// blade colour: MD tints the glow in its texture, so read it from the shader name (rgba is often white)
+		byte rgba[4] = { e->shaderRGBA[0], e->shaderRGBA[1], e->shaderRGBA[2], 255 };
+		const shader_t* sh = tess.shader;
+		if (sh) {
+			char n[MAX_QPATH]; Q_strncpyz(n, sh->name, sizeof(n)); Q_strlwr(n);
+			struct { const char* k; byte c[3]; } map[] = { { "red", { 255, 40, 30 } }, { "blue", { 40, 90, 255 } }, { "green", { 40, 255, 60 } },
+				{ "purple", { 200, 50, 255 } }, { "yellow", { 255, 220, 40 } }, { "orange", { 255, 130, 20 } }, { "cyan", { 40, 230, 255 } },
+				{ "white", { 255, 255, 255 } }, { "black", { 0, 0, 0 } } };
+			for (auto& m : map) if (strstr(n, m.k)) { rgba[0] = m.c[0]; rgba[1] = m.c[1]; rgba[2] = m.c[2]; break; }
+		}
+		if (rgba[0] | rgba[1] | rgba[2]) kt::R_AddSaberLight(e->origin, e->axis[0], e->saberLength, rgba);
+	}
 
 	// Render the glow part of the blade
 	for (float i = e->saberLength; i > 0; i -= e->radius * 0.65f)

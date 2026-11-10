@@ -62,6 +62,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float3 Sane(float3 c) { return (any(isnan(c)) || any(isinf(c))) ? 0 : min(c, 32000.0); }   // no NaN / inf into the HDR chain
 float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
@@ -185,7 +186,7 @@ float4 PS(VsOut i) : SV_Target0
 		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
 		float s = (skyParams.w > 0.5 ? Overbright() : 1.0) / max(Exposure(), 1e-6);   // HD: legacy colours are scaled by identityLight
 		if (flags & (1u << 11)) s *= glowBoost;
-		c.rgb *= s;
+		c.rgb = min(c.rgb * s, 32000.0);
 	}
 	return c;
 }
@@ -253,6 +254,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float3 Sane(float3 c) { return (any(isnan(c)) || any(isinf(c))) ? 0 : min(c, 32000.0); }   // no NaN / inf into the HDR chain
 float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
@@ -450,6 +452,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float3 Sane(float3 c) { return (any(isnan(c)) || any(isinf(c))) ? 0 : min(c, 32000.0); }   // no NaN / inf into the HDR chain
 float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
@@ -688,10 +691,10 @@ void CS(uint3 id : SV_DispatchThreadID)
 		UavTex[outUav][px] = float4(c, 1);
 		return;
 	}
-	float4 g0 = Tex2D[indices0.x].Load(int3(px, 0));
+)KTSRC",
+R"KTSRC(	float4 g0 = Tex2D[indices0.x].Load(int3(px, 0));
 	float4 g1 = Tex2D[indices0.y].Load(int3(px, 0));
-	float3 g2 = Tex2D[indices)KTSRC",
-R"KTSRC(0.z].Load(int3(px, 0)).rgb;
+	float3 g2 = Tex2D[indices0.z].Load(int3(px, 0)).rgb;
 	float3 N = DecodeNormal(g1.xy);
 	bool baked = g1.z < 0;
 	float rough = abs(g1.z), metal = g1.w;
@@ -722,13 +725,13 @@ R"KTSRC(0.z].Load(int3(px, 0)).rgb;
 			float dd2 = dot(Cd, Cd);
 			if (dd2 > l.radius * l.radius) continue;
 			float wnd = saturate(1 - pow(dd2 / (l.radius * l.radius), 2)); wnd *= wnd;
-			float att = wnd * l.invSquare / max(dd2, 16.0);
+			float att = wnd * l.invSquare / max(dd2, 400.0);
 			float3 Rr = reflect(-V, N);
 			float3 A0 = A - P;
 			float rb = dot(Rr, Bv), ra = dot(Rr, A0);
 			float tR = saturate((dot(A0, Bv) * 0 + ra * rb - dot(A0, Bv)) / max(len2 - rb * rb, 1e-3));
 			float3 Cs = A + Bv * tR - P;
-			float3 Ldiff = Cd * rsqrt(max(dd2, 1e-4)), Lspec = normalize(Cs);
+			float3 Ldiff = Cd * rsqrt(max(dd2, 1e-4)), Lspec = Cs * rsqrt(max(dot(Cs, Cs), 1e-4));
 			float NoLd = saturate(dot(N, Ldiff));
 			Lo += diff / PI * NoLd * l.color * att;
 			Lo += (Brdf(N, V, Lspec, 0, f0, max(rough, 0.12)) ) * l.color * att;
@@ -816,7 +819,7 @@ R"KTSRC(0.z].Load(int3(px, 0)).rgb;
 	else if (debugMode == 3) Lo = ao;
 	else if (debugMode == 4) Lo = Shadow(P, N, viewZ);
 	if (debugMode) Lo /= max(Exposure(), 1e-6);
-	UavTex[outUav][px] = float4(Lo, 1);
+	UavTex[outUav][px] = float4(Sane(Lo), 1);
 }
 )KTSRC",
 nullptr };
@@ -881,6 +884,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float3 Sane(float3 c) { return (any(isnan(c)) || any(isinf(c))) ? 0 : min(c, 32000.0); }   // no NaN / inf into the HDR chain
 float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
@@ -1003,7 +1007,7 @@ void ExposureCS(uint gi : SV_GroupIndex)
 }
 
 // ---------------------------------------------------------------- bloom
-float3 Fetch(uint tex, float2 uv) { return Tex2D[tex].SampleLevel(sClamp, uv, 0).rgb; }
+float3 Fetch(uint tex, float2 uv) { return Sane(Tex2D[tex].SampleLevel(sClamp, uv, 0).rgb); }
 
 [numthreads(8, 8, 1)]
 void BloomDownCS(uint3 id : SV_DispatchThreadID)
@@ -1069,7 +1073,7 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
 	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
 	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
-	float3 c = Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb * Exposure();
+	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 	if (skyParams.w > 0.5) {
 		c = ACESFitted(c * 1.4);
@@ -1096,9 +1100,9 @@ float4 FxaaPS(FsOut i) : SV_Target0
 	float sw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, 0.5) * rcp, 0).a;
 	float se = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, 0.5) * rcp, 0).a;
 	float lmax = max(max(nw, ne), max(sw, se)), lmin = min(min(nw, ne), min(sw, se));
-	if (max(lmax, m.a) - min(lmin, m.a) < max(0.05, lmax * 0.125)) return float4(m.rgb, 1);
-	float2 dir = float2(-((nw + ne) - (sw + se)), (nw )KTSRC",
-R"KTSRC(+ sw) - (ne + se));
+	i)KTSRC",
+R"KTSRC(f (max(lmax, m.a) - min(lmin, m.a) < max(0.05, lmax * 0.125)) return float4(m.rgb, 1);
+	float2 dir = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
 	float red = max((nw + ne + sw + se) * 0.03125, 1.0 / 128.0);
 	float rmin = 1.0 / (min(abs(dir.x), abs(dir.y)) + red);
 	dir = clamp(dir * rmin, -8.0, 8.0) * rcp;
@@ -1170,6 +1174,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float3 Sane(float3 c) { return (any(isnan(c)) || any(isinf(c))) ? 0 : min(c, 32000.0); }   // no NaN / inf into the HDR chain
 float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
@@ -1304,6 +1309,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float3 Sane(float3 c) { return (any(isnan(c)) || any(isinf(c))) ? 0 : min(c, 32000.0); }   // no NaN / inf into the HDR chain
 float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
@@ -1551,6 +1557,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float3 Sane(float3 c) { return (any(isnan(c)) || any(isinf(c))) ? 0 : min(c, 32000.0); }   // no NaN / inf into the HDR chain
 float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
@@ -1750,6 +1757,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float3 Sane(float3 c) { return (any(isnan(c)) || any(isinf(c))) ? 0 : min(c, 32000.0); }   // no NaN / inf into the HDR chain
 float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
@@ -1998,11 +2006,11 @@ float4 FxFog(float3 P, float3 V, float dist)
 	float opacity = min(1 - exp(-camDens * lineInt * rayLen), fogColor.w);
 	float3 hd = normalize(float3(-V.xy, 0.05));
 	float3 inscatter = FxSky(hd, 8) * fogColor.rgb;
-	inscatter += sunColor.rgb * sunColor.w * pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 * fogColor.rgb;
+	inscatter += sunColor.rgb * sunColor.)KTSRC",
+R"KTSRC(w * pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 * fogColor.rgb;
 	return float4(inscatter, opacity);
 }
-float WaveHeight(float2)KTSRC",
-R"KTSRC( p, float t, out float2 grad)
+float WaveHeight(float2 p, float t, out float2 grad)
 {
 	// a few directional waves + two scrolling octaves of ripples (metres, seconds)
 	static const float4 W[6] = {

@@ -2022,7 +2022,7 @@ static void RB_IterateStagesGeneric(const shaderCommands_t* input)
 		{
 			continue;
 		}
-		kt::GL_SetStage(p_stage, p_stage->glow || (backEnd.currentEntity && backEnd.currentEntity->e.reType == RT_SABER_GLOW));
+		kt::GL_SetStage(p_stage, p_stage->glow);
 
 		// Reject this stage if it's not a glow stage but we are doing a glow pass.
 		if (g_bRenderGlowingObjects && !p_stage->glow)
