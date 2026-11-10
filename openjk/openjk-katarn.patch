@@ -1,136 +1,8 @@
-From 0a30f4f3d6df5a8f23c94a4410d8df28c11d196d Mon Sep 17 00:00:00 2001
 From: KatarnEngine <noreply@anthropic.com>
-Date: Tue, 10 Nov 2026 10:41:56 -0800
 Subject: [PATCH] KatarnEngine renderer for OpenJK SP (rdsp-katarn)
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_017DvCxTwPPE7SyEwx5Pzq4i
+Apply to OpenJK 260c59c2 with: git apply openjk-katarn.patch
 ---
- CMakeLists.txt                                |     5 +
- code/CMakeLists.txt                           |     3 +
- code/qcommon/qfiles.h                         |     2 +
- code/rd-katarn/CMakeLists.txt                 |    56 +
- code/rd-katarn/G2_API.cpp                     |  2345 +++
- code/rd-katarn/G2_bolts.cpp                   |   265 +
- code/rd-katarn/G2_bones.cpp                   |  4784 +++++++
- code/rd-katarn/G2_misc.cpp                    |  1981 +++
- code/rd-katarn/G2_surfaces.cpp                |   443 +
- code/rd-katarn/glext.h                        | 11770 ++++++++++++++++
- code/rd-katarn/katarn/kt_crash.cpp            |    61 +
- code/rd-katarn/katarn/kt_device.cpp           |   903 ++
- code/rd-katarn/katarn/kt_device.h             |   157 +
- code/rd-katarn/katarn/kt_gl.cpp               |   649 +
- code/rd-katarn/katarn/kt_render.cpp           |  1272 ++
- code/rd-katarn/katarn/kt_render.h             |   125 +
- code/rd-katarn/katarn/kt_shaders_gen.h        |  2468 ++++
- code/rd-katarn/katarn/kt_world.cpp            |   504 +
- code/rd-katarn/katarn/kt_world.h              |    52 +
- code/rd-katarn/katarn/kworld_format.h         |   125 +
- code/rd-katarn/katarn/shaders/common.hlsli    |   116 +
- code/rd-katarn/katarn/shaders/gen.py          |    20 +
- code/rd-katarn/katarn/shaders/legacy.hlsl     |    84 +
- .../katarn/shaders/legacy_gbuffer.hlsl        |   135 +
- code/rd-katarn/katarn/shaders/lighting.hlsl   |   373 +
- code/rd-katarn/katarn/shaders/post.hlsl       |   200 +
- code/rd-katarn/katarn/shaders/present.hlsl    |    17 +
- code/rd-katarn/katarn/shaders/saber.hlsl      |    84 +
- code/rd-katarn/katarn/shaders/sky.hlsl        |   130 +
- code/rd-katarn/katarn/shaders/ssao.hlsl       |    82 +
- code/rd-katarn/katarn/shaders/world.hlsl      |   286 +
- code/rd-katarn/qgl.h                          |   515 +
- code/rd-katarn/tr_WorldEffects.cpp            |  2187 +++
- code/rd-katarn/tr_WorldEffects.h              |    65 +
- code/rd-katarn/tr_backend.cpp                 |  1976 +++
- code/rd-katarn/tr_bsp.cpp                     |  1476 ++
- code/rd-katarn/tr_cmds.cpp                    |   518 +
- code/rd-katarn/tr_curve.cpp                   |   485 +
- code/rd-katarn/tr_draw.cpp                    |  1025 ++
- code/rd-katarn/tr_ghoul2.cpp                  |  4043 ++++++
- code/rd-katarn/tr_image.cpp                   |  1495 ++
- code/rd-katarn/tr_init.cpp                    |  1941 +++
- code/rd-katarn/tr_light.cpp                   |   535 +
- code/rd-katarn/tr_local.h                     |  1851 +++
- code/rd-katarn/tr_main.cpp                    |  1553 ++
- code/rd-katarn/tr_marks.cpp                   |   471 +
- code/rd-katarn/tr_mesh.cpp                    |   437 +
- code/rd-katarn/tr_model.cpp                   |  1194 ++
- code/rd-katarn/tr_quicksprite.cpp             |   262 +
- code/rd-katarn/tr_quicksprite.h               |    58 +
- code/rd-katarn/tr_scene.cpp                   |   415 +
- code/rd-katarn/tr_shade.cpp                   |  2481 ++++
- code/rd-katarn/tr_shade_calc.cpp              |  1382 ++
- code/rd-katarn/tr_shader.cpp                  |  3987 ++++++
- code/rd-katarn/tr_shadows.cpp                 |   723 +
- code/rd-katarn/tr_skin.cpp                    |   485 +
- code/rd-katarn/tr_sky.cpp                     |   854 ++
- code/rd-katarn/tr_stl.cpp                     |    78 +
- code/rd-katarn/tr_stl.h                       |    42 +
- code/rd-katarn/tr_subs.cpp                    |    99 +
- code/rd-katarn/tr_surface.cpp                 |  2155 +++
- code/rd-katarn/tr_surfacesprites.cpp          |  1511 ++
- code/rd-katarn/tr_world.cpp                   |   817 ++
- 63 files changed, 66613 insertions(+)
- create mode 100644 code/rd-katarn/CMakeLists.txt
- create mode 100644 code/rd-katarn/G2_API.cpp
- create mode 100644 code/rd-katarn/G2_bolts.cpp
- create mode 100644 code/rd-katarn/G2_bones.cpp
- create mode 100644 code/rd-katarn/G2_misc.cpp
- create mode 100644 code/rd-katarn/G2_surfaces.cpp
- create mode 100644 code/rd-katarn/glext.h
- create mode 100644 code/rd-katarn/katarn/kt_crash.cpp
- create mode 100644 code/rd-katarn/katarn/kt_device.cpp
- create mode 100644 code/rd-katarn/katarn/kt_device.h
- create mode 100644 code/rd-katarn/katarn/kt_gl.cpp
- create mode 100644 code/rd-katarn/katarn/kt_render.cpp
- create mode 100644 code/rd-katarn/katarn/kt_render.h
- create mode 100644 code/rd-katarn/katarn/kt_shaders_gen.h
- create mode 100644 code/rd-katarn/katarn/kt_world.cpp
- create mode 100644 code/rd-katarn/katarn/kt_world.h
- create mode 100644 code/rd-katarn/katarn/kworld_format.h
- create mode 100644 code/rd-katarn/katarn/shaders/common.hlsli
- create mode 100644 code/rd-katarn/katarn/shaders/gen.py
- create mode 100644 code/rd-katarn/katarn/shaders/legacy.hlsl
- create mode 100644 code/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl
- create mode 100644 code/rd-katarn/katarn/shaders/lighting.hlsl
- create mode 100644 code/rd-katarn/katarn/shaders/post.hlsl
- create mode 100644 code/rd-katarn/katarn/shaders/present.hlsl
- create mode 100644 code/rd-katarn/katarn/shaders/saber.hlsl
- create mode 100644 code/rd-katarn/katarn/shaders/sky.hlsl
- create mode 100644 code/rd-katarn/katarn/shaders/ssao.hlsl
- create mode 100644 code/rd-katarn/katarn/shaders/world.hlsl
- create mode 100644 code/rd-katarn/qgl.h
- create mode 100644 code/rd-katarn/tr_WorldEffects.cpp
- create mode 100644 code/rd-katarn/tr_WorldEffects.h
- create mode 100644 code/rd-katarn/tr_backend.cpp
- create mode 100644 code/rd-katarn/tr_bsp.cpp
- create mode 100644 code/rd-katarn/tr_cmds.cpp
- create mode 100644 code/rd-katarn/tr_curve.cpp
- create mode 100644 code/rd-katarn/tr_draw.cpp
- create mode 100644 code/rd-katarn/tr_ghoul2.cpp
- create mode 100644 code/rd-katarn/tr_image.cpp
- create mode 100644 code/rd-katarn/tr_init.cpp
- create mode 100644 code/rd-katarn/tr_light.cpp
- create mode 100644 code/rd-katarn/tr_local.h
- create mode 100644 code/rd-katarn/tr_main.cpp
- create mode 100644 code/rd-katarn/tr_marks.cpp
- create mode 100644 code/rd-katarn/tr_mesh.cpp
- create mode 100644 code/rd-katarn/tr_model.cpp
- create mode 100644 code/rd-katarn/tr_quicksprite.cpp
- create mode 100644 code/rd-katarn/tr_quicksprite.h
- create mode 100644 code/rd-katarn/tr_scene.cpp
- create mode 100644 code/rd-katarn/tr_shade.cpp
- create mode 100644 code/rd-katarn/tr_shade_calc.cpp
- create mode 100644 code/rd-katarn/tr_shader.cpp
- create mode 100644 code/rd-katarn/tr_shadows.cpp
- create mode 100644 code/rd-katarn/tr_skin.cpp
- create mode 100644 code/rd-katarn/tr_sky.cpp
- create mode 100644 code/rd-katarn/tr_stl.cpp
- create mode 100644 code/rd-katarn/tr_stl.h
- create mode 100644 code/rd-katarn/tr_subs.cpp
- create mode 100644 code/rd-katarn/tr_surface.cpp
- create mode 100644 code/rd-katarn/tr_surfacesprites.cpp
- create mode 100644 code/rd-katarn/tr_world.cpp
-
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 149e82d7..0d280a01 100644
 --- a/CMakeLists.txt
@@ -23671,10 +23543,10 @@ index 00000000..296ed7a4
 +void APIENTRY ktgl_UnlockArraysEXT(void) {}
 diff --git a/code/rd-katarn/katarn/kt_render.cpp b/code/rd-katarn/katarn/kt_render.cpp
 new file mode 100644
-index 00000000..ab98dbab
+index 00000000..cc4d2641
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_render.cpp
-@@ -0,0 +1,1272 @@
+@@ -0,0 +1,1639 @@
 +// KatarnEngine - the frame.
 +//
 +// Per 3D world view:
@@ -23693,6 +23565,7 @@ index 00000000..ab98dbab
 +#include <math.h>
 +#include <unordered_map>
 +#include <vector>
++#include <algorithm>
 +#include <string>
 +
 +namespace kt {
@@ -23706,6 +23579,7 @@ index 00000000..ab98dbab
 +static cvar_t* kt_tonemap = nullptr;
 +static cvar_t* kt_fogScale = nullptr;
 +static cvar_t* kt_dynGlow, * kt_contactShadows, * kt_lightShadows;
++static cvar_t* kt_probes = nullptr, * kt_probeScale = nullptr, * kt_parallax = nullptr;
 +static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 +
 +static void RegisterCvars()
@@ -23739,7 +23613,20 @@ index 00000000..ab98dbab
 +	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
 +	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
 +	kt_saberGlow = ri.Cvar_Get("kt_saberGlowScale", "1", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene (1 = as authored, like rend2)
-+	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
++	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);
++	kt_probes = ri.Cvar_Get("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
++	kt_probeScale = ri.Cvar_Get("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
++	kt_parallax = ri.Cvar_Get("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)   // 1: Katarn draws its own procedural blades instead of the game's
++
++	// settings saved by older builds (tuning experiments) are put back to the current defaults once
++	cvar_t* ver = ri.Cvar_Get("kt_configVersion", "0", CVAR_ARCHIVE);
++	if (ver->integer < 2) {
++		const char* reset[][2] = { { "kt_bloom", "0.06" }, { "kt_dynamicGlow", "1" }, { "kt_glowBoost", "3" }, { "kt_saberGlowScale", "1" },
++			{ "kt_saberLight", "1" }, { "kt_saberDraw2", "0" }, { "kt_exposure", "0" }, { "kt_manualExposure", "0" } };
++		for (auto& r : reset) ri.Cvar_Set(r[0], r[1]);
++		ri.Cvar_Set("kt_configVersion", "2");
++		ri.Printf(PRINT_ALL, "KatarnEngine: bloom, glow and saber settings reset to the defaults\n");
++	}
 +}
 +
 +// ------------------------------------------------------------------------------------------------ math
@@ -23791,6 +23678,7 @@ index 00000000..ab98dbab
 +	float ambientSH[9][4];
 +	float extraParams[4];      // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 +	float viewProjNoJitter[16];   // this frame's view-projection without the TAA jitter
++	uint32_t probeParams[4];      // x reflection probe buffer, y probe count, z strength (float)
 +};
 +
 +struct LVert { float pos[3]; float normal[3]; float uv[2]; float lmuv[2]; uint32_t color; };
@@ -23833,6 +23721,7 @@ index 00000000..ab98dbab
 +	std::vector<LegacyDraw> stream;
 +	std::vector<DeferredRec> deferred;
 +	bool inView = false, viewWorld = false, reversedZ = false;
++	bool portalThisFrame = false;
 +	ViewDesc view;
 +	float proj[16] = {}, viewProj[16] = {}, prevViewProj[16] = {};
 +	float vpNoJitter[16] = {}, lastVpNoJitter[16] = {};   // TAA: unjittered, this and the last full-screen world view
@@ -23843,7 +23732,16 @@ index 00000000..ab98dbab
 +	bool firstFrame = true;
 +	float cascadeTexel[4] = {};
 +	int lastSpeeds = 0;
++	// reflection probes
++	struct Probe { float origin[3]; float radius; int cluster; Texture cube; uint32_t mipSrv[8]; uint8_t faces; bool valid; };
++	std::vector<Probe> probes;
++	uint32_t probeSrv[kFrames] = {};
++	ID3D12PipelineState* csProbe = nullptr;
++	bool capture = false;            // this view is a probe capture
++	int capProbe = 0, capFace = 0;
++	float capSavedVP[16] = {};
 +} R;
++static constexpr uint32_t kProbeSize = 128, kProbeMips = 8, kMaxProbes = 64;
 +
 +static std::string ShaderSource(const char* file)
 +{
@@ -23870,6 +23768,7 @@ index 00000000..ab98dbab
 +		{ "legacy", kt_src_legacy_parts }, { "present", kt_src_present_parts }, { "world", kt_src_world_parts },
 +		{ "legacy_gbuffer", kt_src_legacy_gbuffer_parts }, { "sky", kt_src_sky_parts }, { "lighting", kt_src_lighting_parts },
 +		{ "ssao", kt_src_ssao_parts }, { "post", kt_src_post_parts }, { "saber", kt_src_saber_parts },
++		{ "probes", kt_src_probes_parts },
 +	};
 +	for (auto& e : table) if (!strcmp(e.name, file)) { std::string s; for (int i = 0; e.parts[i]; i++) s += e.parts[i]; return s; }
 +	return std::string();
@@ -24066,6 +23965,11 @@ index 00000000..ab98dbab
 +	R.csExposure = CreateComputePSO(R_Shader("post", "ExposureCS", "cs_5_1"), "exposure");
 +	R.csBloomDown = CreateComputePSO(R_Shader("post", "BloomDownCS", "cs_5_1"), "bloom down");
 +	R.csBloomUp = CreateComputePSO(R_Shader("post", "BloomUpCS", "cs_5_1"), "bloom up");
++	{
++		Shader ps = R_Shader("probes", "FilterCS", "cs_5_1");   // optional: without it there are no probes
++		if (ps.ok) R.csProbe = CreateComputePSO(ps, "probe filter");
++		if (ps.blob) ps.blob->Release();
++	}
 +	return R.presentPSO != nullptr;
 +}
 +
@@ -24111,6 +24015,9 @@ index 00000000..ab98dbab
 +	return ok;
 +}
 +
++static void ProbesDestroy();
++static uint32_t ProbeList(const float* org);
++
 +// ------------------------------------------------------------------------------------------------ init
 +void InstallCrashHandler();
 +bool R_Init(void* hwnd, int width, int height)
@@ -24140,6 +24047,7 @@ index 00000000..ab98dbab
 +	}
 +	CreateBuffer(R.sh, 256, true, "sky sh");
 +	for (int i = 0; i < kFrames; i++) R.lightSrv[i] = AllocDescriptor();
++	for (int i = 0; i < kFrames; i++) R.probeSrv[i] = AllocDescriptor();
 +	R.ready = true;
 +	R.firstFrame = true;
 +	GL_ResetState();
@@ -24155,12 +24063,13 @@ index 00000000..ab98dbab
 +	World_Shutdown();
 +	GL_ShutdownTextures();
 +	DestroyTargets();
++	ProbesDestroy();
 +	DestroyBuffer(R.exposure);
 +	DestroyBuffer(R.sh);
 +	for (auto& kv : R.psos) if (kv.second) kv.second->Release();
 +	R.psos.clear();
 +	ID3D12PipelineState* ps[] = { R.presentPSO, R.tonemapPSO, R.fxaaPSO, R.lgPSO[0], R.lgPSO[1], R.lgPSO[2], R.lgShadowPSO, R.lgShadowAlphaPSO,
-+		R.csSkyLut, R.csSkySh, R.csLighting, R.csAo, R.csAoBlur, R.csHist, R.csExposure, R.csBloomDown, R.csBloomUp };
++		R.csSkyLut, R.csSkySh, R.csLighting, R.csAo, R.csAoBlur, R.csHist, R.csExposure, R.csBloomDown, R.csBloomUp, R.csProbe };
 +	for (auto* p : ps) if (p) p->Release();
 +	Shader* sh[] = { &R.legacyVS, &R.legacyPS, &R.fsVS, &R.presentPS, &R.tonemapPS, &R.fxaaPS, &R.lgVS, &R.lgPS, &R.lgShadowPS };
 +	for (auto* s : sh) if (s->blob) s->blob->Release();
@@ -24277,6 +24186,7 @@ index 00000000..ab98dbab
 +{
 +	if (!R.ready) return;
 +	EnsureList();
++	R.portalThisFrame = false;
 +	int now = ri.Milliseconds();
 +	R.dt = R.lastMsec ? Q_min(0.25f, Q_max(0.0005f, (now - R.lastMsec) * 0.001f)) : 0.016f;
 +	R.lastMsec = now;
@@ -24336,6 +24246,11 @@ index 00000000..ab98dbab
 +	FlushStream(0);
 +	R.view = v;
 +	R.inView = true;
++	R.capture = (v.rdflags & RDF_KT_PROBE) != 0 && v.world;
++	if (R.capture) {
++		R.capProbe = (v.rdflags >> 20) & 63; R.capFace = (v.rdflags >> 26) & 7;
++		memcpy(R.capSavedVP, R.viewProj, 64);        // a capture leaves the camera history (SSR reprojection) alone
++	}
 +	R.viewWorld = v.world;
 +	R.reversedZ = true;
 +	// reversed-Z infinite perspective in GL eye space
@@ -24384,6 +24299,15 @@ index 00000000..ab98dbab
 +	c.postParams[3] = kt_glowBoost->value;
 +	c.extraParams[0] = (float)(1 << tr.overbrightBits);
 +	c.extraParams[1] = kt_tonemap->integer ? 1.0f : 0.0f;
++	// sky portal maps: the portal view is drawn first; the main view keeps it where it drew nothing (its sky)
++	if (v.skyPortal) R.portalThisFrame = true;
++	c.extraParams[2] = (!v.skyPortal && R.portalThisFrame && !R.capture) ? 1.0f : 0.0f;
++	if (v.world && !R.capture && kt_probes->integer) {
++		c.probeParams[0] = R.probeSrv[g.frameIndex];
++		c.probeParams[1] = ProbeList(v.origin);
++		float ps = Q_max(0.0f, kt_probeScale->value);
++		memcpy(&c.probeParams[2], &ps, 4);
++	}
 +	if (!World_Active()) c.postParams[2] = 1.0f;   // legacy maps: fixed exposure (their content is display-referred)
 +
 +	// sun cascades
@@ -24500,6 +24424,12 @@ index 00000000..ab98dbab
 +		float grid[12] = { d.gridAmbient[0], d.gridAmbient[1], d.gridAmbient[2], 0, d.gridDirected[0], d.gridDirected[1], d.gridDirected[2], 0,
 +			d.gridDir[0], d.gridDir[1], d.gridDir[2], 0 };
 +		memcpy(c + 176, grid, 48);
++		GLTexture* tdx = d.deluxeTex ? R_GLTexture(d.deluxeTex, false) : nullptr;
++		R_ResolveTexture(tdx);
++		float px = (kt_parallax && kt_parallax->integer && d.normalTex) ? d.parallax : 0.0f;
++		uint32_t ex[4] = { R_TextureSrv(tdx, false), 0, 0, 0 };
++		memcpy(&ex[1], &px, 4);
++		memcpy(c + 224, ex, 16);
 +	}
 +	DeferredRec r;
 +	r.vb = vb.gpu; r.ib = ib.gpu; r.cb = cb.gpu;
@@ -24552,6 +24482,7 @@ index 00000000..ab98dbab
 +	cl->DrawInstanced(3, 1, 0, 0);
 +}
 +
++static void ProbeCaptureFace(ID3D12GraphicsCommandList* cl);
 +static void RenderWorldView()
 +{
 +	ID3D12GraphicsCommandList* cl = R.cl;
@@ -24693,7 +24624,7 @@ index 00000000..ab98dbab
 +	{
 +		uint32_t k[8] = { R.hdr.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, R.ao.srv,
 +			(ao ? 1u : 0u) | (shadows ? 2u : 0u) | (kt_volumetric->integer ? 4u : 0u) | (kt_contactShadows->integer ? 8u : 0u) | (kt_lightShadows->integer ? 16u : 0u), (uint32_t)Q_max(0, kt_debugView->integer),
-+			(kt_ssr->integer && R.hdrPrevValid) ? R.hdrPrev.srv : 0u };
++			(kt_ssr->integer && R.hdrPrevValid && !R.capture) ? R.hdrPrev.srv : 0u };
 +		Dispatch(cl, R.csLighting, k, 8, gx, gy);
 +	}
 +
@@ -24746,6 +24677,12 @@ index 00000000..ab98dbab
 +			}
 +	}
 +	// keep this frame's lit scene for next frame's screen-space reflections
++	if (R.capture) {
++		// probe capture: the lit HDR view goes into the probe's cube face; no camera effects
++		ProbeCaptureFace(cl);
++		cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.defaultCB);
++		return;
++	}
 +	if (kt_ssr->integer) {
 +		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_SOURCE);
 +		Transition(cl, R.hdrPrev, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -24775,7 +24712,7 @@ index 00000000..ab98dbab
 +			if (i > 0) { dw = Q_max(1u, (uint32_t)(R.bloomDown[i - 1].width / 2)); dh = Q_max(1u, (uint32_t)(R.bloomDown[i - 1].height / 2)); }
 +			dw = Q_min(dw, d.width); dh = Q_min(dh, d.height);
 +			uint32_t k[8] = { src, d.uav[0], 0, 0, d.width, d.height, 0, i == 0 ? 0u : 1u };
-+			if (i == 0) { k[2] = R.glow.srv; float gs = kt_dynGlow->value / Q_max(1e-3f, kt_bloom->value); memcpy(&k[6], &gs, 4); }
++			if (i == 0) { k[2] = R.glow.srv; float gs = kt_dynGlow->value / (Q_max(1e-3f, kt_bloom->value) * (float)R.bloomLevels); memcpy(&k[6], &gs, 4); }
 +			Dispatch(cl, R.csBloomDown, k, 8, (d.width + 7) / 8, (d.height + 7) / 8);
 +			Transition(cl, d, srvAll);
 +			src = d.srv;
@@ -24887,6 +24824,7 @@ index 00000000..ab98dbab
 +		cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
 +		FlushStream(0);
 +	}
++	if (R.capture) { memcpy(R.viewProj, R.capSavedVP, 64); R.capture = false; }
 +	R.stream.clear();
 +	R.deferred.clear();
 +	R.inView = false;
@@ -24946,13 +24884,314 @@ index 00000000..ab98dbab
 +		World_Active() ? "loaded" : "none");
 +}
 +
++// ------------------------------------------------------------------------------------------------ reflection probes
++// rend2-style cubemaps for old maps and HD worlds. Positions come from the map's entities (misc_cubemap when the map
++// has them, else where players and NPCs go: spawn points, waypoints, items). The renderer captures them itself once
++// the game draws the world: 128x128 views queued at the start of a frame (all six faces per frame on BSP maps, two
++// on HD worlds), each lit like the game view, copied into the probe's cube and filtered into a mip chain whose
++// levels are rougher reflections.
++
++// the BSP leaf cluster of a point (-1 = in solid / outside the map)
++static int PointCluster(const float* p)
++{
++	if (!tr.world || !tr.world->nodes) return -1;
++	mnode_t* n = tr.world->nodes;
++	while (n->contents == -1) {
++		const cplane_t* pl = n->plane;
++		n = (DotProduct(p, pl->normal) - pl->dist > 0) ? n->children[0] : n->children[1];
++	}
++	return n->cluster;
++}
++
++static struct ProbeFront {
++	std::vector<RState::Probe> list;   // positions (textures live in R.probes)
++	std::vector<uint8_t> done;
++	int scenes = 0, lastSceneFrame = -100, time = 0;
++	float viewOrg[3] = {};
++	int current = -1, face = 0;
++	bool logged = false;
++} PF;
++
++static void ProbesDestroy()
++{
++	for (auto& p : R.probes) {
++		if (p.cube.res) DestroyTexture(p.cube);
++		for (uint32_t& s : p.mipSrv) if (s) { FreeDescriptor(s); s = 0; }
++	}
++	R.probes.clear();
++}
++
++// the back end's probes follow the front end's list (a new map, or the renderer restarted)
++static void ProbesSync()
++{
++	ProbesDestroy();
++	R.probes = PF.list;
++	for (auto& p : R.probes) { p.cube = Texture(); memset(p.mipSrv, 0, sizeof(p.mipSrv)); p.faces = 0; p.valid = false; }
++	PF.done.assign(PF.list.size(), 0);
++	PF.current = -1; PF.face = 0;
++}
++
++void Probes_SetEntities(const char* text)
++{
++	PF.list.clear();
++	PF.scenes = 0; PF.lastSceneFrame = -100; PF.logged = false;
++	struct Cand { float o[3]; int pri; };
++	std::vector<Cand> cands;
++	const char* p = text ? text : "";
++	auto token = [&](std::string& out) -> bool {
++		while (*p && (unsigned char)*p <= ' ') p++;
++		if (!*p) return false;
++		if (*p == '{' || *p == '}') { out.assign(p, 1); p++; return true; }
++		if (*p == '"') {
++			const char* s0 = ++p;
++			while (*p && *p != '"') p++;
++			out.assign(s0, p - s0);
++			if (*p) p++;
++			return true;
++		}
++		const char* s0 = p;
++		while (*p && (unsigned char)*p > ' ') p++;
++		out.assign(s0, p - s0);
++		return true;
++	};
++	std::string t, key, val;
++	while (token(t)) {
++		if (t != "{") continue;
++		std::string cls, origin;
++		bool brush = false;
++		while (token(key) && key != "}") {
++			if (!token(val)) break;
++			if (!Q_stricmp(key.c_str(), "classname")) cls = val;
++			else if (!Q_stricmp(key.c_str(), "origin")) origin = val;
++			else if (!Q_stricmp(key.c_str(), "model") && val[0] == '*') brush = true;
++		}
++		if (origin.empty() || brush || cls.empty()) continue;
++		Cand c;
++		if (sscanf(origin.c_str(), "%f %f %f", &c.o[0], &c.o[1], &c.o[2]) != 3) continue;
++		const char* n = cls.c_str();
++		if (!Q_stricmp(n, "misc_cubemap")) c.pri = 0;
++		else if (!Q_stricmpn(n, "info_player", 11)) c.pri = 1;
++		else if (!Q_stricmpn(n, "NPC_", 4) || !Q_stricmp(n, "waypoint") || !Q_stricmpn(n, "waypoint_", 9) || !Q_stricmpn(n, "item_", 5)
++			|| !Q_stricmpn(n, "weapon_", 7) || !Q_stricmpn(n, "ammo_", 5)) c.pri = 2;
++		else if (!Q_stricmp(n, "light") || !Q_stricmpn(n, "misc_", 5) || !Q_stricmpn(n, "fx_", 3)) c.pri = 3;
++		else continue;   // targets, triggers, path corners, info_null...: often outside the playable space
++		cands.push_back(c);
++	}
++	bool authored = false;
++	for (auto& c : cands) if (c.pri == 0) authored = true;
++	std::stable_sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.pri < b.pri; });
++	// usable spots: in the open (a valid cluster), about eye height above what stands on the ground
++	struct Spot { float o[3]; int pri, cluster; };
++	std::vector<Spot> pool;
++	for (auto& c : cands) {
++		if (authored && c.pri != 0) continue;
++		Spot s = { { c.o[0], c.o[1], c.o[2] }, c.pri, -1 };
++		if (c.pri) s.o[2] += 40;
++		s.cluster = PointCluster(s.o);
++		if (s.cluster < 0 && c.pri) { s.o[2] -= 40; s.cluster = PointCluster(s.o); }
++		if (s.cluster < 0 && c.pri) continue;
++		float minSpace = c.pri ? 384.0f : 64.0f;
++		bool close = false;
++		for (auto& q : pool) {
++			float d[3] = { q.o[0] - s.o[0], q.o[1] - s.o[1], q.o[2] - s.o[2] };
++			if (Dot3(d, d) < minSpace * minSpace) { close = true; break; }
++		}
++		if (!close) pool.push_back(s);
++	}
++	// at most kMaxProbes: player starts first, then the spot farthest from those already chosen (even coverage)
++	std::vector<Spot> chosen;
++	std::vector<float> dmin(pool.size(), 1e30f);
++	std::vector<uint8_t> used(pool.size(), 0);
++	auto take = [&](size_t i) {
++		used[i] = 1; chosen.push_back(pool[i]);
++		for (size_t k = 0; k < pool.size(); k++) {
++			float d[3] = { pool[k].o[0] - pool[i].o[0], pool[k].o[1] - pool[i].o[1], pool[k].o[2] - pool[i].o[2] };
++			dmin[k] = Q_min(dmin[k], Dot3(d, d));
++		}
++	};
++	for (size_t i = 0; i < pool.size() && chosen.size() < kMaxProbes; i++) if (pool[i].pri <= 1) take(i);
++	while (chosen.size() < kMaxProbes) {
++		size_t best = (size_t)-1; float bd = -1;
++		for (size_t i = 0; i < pool.size(); i++) if (!used[i] && dmin[i] > bd) { bd = dmin[i]; best = i; }
++		if (best == (size_t)-1) break;
++		take(best);
++	}
++	for (size_t i = 0; i < chosen.size(); i++) {
++		RState::Probe pr = {};
++		pr.origin[0] = chosen[i].o[0]; pr.origin[1] = chosen[i].o[1]; pr.origin[2] = chosen[i].o[2];
++		pr.cluster = chosen[i].cluster;
++		// parallax sphere: about the distance to the next probe (the size of the space it stands in)
++		float nd = 1e30f;
++		for (size_t k = 0; k < chosen.size(); k++) if (k != i) {
++			float d[3] = { chosen[k].o[0] - pr.origin[0], chosen[k].o[1] - pr.origin[1], chosen[k].o[2] - pr.origin[2] };
++			nd = Q_min(nd, sqrtf(Dot3(d, d)));
++		}
++		pr.radius = nd > 1e29f ? 1024.0f : Q_max(512.0f, Q_min(1536.0f, nd));
++		PF.list.push_back(pr);
++	}
++	ProbesSync();
++	ri.Printf(PRINT_DEVELOPER, "KatarnEngine: %d reflection probes (%s)\n", (int)PF.list.size(), authored ? "misc_cubemap" : "from entities");
++}
++
++void Probes_NoteScene(const void* refdef)
++{
++	const refdef_t* fd = (const refdef_t*)refdef;
++	if (!fd || (fd->rdflags & (RDF_NOWORLDMODEL | RDF_SKYBOXPORTAL | RDF_KT_PROBE))) return;
++	PF.scenes++;
++	PF.lastSceneFrame = tr.frameCount;
++	PF.time = fd->time;
++	VectorCopy(fd->vieworg, PF.viewOrg);
++}
++
++void Probes_BeginFrame()
++{
++	if (!R.ready || !tr.world || PF.list.empty() || !kt_probes || !kt_probes->integer || !R.csProbe) return;
++	if (R.probes.size() != PF.list.size()) ProbesSync();
++	// only once the game is drawing the world (its textures and shaders are in), and only while it keeps doing so
++	if (PF.scenes < 30 || tr.frameCount - PF.lastSceneFrame > 3) return;
++	if ((uint32_t)glConfig.vidWidth < kProbeSize || (uint32_t)glConfig.vidHeight < kProbeSize) return;
++	// cube faces as seen from Quake space: forward, right, up (D3D cube convention with the sample direction
++	// (x, z, y), see lighting.hlsl)
++	static const float face[6][3][3] = {
++		{ { 1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } }, { { -1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } },
++		{ { 0, 0, 1 }, { 1, 0, 0 }, { 0, -1, 0 } }, { { 0, 0, -1 }, { 1, 0, 0 }, { 0, 1, 0 } },
++		{ { 0, 1, 0 }, { 1, 0, 0 }, { 0, 0, 1 } }, { { 0, -1, 0 }, { -1, 0, 0 }, { 0, 0, 1 } } };
++	int faces = World_Active() ? 2 : 6;
++	while (faces-- > 0) {
++		if (PF.current < 0) {
++			// next: the probe nearest the camera
++			float best = 1e30f;
++			for (size_t i = 0; i < PF.list.size(); i++) if (!PF.done[i]) {
++				float d[3] = { PF.list[i].origin[0] - PF.viewOrg[0], PF.list[i].origin[1] - PF.viewOrg[1], PF.list[i].origin[2] - PF.viewOrg[2] };
++				float d2 = Dot3(d, d);
++				if (d2 < best) { best = d2; PF.current = (int)i; }
++			}
++			if (PF.current < 0) {
++				if (!PF.logged) { PF.logged = true; ri.Printf(PRINT_DEVELOPER, "KatarnEngine: reflection probes captured\n"); }
++				return;
++			}
++			PF.face = 0;
++		}
++		refdef_t rd;
++		memset(&rd, 0, sizeof(rd));
++		rd.x = 0; rd.y = 0; rd.width = (int)kProbeSize; rd.height = (int)kProbeSize;
++		rd.fov_x = rd.fov_y = 90.0f;
++		VectorCopy(PF.list[PF.current].origin, rd.vieworg);
++		for (int a = 0; a < 3; a++) {
++			rd.viewaxis[0][a] = face[PF.face][0][a];
++			rd.viewaxis[1][a] = -face[PF.face][1][a];   // Quake axis 1 is left
++			rd.viewaxis[2][a] = face[PF.face][2][a];
++		}
++		rd.time = PF.time;
++		rd.rdflags = RDF_KT_PROBE | (PF.current << 20) | (PF.face << 26);
++		RE_ClearScene();
++		RE_RenderScene(&rd);
++		RE_ClearScene();
++		if (++PF.face == 6) { PF.done[PF.current] = 1; PF.current = -1; }
++	}
++}
++
++// probes for a view: the ones in clusters the camera can see (less light leaking through walls), else all
++static uint32_t ProbeList(const float* org)
++{
++	std::vector<uint32_t> pick;
++	const byte* vis = nullptr;
++	if (tr.world && tr.world->vis) {
++		int cl = PointCluster(org);
++		if (cl >= 0 && cl < tr.world->numClusters) vis = tr.world->vis + cl * tr.world->clusterBytes;
++	}
++	for (int pass = 0; pass < 2 && pick.empty(); pass++)
++		for (uint32_t i = 0; i < R.probes.size(); i++) {
++			const RState::Probe& p = R.probes[i];
++			if (!p.valid) continue;
++			if (!pass && vis && p.cluster >= 0 && !(vis[p.cluster >> 3] & (1 << (p.cluster & 7)))) continue;
++			pick.push_back(i);
++		}
++	if (pick.empty()) return 0;
++	struct G { float pos[3], radius; uint32_t srv, mips, pad[2]; };
++	UploadAlloc a = Upload(pick.size() * sizeof(G), 256);
++	G* gp = (G*)a.cpu;
++	for (size_t k = 0; k < pick.size(); k++) {
++		const RState::Probe& p = R.probes[pick[k]];
++		G e = { { p.origin[0], p.origin[1], p.origin[2] }, p.radius, p.cube.srv, p.cube.mips, { 0, 0 } };
++		gp[k] = e;
++	}
++	D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
++	sd.Format = DXGI_FORMAT_R32_TYPELESS;
++	sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
++	sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++	sd.Buffer.FirstElement = a.offset / 4;
++	sd.Buffer.NumElements = (UINT)(pick.size() * sizeof(G) / 4);
++	sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
++	g.dev->CreateShaderResourceView(a.res, &sd, CpuHandle(R.probeSrv[g.frameIndex]));
++	return (uint32_t)pick.size();
++}
++
++static void SubresourceBarrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* r, uint32_t mip, uint32_t mips, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b)
++{
++	D3D12_RESOURCE_BARRIER br[6] = {};
++	for (uint32_t f = 0; f < 6; f++) {
++		br[f].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++		br[f].Transition.pResource = r;
++		br[f].Transition.Subresource = mip + f * mips;
++		br[f].Transition.StateBefore = a;
++		br[f].Transition.StateAfter = b;
++	}
++	cl->ResourceBarrier(6, br);
++}
++
++static void ProbeCaptureFace(ID3D12GraphicsCommandList* cl)
++{
++	if (R.capProbe < 0 || R.capProbe >= (int)R.probes.size() || R.capFace > 5) return;
++	RState::Probe& p = R.probes[R.capProbe];
++	if (!p.cube.res) {
++		if (!CreateTexture(p.cube, kProbeSize, kProbeSize, kProbeMips, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_CUBE | TEX_UAV, 1, nullptr, "reflection probe"))
++			return;
++		for (uint32_t m = 0; m < kProbeMips; m++) {
++			D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
++			sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
++			sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++			sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
++			sd.Texture2DArray.MostDetailedMip = m; sd.Texture2DArray.MipLevels = 1;
++			sd.Texture2DArray.FirstArraySlice = 0; sd.Texture2DArray.ArraySize = 6;
++			p.mipSrv[m] = AllocDescriptor();
++			g.dev->CreateShaderResourceView(p.cube.res, &sd, CpuHandle(p.mipSrv[m]));
++		}
++	}
++	const ViewConstants& c = R.vc;
++	Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_SOURCE);
++	Transition(cl, p.cube, D3D12_RESOURCE_STATE_COPY_DEST);
++	D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
++	dst.pResource = p.cube.res; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = (UINT)R.capFace * p.cube.mips;
++	src.pResource = R.hdr.res; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
++	D3D12_BOX box = { (UINT)c.viewport[0], (UINT)c.viewport[1], 0, (UINT)c.viewport[0] + kProbeSize, (UINT)c.viewport[1] + kProbeSize, 1 };
++	cl->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
++	p.faces |= (uint8_t)(1u << R.capFace);
++	if (p.faces != 63) return;
++
++	// all six faces: filter the mip chain, each level a wider cone of the one above it
++	const D3D12_RESOURCE_STATES rd = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++	Transition(cl, p.cube, rd);
++	cl->SetPipelineState(R.csProbe);
++	for (uint32_t m = 1; m < p.cube.mips; m++) {
++		uint32_t size = Q_max(1u, kProbeSize >> m);
++		SubresourceBarrier(cl, p.cube.res, m, p.cube.mips, rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++		uint32_t k[4] = { p.mipSrv[m - 1], p.cube.uav[m], size, m };
++		cl->SetComputeRoot32BitConstants(RP_CONSTANTS, 4, k, 0);
++		cl->Dispatch((size + 7) / 8, (size + 7) / 8, 6);
++		SubresourceBarrier(cl, p.cube.res, m, p.cube.mips, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, rd);
++	}
++	Transition(cl, p.cube, rd | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++	p.valid = true;
++}
++
 +} // namespace kt
 diff --git a/code/rd-katarn/katarn/kt_render.h b/code/rd-katarn/katarn/kt_render.h
 new file mode 100644
-index 00000000..00aed102
+index 00000000..8074e542
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_render.h
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,134 @@
 +// KatarnEngine - frame renderer interface (used by the vanilla back end and the GL translation layer)
 +#pragma once
 +#include "kt_device.h"
@@ -25060,6 +25299,8 @@ index 00000000..00aed102
 +	uint32_t flags;                            // see legacy_gbuffer.hlsl gflags
 +	float alphaRef, roughness, metallic, bakedScale;
 +	float tint[4];
++	uint32_t deluxeTex;                        // GL name of the lightmap's deluxemap (light direction), 0 = none
++	float parallax;                            // parallax depth from the normal map's alpha, 0 = none
 +	int cull;                                  // 0 none, 1 cull GL front faces, 2 cull GL back faces
 +	bool castShadow;
 +};
@@ -25074,16 +25315,23 @@ index 00000000..00aed102
 +void World_Unload();
 +bool World_Active();
 +
++// reflection probes (rend2 cubemaps): placed from the map's entities, captured by the renderer itself in the first
++// seconds of play (a few 128x128 views per frame), sampled by the deferred lighting with sphere parallax
++constexpr int RDF_KT_PROBE = 0x40000000;           // rdflags of a capture view: | probe << 20 | face << 26
++void Probes_SetEntities(const char* entityText);   // tr_bsp: the BSP entity string, after the world loaded
++void Probes_BeginFrame();                           // RE_BeginFrame: queues this frame's capture views
++void Probes_NoteScene(const void* refdef);          // RE_RenderScene: the game drew a world view (refdef_t*)
++
 +void R_GfxInfo();
 +extern void (*g_logCallback)(const char* msg);
 +
 +} // namespace kt
 diff --git a/code/rd-katarn/katarn/kt_shaders_gen.h b/code/rd-katarn/katarn/kt_shaders_gen.h
 new file mode 100644
-index 00000000..ec78246d
+index 00000000..e5b8b4ec
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_shaders_gen.h
-@@ -0,0 +1,2468 @@
+@@ -0,0 +1,2761 @@
 +// generated by shaders/gen.py - do not edit
 +#pragma once
 +
@@ -25146,8 +25394,9 @@ index 00000000..ec78246d
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -25282,7 +25531,7 @@ index 00000000..ec78246d
 +	if (drawTarget == 1) {
 +		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
 +		float s = (skyParams.w > 0.5 ? Overbright() : 1.0) / max(Exposure(), 1e-6);   // HD: legacy colours are scaled by identityLight
-+		if (flags & (1u << 11)) s *= glowBoost;
++		if ((flags & (1u << 11)) && skyParams.w > 0.5) s *= glowBoost;   // HD worlds only: old maps keep their authored glow
 +		s *= drawScale > 0 ? drawScale : 1.0;
 +		c.rgb = min(c.rgb * s, 1500.0);   // stacked additive sprites (saber glow) must not overflow the half-float scene
 +	}
@@ -25350,8 +25599,9 @@ index 00000000..ec78246d
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -25440,7 +25690,24 @@ index 00000000..ec78246d
 +	float4 gridAmbient;  // gflags 16: light grid (old BSP maps), 0-255 scale
 +	float4 gridDirected;
 +	float4 gridDir;      // world space, towards the light
++	uint deluxeTex;      // q3map2 deluxemap of the lightmap (world-space light direction), 0 = none
++	float parallaxDepth; // parallax from the normal map's alpha (height), uv units, 0 = none
++	uint2 pad2;
 +};
++
++// GGX highlight (times N.L) for one light direction
++float3 SpecGGX(float3 n, float3 V, float3 L, float rough, float3 f0)
++{
++	float nl = saturate(dot(n, L));
++	float3 H = normalize(L + V);
++	float r2 = max(rough * rough, 0.002);
++	float nh = saturate(dot(n, H)), nv = max(dot(n, V), 1e-3);
++	float D = r2 * r2 / (PI * pow(nh * nh * (r2 * r2 - 1) + 1, 2));
++	float k = r2 * 0.5;
++	float G = (nl / (nl * (1 - k) + k)) * (nv / (nv * (1 - k) + k));
++	float3 F = f0 + (1 - f0) * pow(1 - saturate(dot(H, V)), 5);
++	return D * G * F / max(4 * nl * nv, 1e-3) * nl;
++}
 +
 +struct VsIn { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float2 lmuv : TEXCOORD1; float4 color : COLOR; };
 +struct VsOut { float4 pos : SV_Position; float3 normal : NORMAL; float2 uv : TEXCOORD0; float2 lmuv : TEXCOORD1; float4 color : COLOR; float3 wpos : TEXCOORD2; };
@@ -25463,36 +25730,64 @@ index 00000000..ec78246d
 +
 +GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 +{
-+	float4 a = tint;
-+	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].Sample(sWrap, i.uv);
-+	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
-+	if (gflags & 1) clip(a.a - alphaRef);
 +	float3 n = normalize(i.normal);
 +	// Quake's front faces are clockwise (it culls GL_FRONT with the CCW default), so a "front" face here is the back
 +	// of the surface: flip the normal towards the viewer only then
 +	if (front) n = -n;
++	float3 n0 = n;
++	float3 V = normalize(camPos.xyz - i.wpos);
++	float2 uv = i.uv;
++	float2 uvdx = ddx(i.uv), uvdy = ddy(i.uv);
++	float3 T = 0, B = 0;
++	float invmax = 0;
 +	if (normalTex) {
 +		// no vertex tangents in the old formats: a cotangent frame from the screen-space derivatives
 +		float3 dp1 = ddx(i.wpos), dp2 = ddy(i.wpos);
-+		float2 duv1 = ddx(i.uv), duv2 = ddy(i.uv);
 +		float3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
-+		float3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-+		float3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-+		float invmax = rsqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
-+		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].Sample(sWrap, i.uv).xyz * 2 - 1;
++		T = dp2perp * uvdx.x + dp1perp * uvdy.x;
++		B = dp2perp * uvdx.y + dp1perp * uvdy.y;
++		invmax = rsqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
++		if (parallaxDepth > 0) {
++			// rend2 parallax: the normal map's alpha is the height (1 = top); march the view ray down through it
++			float3 Tn = T * invmax, Bn = B * invmax;
++			float3 vt = float3(dot(V, Tn), dot(V, Bn), dot(V, n));
++			if (vt.z > 0.05 && all(isfinite(vt))) {
++				float2 p = vt.xy / max(vt.z, 0.25) * parallaxDepth;
++				int steps = (int)lerp(16.0, 6.0, saturate(vt.z));
++				float stepD = 1.0 / steps;
++				float layer = 0, prevLayer = 0;
++				float depthHere = 1.0 - Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).a, prevDepth = depthHere;
++				[loop] for (int k = 0; k < 16 && k < steps && layer < depthHere; k++) {
++					prevLayer = layer; prevDepth = depthHere;
++					layer += stepD;
++					depthHere = 1.0 - Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, i.uv - p * layer, uvdx, uvdy).a;
++				}
++				// linear refinement between the last two layers
++				float after = depthHere - layer, before = prevDepth - prevLayer;
++				float w = saturate(after / min(after - before, -1e-4));
++				uv = i.uv - p * lerp(layer, prevLayer, w);
++			}
++		}
++	}
++	float4 a = tint;
++	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
++	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
++	if (gflags & 1) clip(a.a - alphaRef);
++	if (normalTex) {
++		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).xyz * 2 - 1;
 +		tn.z = sqrt(saturate(1 - dot(tn.xy, tn.xy)));
 +		float3 nm = normalize(T * invmax * tn.x - B * invmax * tn.y + n * tn.z);   // uv v runs down: flip the bitangent
 +		if (all(isfinite(nm))) n = nm;
 +	}
 +	float rough = roughness, metal = metallic, matAO = 1;
 +	if (rmoTex) {
-+		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].Sample(sWrap, i.uv).rgb;
++		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;
 +		if (rmoOrder == 1) r = r.gbr;     // orm -> rmo
 +		rough = r.x; metal = r.y; matAO = r.z;
 +	}
 +	if (specTex) {
 +		// rend2 specularMap: rgb = specular colour, a = gloss
-+		float4 sp = Tex2D[NonUniformResourceIndex(specTex)].Sample(sWrap, i.uv);
++		float4 sp = Tex2D[NonUniformResourceIndex(specTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
 +		rough = sp.a < 0.999 ? 1.0 - sp.a : saturate(1.0 - Luminance(sp.rgb) * 0.9);
 +	}
 +	// models without PBR maps are flagged (metal + 2) so the lighting keeps their reflections soft, like rend2
@@ -25500,7 +25795,28 @@ index 00000000..ec78246d
 +	bool authored = rmoTex != 0 || specTex != 0;
 +	float3 baked = 0;
 +	bool hasBaked = false;
-+	if ((gflags & 4) && lightmapTex) { baked = Tex2D[NonUniformResourceIndex(lightmapTex)].Sample(sClamp, i.lmuv).rgb * bakedScale; hasBaked = true; }
++	float3 bakedSpec = 0;
++	if ((gflags & 4) && lightmapTex) {
++		baked = Tex2D[NonUniformResourceIndex(lightmapTex)].Sample(sClamp, i.lmuv).rgb * bakedScale;
++		hasBaked = true;
++		if (deluxeTex) {
++			// deluxemap: the lightmap's light arrives from this direction - the normal map shades it, and it gets a
++			// highlight (rend2 deluxe mapping). A short vector = light from all around (less directional).
++			float3 L = Tex2D[NonUniformResourceIndex(deluxeTex)].Sample(sClamp, i.lmuv).xyz * 2 - 1;
++			float ll = length(L);
++			if (ll > 1e-3) {
++				L /= ll;
++				float dirAmt = saturate(ll * 1.2);
++				float n0l = max(saturate(dot(n0, L)), 0.2);
++				float shade = clamp(saturate(dot(n, L)) / n0l, 0.0, 2.0);
++				baked *= lerp(1.0, shade, dirAmt);
++				float3 f0s = lerp((rmoTex != 0 || specTex != 0) ? 0.04 : 0.012, a.rgb, saturate(metal));
++				bakedSpec = min(SpecGGX(n, V, L, clamp(rou)KTSRC",
++R"KTSRC(gh, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
++			}
++		}
++		else if (normalTex) baked *= saturate(dot(n, n0));   // no direction known: the bumps shade against the surface
++	}
 +	else if (gflags & 8) { baked = SrgbToLinear(i.color.rgb) * bakedScale; hasBaked = true; }
 +	float3 gridLit = 0;
 +	if (gflags & 16) {
@@ -25512,7 +25828,6 @@ index 00000000..ec78246d
 +		float3 amb = gridAmbient.rgb / 255.0, dirc = gridDirected.rgb / 255.0;
 +		float3 lightDisp = saturate(amb + dirc * ndl);
 +		float3 lit = a.rgb * (1 - saturate(metal)) * SrgbToLinear(lightDisp);
-+		float3 V = normalize(camPos.xyz - i.wpos);
 +		float3 H = normalize(L + V);
 +		float r2 = max(rough * rough, 0.002);
 +		float nh = saturate(dot(n, H)), nv = max(dot(n, V), 1e-3);
@@ -25530,7 +25845,7 @@ index 00000000..ec78246d
 +	o.albedo = float4(a.rgb, matAO);
 +	rough = clamp(rough, 0.045, 1.0);
 +	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (skinAmount > 0 ? 4.0 : (authored ? 0.0 : 2.0)));
-+	o.emissive = float4((gflags & 16) ? gridLit : (hasBaked ? baked * a.rgb : 0), 0);
++	o.emissive = float4((gflags & 16) ? gridLit : (hasBaked ? baked * a.rgb + bakedSpec : 0), 0);
 +	return o;
 +}
 +
@@ -25603,8 +25918,9 @@ index 00000000..ec78246d
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -25728,6 +26044,43 @@ index 00000000..ec78246d
 +	return max(r, 0);
 +}
 +
++// reflection probes (captured cubes): the nearest two, sphere-parallax corrected, blended by distance
++float3 ProbeOne(uint i, float3 P, float3 R, float rough, out float dist)
++{
++	float4 a = asfloat(BUF(probeParams.x).Load4(i * 32));
++	uint2 b = BUF(probeParams.x).Load2(i * 32 + 16);
++	float3 L = P - a.xyz;
++	dist = length(L);
++	float bq = dot(L, R), cq = dot(L, L) - a.w * a.w;
++	float3 dir = R;
++	if (cq < 0) dir = L + R * (-bq + sqrt(max(bq * bq - cq, 0)));
++	return TexCube[NonUniformResourceIndex(b.x)].SampleLevel(sClamp, float3(dir.x, dir.z, dir.y), rough * (b.y - 1)).rgb;
++}
++
++float3 SampleProbes(float3 P, float3 R, float rough, out float weight)
++{
++	weight = 0;
++	uint n = min(probeParams.y, 64u);
++	if (!n) return 0;
++	float d0 = 1e30, d1 = 1e30, r0 = 1;
++	uint i0 = 0, i1 = 0;
++	[loop] for (uint i = 0; i < n; i++) {
++		float4 a = asfloat(BUF(probeParams.x).Load4(i * 32));
++		float3 dd = a.xyz - P;
++		float q = dot(dd, dd);
++		if (q < d0) { d1 = d0; i1 = i0; d0 = q; i0 = i; r0 = a.w; }
++		else if (q < d1) { d1 = q; i1 = i; }
++	}
++	float e0, e1;
++	float3 c = ProbeOne(i0, P, R, rough, e0);
++	if (n > 1) {
++		float3 c1 = ProbeOne(i1, P, R, rough, e1);
++		c = lerp(c, c1, e0 / max(e0 + e1, 1e-3));
++	}
++	weight = saturate(2.0 - e0 / max(r0, 1.0));    // full inside the nearest probe's space, gone at twice its size
++	return min(c, 64.0);
++}
++
 +float D_GGX(float NoH, float a) { float a2 = a * a; float f = (NoH * a2 - NoH) * NoH + 1.0; return a2 / (PI * f * f); }
 +float V_Smith(float NoV, float NoL, float a)
 +{
@@ -25812,7 +26165,8 @@ index 00000000..ec78246d
 +
 +float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 +{
-+	if (fogParams.x <= 0) return col;
++	)KTSRC",
++R"KTSRC(if (fogParams.x <= 0) return col;
 +	float rayLen = max(dist - fogParams.w, 0);
 +	float dz = P.z - camPos.z;
 +	float f = fogParams.y;
@@ -25841,8 +26195,7 @@ index 00000000..ec78246d
 +		sunVis = lit / STEPS;
 +		sunVis = lerp(1, sunVis, saturate(maxD / max(dist, 1)));
 +	}
-+	float phase = pow(saturate()KTSRC",
-+R"KTSRC(dot(-V, sunDir.xyz)), 8) * 0.25 + 0.04;   // forward scattering + a little everywhere
++	float phase = pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 + 0.04;   // forward scattering + a little everywhere
 +	inscatter += sunColor.rgb * sunColor.w * phase * fogColor.rgb * (sunVis * 1.6 - 0.15 * (1 - sunVis));
 +	return lerp(col, max(inscatter, 0), opacity);
 +}
@@ -25967,6 +26320,7 @@ index 00000000..ec78246d
 +	float specOcc = saturate(pow(NoV + ao, exp2(-16 * rough - 1)) - 1 + ao);
 +	float3 spec = 0;
 +	float ssrHit = 0;
++	float probeW = 0;
 +	{
 +		// rough reflections: a small cone of sky samples around R
 +		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
@@ -25983,6 +26337,11 @@ index 00000000..ec78246d
 +		}
 +		// below the horizon the "sky" is the ground: darken reflections that point down
 +		spec *= saturate(R.z * 4 + 0.6);
++		// reflection probes: what is really around (rooms, walls, the ground) instead of the open sky
++		if (probeParams.y) {
++			float3 pc = SampleProbes(P, R, rough, probeW);
++			spec = lerp(spec, pc * asfloat(probeParams.z) / max(skyParams.z, 1e-3), probeW);
++		}
 +		// screen-space reflections from last frame's lit scene
 +		if (ssrSrv && rough < 0.45 && !plainLegacy) {
 +			float3 O = P + N * (2.0 + viewZ * 0.002);
@@ -26019,8 +26378,8 @@ index 00000000..ec78246d
 +	}
 +	if (baked) {
 +		Lo += g2 * ao;
-+		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only what SSR finds on screen
-+		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, ssrHit);
++		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
++		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 +	}
 +	else {
 +		Lo += SkyAmbient(N) * diff * ao * skyParams.z;
@@ -26096,8 +26455,9 @@ index 00000000..ec78246d
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -26312,12 +26672,13 @@ index 00000000..ec78246d
 +	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
 +}
 +
-+float4 TonemapPS(FsOut i) : SV_Target0
++float4 TonemapPS(FsOut i) )KTSRC",
++R"KTSRC(: SV_Target0
 +{
 +	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
-+	// legacy BSP maps: pixels not)KTSRC",
-+R"KTSRC(hing drew (depth 0) keep what is already in the screen (a sky portal view)
-+	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
++	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
++	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
++	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 +	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
 +	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 +	if (skyParams.w > 0.5) {
@@ -26337,8 +26698,9 @@ index 00000000..ec78246d
 +{
 +	float2 rcp = 1.0 / float2(dstSize);
 +	float2 uv = (viewport.xy + i.uv * viewport.zw) * rcp;
-+	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
-+	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
++	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
++	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
++	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 +	float4 m = Tex2D[srcSrv].SampleLevel(sClamp, uv, 0);
 +	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * rcp, 0).a;
 +	float ne = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, -0.5) * rcp, 0).a;
@@ -26416,8 +26778,9 @@ index 00000000..ec78246d
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -26493,6 +26856,180 @@ index 00000000..ec78246d
 +}
 +)KTSRC",
 +nullptr };
++static const char* const kt_src_probes_parts[] = {
++R"KTSRC(// KatarnEngine - reflection probe filtering: each mip of a captured cube is a wider cone of the level above it, so
++// rougher surfaces read blurrier reflections (sampled across face edges, no seams)
++// KatarnEngine - shared HLSL (shader model 5.1, bindless descriptor tables)
++#ifndef KT_COMMON
++#define KT_COMMON
++
++Texture2D Tex2D[] : register(t0, space1);
++TextureCube TexCube[] : register(t0, space2);
++Texture2DArray Tex2DArray[] : register(t0, space3);
++ByteAddressBuffer Buf[] : register(t0, space4);
++Texture3D Tex3D[] : register(t0, space5);
++RWTexture2D<float4> UavTex[] : register(u0, space1);
++RWByteAddressBuffer UavBuf[] : register(u0, space2);
++RWTexture2DArray<float4> UavTexArray[] : register(u0, space3);
++
++#ifdef KT_GLSLANG   // offline syntax check with glslang, which lacks arrays of byte-address buffers
++#define NonUniformResourceIndex(x) (x)
++ByteAddressBuffer BufOne : register(t1, space0);
++RWByteAddressBuffer UavBufOne : register(u1, space0);
++#define BUF(i) BufOne
++#define UAVBUF(i) UavBufOne
++#else
++#define BUF(i) Buf[NonUniformResourceIndex(i)]
++#define UAVBUF(i) UavBuf[NonUniformResourceIndex(i)]
++#endif
++
++SamplerState sWrap : register(s0);
++SamplerState sClamp : register(s1);
++SamplerState sWrapPoint : register(s2);
++SamplerState sClampPoint : register(s3);
++SamplerComparisonState sShadow : register(s4);
++SamplerState sClampAniso : register(s5);
++
++static const float PI = 3.14159265359;
++
++// per-view constants (root CBV b1) - must match kt::ViewConstants
++cbuffer View : register(b1)
++{
++	float4x4 viewProj;         // world -> clip (reversed-Z, infinite)
++	float4x4 invViewProj;
++	float4x4 worldToEye;       // GL eye space (-Z forward)
++	float4x4 prevViewProj;
++	float4 camPos;             // xyz, w = near plane
++	float4 viewport;           // x, y (top-left, pixels), w, h
++	float4 invTargetSize;      // 1/w, 1/h of the full-size scene targets, w,h
++	float4 projParams;         // sx, sy (1/tan half fov), near, time
++	float4 sunDir;             // towards the sun, w = sun angular radius
++	float4 sunColor;           // linear radiance (rgb), w = intensity scale
++	float4 skyParams;          // x turbidity / haze, y sky intensity, z ambient scale, w world mode (1 = HD world)
++	float4 fogParams;          // x density, y height falloff, z base height, w start distance
++	float4 fogColor;           // rgb inscatter colour, w max opacity
++	float4x4 cascadeViewProj[4];
++	float4 cascadeSplits;      // view depth of each cascade's far end
++	float4 shadowParams;       // x texel size, y bias, z normal bias, w enabled
++	uint4 indices0;            // x gbuffer0, y gbuffer1, z gbuffer2, w depth (SRV)
++	uint4 indices1;            // x shadow array, y ao, z sky LUT, w exposure buffer
++	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
++	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
++	float4 ambientSH[9];       // sky irradiance SH (rgb)
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
++	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++};
++float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
++float Overbright() { return max(extraParams.x, 1.0); }
++
++float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
++float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
++float Luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
++
++float2 OctWrap(float2 v) { return (1.0 - abs(v.yx)) * (v.xy >= 0.0 ? 1.0 : -1.0); }
++float2 EncodeNormal(float3 n)
++{
++	n /= (abs(n.x) + abs(n.y) + abs(n.z));
++	n.xy = n.z >= 0.0 ? n.xy : OctWrap(n.xy);
++	return n.xy;
++}
++float3 DecodeNormal(float2 f)
++{
++	float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
++	float t = saturate(-n.z);
++	n.xy += n.xy >= 0.0 ? -t : t;
++	return normalize(n);
++}
++
++float3 WorldFromDepth(float2 uv, float depth)
++{
++	float4 clip = float4(uv * float2(2, -2) + float2(-1, 1), depth, 1);
++	float4 w = mul(invViewProj, clip);
++	return w.xyz / w.w;
++}
++float ViewDepth(float depth) { return projParams.z / max(depth, 1e-7); }   // reversed-Z infinite: near / depth
++
++float Exposure()
++{
++	return asfloat(BUF(indices1.w).Load(0));
++}
++
++float3 EvalSH(float3 n)
++{
++	float3 r = ambientSH[0].rgb * 0.282095;
++	r += ambientSH[1].rgb * 0.488603 * n.y + ambientSH[2].rgb * 0.488603 * n.z + ambientSH[3].rgb * 0.488603 * n.x;
++	r += ambientSH[4].rgb * 1.092548 * n.x * n.y + ambientSH[5].rgb * 1.092548 * n.y * n.z;
++	r += ambientSH[6].rgb * 0.315392 * (3.0 * n.z * n.z - 1.0);
++	r += ambientSH[7].rgb * 1.092548 * n.x * n.z + ambientSH[8].rgb * 0.546274 * (n.x * n.x - n.y * n.y);
++	return max(r, 0);
++}
++
++// fullscreen triangle
++struct FsOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
++FsOut FullscreenVS(uint id : SV_VertexID)
++{
++	FsOut o;
++	o.uv = float2((id << 1) & 2, id & 2);
++	o.pos = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
++	return o;
++}
++
++#endif
++
++
++cbuffer Draw : register(b0)
++{
++	uint srcSrv;     // the level above, Texture2DArray of the six faces
++	uint dstUav;     // this level, RWTexture2DArray
++	uint dstSize;
++	uint mip;
++};
++
++// D3D cube face conventions (face, s, t in -1..1) <-> direction
++float3 FaceDir(uint face, float2 st)
++{
++	float s = st.x, t = st.y;
++	if (face == 0) return float3(1, -t, -s);
++	if (face == 1) return float3(-1, -t, s);
++	if (face == 2) return float3(s, 1, t);
++	if (face == 3) return float3(s, -1, -t);
++	if (face == 4) return float3(s, -t, 1);
++	return float3(-s, -t, -1);
++}
++
++float3 Fetch(float3 d)
++{
++	float3 a = abs(d);
++	uint face; float ma, sc, tc;
++	if (a.x >= a.y && a.x >= a.z) { face = d.x > 0 ? 0 : 1; ma = a.x; sc = d.x > 0 ? -d.z : d.z; tc = -d.y; }
++	else if (a.y >= a.z) { face = d.y > 0 ? 2 : 3; ma = a.y; sc = d.x; tc = d.y > 0 ? d.z : -d.z; }
++	else { face = d.z > 0 ? 4 : 5; ma = a.z; sc = d.z > 0 ? d.x : -d.x; tc = -d.y; }
++	float2 uv = float2(sc, tc) / ma * 0.5 + 0.5;
++	return Tex2DArray[srcSrv].SampleLevel(sClamp, float3(uv, face), 0).rgb;
++}
++
++[numthreads(8, 8, 1)]
++void FilterCS(uint3 id : SV_DispatchThreadID)
++{
++	if (id.x >= dstSize || id.y >= dstSize) return;
++	float3 d = normalize(FaceDir(id.z, (id.xy + 0.5) / dstSize * 2.0 - 1.0));
++	float3 t = normalize(cross(abs(d.z) < 0.99 ? float3(0, 0, 1) : float3(1, 0, 0), d));
++	float3 b = cross(d, t);
++	float r = 2.0 / dstSize * (0.6 + 0.12 * mip);   // a bit more than this texel's footprint
++	float3 acc = 0;
++	float wsum = 0;
++	[loop] for (int j = 0; j < 5; j++)
++		[loop] for (int i = 0; i < 5; i++) {
++			float2 o = float2(i, j) * 0.5 - 1.0;
++			float w = exp(-2.0 * dot(o, o));
++			acc += min(Fetch(normalize(d + (t * o.x + b * o.y) * r)), 512.0) * w;
++			wsum += w;
++		}
++	UavTexArray[dstUav][id] = float4(acc / wsum, 1);
++}
++)KTSRC",
++nullptr };
 +static const char* const kt_src_saber_parts[] = {
 +R"KTSRC(// KatarnEngine - lightsaber blades in the style of Star Wars Battlefront II (2017): a thin, white-hot core with a
 +// saturated coloured edge, a tight bright inner glow and a wide soft outer glow, rounded ends, a slight hum
@@ -26555,8 +27092,9 @@ index 00000000..ec78246d
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -26755,8 +27293,9 @@ index 00000000..ec78246d
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -27004,8 +27543,9 @@ index 00000000..ec78246d
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -27205,8 +27745,9 @@ index 00000000..ec78246d
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -27452,10 +27993,10 @@ index 00000000..ec78246d
 +	float rayLen = max(dist - fogParams.w, 0);
 +	float dz = P.z - camPos.z;
 +	float f = fogParams.y;
-+	float camDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
++	float ca)KTSRC",
++R"KTSRC(mDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
 +	float fz = f * dz;
-+	float lineInt = abs(fz) > 1e-4 ? (1)KTSRC",
-+R"KTSRC( - exp(-fz)) / fz : 1 - 0.5 * fz;
++	float lineInt = abs(fz) > 1e-4 ? (1 - exp(-fz)) / fz : 1 - 0.5 * fz;
 +	float opacity = min(1 - exp(-camDens * lineInt * rayLen), fogColor.w);
 +	float3 hd = normalize(float3(-V.xy, 0.05));
 +	float3 inscatter = FxSky(hd, 8) * fogColor.rgb;
@@ -28253,10 +28794,10 @@ index 00000000..5313fd9c
 +#pragma pack(pop)
 diff --git a/code/rd-katarn/katarn/shaders/common.hlsli b/code/rd-katarn/katarn/shaders/common.hlsli
 new file mode 100644
-index 00000000..ef56e7fa
+index 00000000..ed5ff2be
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/common.hlsli
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,117 @@
 +// KatarnEngine - shared HLSL (shader model 5.1, bindless descriptor tables)
 +#ifndef KT_COMMON
 +#define KT_COMMON
@@ -28314,8 +28855,9 @@ index 00000000..ef56e7fa
 +	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 +	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 +	float4 ambientSH[9];       // sky irradiance SH (rgb)
-+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
++	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
++	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -28401,7 +28943,7 @@ index 00000000..65218504
 +print('wrote kt_shaders_gen.h')
 diff --git a/code/rd-katarn/katarn/shaders/legacy.hlsl b/code/rd-katarn/katarn/shaders/legacy.hlsl
 new file mode 100644
-index 00000000..64401f56
+index 00000000..02e004f3
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/legacy.hlsl
 @@ -0,0 +1,84 @@
@@ -28483,7 +29025,7 @@ index 00000000..64401f56
 +	if (drawTarget == 1) {
 +		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
 +		float s = (skyParams.w > 0.5 ? Overbright() : 1.0) / max(Exposure(), 1e-6);   // HD: legacy colours are scaled by identityLight
-+		if (flags & (1u << 11)) s *= glowBoost;
++		if ((flags & (1u << 11)) && skyParams.w > 0.5) s *= glowBoost;   // HD worlds only: old maps keep their authored glow
 +		s *= drawScale > 0 ? drawScale : 1.0;
 +		c.rgb = min(c.rgb * s, 1500.0);   // stacked additive sprites (saber glow) must not overflow the half-float scene
 +	}
@@ -28491,10 +29033,10 @@ index 00000000..64401f56
 +}
 diff --git a/code/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl b/code/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl
 new file mode 100644
-index 00000000..9d2cfe2d
+index 00000000..9a0ebca0
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,199 @@
 +// KatarnEngine - legacy opaque surfaces (Ghoul2 characters, BSP world, MD3 models) written into the GBuffer, so they
 +// get Katarn's sun, shadows, lights, sky ambient and AO like the HD world does.
 +#include "common.hlsli"
@@ -28528,7 +29070,24 @@ index 00000000..9d2cfe2d
 +	float4 gridAmbient;  // gflags 16: light grid (old BSP maps), 0-255 scale
 +	float4 gridDirected;
 +	float4 gridDir;      // world space, towards the light
++	uint deluxeTex;      // q3map2 deluxemap of the lightmap (world-space light direction), 0 = none
++	float parallaxDepth; // parallax from the normal map's alpha (height), uv units, 0 = none
++	uint2 pad2;
 +};
++
++// GGX highlight (times N.L) for one light direction
++float3 SpecGGX(float3 n, float3 V, float3 L, float rough, float3 f0)
++{
++	float nl = saturate(dot(n, L));
++	float3 H = normalize(L + V);
++	float r2 = max(rough * rough, 0.002);
++	float nh = saturate(dot(n, H)), nv = max(dot(n, V), 1e-3);
++	float D = r2 * r2 / (PI * pow(nh * nh * (r2 * r2 - 1) + 1, 2));
++	float k = r2 * 0.5;
++	float G = (nl / (nl * (1 - k) + k)) * (nv / (nv * (1 - k) + k));
++	float3 F = f0 + (1 - f0) * pow(1 - saturate(dot(H, V)), 5);
++	return D * G * F / max(4 * nl * nv, 1e-3) * nl;
++}
 +
 +struct VsIn { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float2 lmuv : TEXCOORD1; float4 color : COLOR; };
 +struct VsOut { float4 pos : SV_Position; float3 normal : NORMAL; float2 uv : TEXCOORD0; float2 lmuv : TEXCOORD1; float4 color : COLOR; float3 wpos : TEXCOORD2; };
@@ -28551,36 +29110,64 @@ index 00000000..9d2cfe2d
 +
 +GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 +{
-+	float4 a = tint;
-+	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].Sample(sWrap, i.uv);
-+	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
-+	if (gflags & 1) clip(a.a - alphaRef);
 +	float3 n = normalize(i.normal);
 +	// Quake's front faces are clockwise (it culls GL_FRONT with the CCW default), so a "front" face here is the back
 +	// of the surface: flip the normal towards the viewer only then
 +	if (front) n = -n;
++	float3 n0 = n;
++	float3 V = normalize(camPos.xyz - i.wpos);
++	float2 uv = i.uv;
++	float2 uvdx = ddx(i.uv), uvdy = ddy(i.uv);
++	float3 T = 0, B = 0;
++	float invmax = 0;
 +	if (normalTex) {
 +		// no vertex tangents in the old formats: a cotangent frame from the screen-space derivatives
 +		float3 dp1 = ddx(i.wpos), dp2 = ddy(i.wpos);
-+		float2 duv1 = ddx(i.uv), duv2 = ddy(i.uv);
 +		float3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
-+		float3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-+		float3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-+		float invmax = rsqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
-+		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].Sample(sWrap, i.uv).xyz * 2 - 1;
++		T = dp2perp * uvdx.x + dp1perp * uvdy.x;
++		B = dp2perp * uvdx.y + dp1perp * uvdy.y;
++		invmax = rsqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
++		if (parallaxDepth > 0) {
++			// rend2 parallax: the normal map's alpha is the height (1 = top); march the view ray down through it
++			float3 Tn = T * invmax, Bn = B * invmax;
++			float3 vt = float3(dot(V, Tn), dot(V, Bn), dot(V, n));
++			if (vt.z > 0.05 && all(isfinite(vt))) {
++				float2 p = vt.xy / max(vt.z, 0.25) * parallaxDepth;
++				int steps = (int)lerp(16.0, 6.0, saturate(vt.z));
++				float stepD = 1.0 / steps;
++				float layer = 0, prevLayer = 0;
++				float depthHere = 1.0 - Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).a, prevDepth = depthHere;
++				[loop] for (int k = 0; k < 16 && k < steps && layer < depthHere; k++) {
++					prevLayer = layer; prevDepth = depthHere;
++					layer += stepD;
++					depthHere = 1.0 - Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, i.uv - p * layer, uvdx, uvdy).a;
++				}
++				// linear refinement between the last two layers
++				float after = depthHere - layer, before = prevDepth - prevLayer;
++				float w = saturate(after / min(after - before, -1e-4));
++				uv = i.uv - p * lerp(layer, prevLayer, w);
++			}
++		}
++	}
++	float4 a = tint;
++	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
++	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
++	if (gflags & 1) clip(a.a - alphaRef);
++	if (normalTex) {
++		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).xyz * 2 - 1;
 +		tn.z = sqrt(saturate(1 - dot(tn.xy, tn.xy)));
 +		float3 nm = normalize(T * invmax * tn.x - B * invmax * tn.y + n * tn.z);   // uv v runs down: flip the bitangent
 +		if (all(isfinite(nm))) n = nm;
 +	}
 +	float rough = roughness, metal = metallic, matAO = 1;
 +	if (rmoTex) {
-+		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].Sample(sWrap, i.uv).rgb;
++		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;
 +		if (rmoOrder == 1) r = r.gbr;     // orm -> rmo
 +		rough = r.x; metal = r.y; matAO = r.z;
 +	}
 +	if (specTex) {
 +		// rend2 specularMap: rgb = specular colour, a = gloss
-+		float4 sp = Tex2D[NonUniformResourceIndex(specTex)].Sample(sWrap, i.uv);
++		float4 sp = Tex2D[NonUniformResourceIndex(specTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
 +		rough = sp.a < 0.999 ? 1.0 - sp.a : saturate(1.0 - Luminance(sp.rgb) * 0.9);
 +	}
 +	// models without PBR maps are flagged (metal + 2) so the lighting keeps their reflections soft, like rend2
@@ -28588,7 +29175,27 @@ index 00000000..9d2cfe2d
 +	bool authored = rmoTex != 0 || specTex != 0;
 +	float3 baked = 0;
 +	bool hasBaked = false;
-+	if ((gflags & 4) && lightmapTex) { baked = Tex2D[NonUniformResourceIndex(lightmapTex)].Sample(sClamp, i.lmuv).rgb * bakedScale; hasBaked = true; }
++	float3 bakedSpec = 0;
++	if ((gflags & 4) && lightmapTex) {
++		baked = Tex2D[NonUniformResourceIndex(lightmapTex)].Sample(sClamp, i.lmuv).rgb * bakedScale;
++		hasBaked = true;
++		if (deluxeTex) {
++			// deluxemap: the lightmap's light arrives from this direction - the normal map shades it, and it gets a
++			// highlight (rend2 deluxe mapping). A short vector = light from all around (less directional).
++			float3 L = Tex2D[NonUniformResourceIndex(deluxeTex)].Sample(sClamp, i.lmuv).xyz * 2 - 1;
++			float ll = length(L);
++			if (ll > 1e-3) {
++				L /= ll;
++				float dirAmt = saturate(ll * 1.2);
++				float n0l = max(saturate(dot(n0, L)), 0.2);
++				float shade = clamp(saturate(dot(n, L)) / n0l, 0.0, 2.0);
++				baked *= lerp(1.0, shade, dirAmt);
++				float3 f0s = lerp((rmoTex != 0 || specTex != 0) ? 0.04 : 0.012, a.rgb, saturate(metal));
++				bakedSpec = min(SpecGGX(n, V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
++			}
++		}
++		else if (normalTex) baked *= saturate(dot(n, n0));   // no direction known: the bumps shade against the surface
++	}
 +	else if (gflags & 8) { baked = SrgbToLinear(i.color.rgb) * bakedScale; hasBaked = true; }
 +	float3 gridLit = 0;
 +	if (gflags & 16) {
@@ -28600,7 +29207,6 @@ index 00000000..9d2cfe2d
 +		float3 amb = gridAmbient.rgb / 255.0, dirc = gridDirected.rgb / 255.0;
 +		float3 lightDisp = saturate(amb + dirc * ndl);
 +		float3 lit = a.rgb * (1 - saturate(metal)) * SrgbToLinear(lightDisp);
-+		float3 V = normalize(camPos.xyz - i.wpos);
 +		float3 H = normalize(L + V);
 +		float r2 = max(rough * rough, 0.002);
 +		float nh = saturate(dot(n, H)), nv = max(dot(n, V), 1e-3);
@@ -28618,7 +29224,7 @@ index 00000000..9d2cfe2d
 +	o.albedo = float4(a.rgb, matAO);
 +	rough = clamp(rough, 0.045, 1.0);
 +	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (skinAmount > 0 ? 4.0 : (authored ? 0.0 : 2.0)));
-+	o.emissive = float4((gflags & 16) ? gridLit : (hasBaked ? baked * a.rgb : 0), 0);
++	o.emissive = float4((gflags & 16) ? gridLit : (hasBaked ? baked * a.rgb + bakedSpec : 0), 0);
 +	return o;
 +}
 +
@@ -28632,10 +29238,10 @@ index 00000000..9d2cfe2d
 +}
 diff --git a/code/rd-katarn/katarn/shaders/lighting.hlsl b/code/rd-katarn/katarn/shaders/lighting.hlsl
 new file mode 100644
-index 00000000..94a4c8f0
+index 00000000..da7f5fbe
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/lighting.hlsl
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,416 @@
 +// KatarnEngine - deferred lighting: sun with cascaded shadows, local lights, sky ambient + reflections, height fog
 +#include "common.hlsli"
 +
@@ -28701,6 +29307,43 @@ index 00000000..94a4c8f0
 +	r += sh[6] * 0.315392 * (3.0 * n.z * n.z - 1.0);
 +	r += sh[7] * 1.092548 * n.x * n.z + sh[8] * 0.546274 * (n.x * n.x - n.y * n.y);
 +	return max(r, 0);
++}
++
++// reflection probes (captured cubes): the nearest two, sphere-parallax corrected, blended by distance
++float3 ProbeOne(uint i, float3 P, float3 R, float rough, out float dist)
++{
++	float4 a = asfloat(BUF(probeParams.x).Load4(i * 32));
++	uint2 b = BUF(probeParams.x).Load2(i * 32 + 16);
++	float3 L = P - a.xyz;
++	dist = length(L);
++	float bq = dot(L, R), cq = dot(L, L) - a.w * a.w;
++	float3 dir = R;
++	if (cq < 0) dir = L + R * (-bq + sqrt(max(bq * bq - cq, 0)));
++	return TexCube[NonUniformResourceIndex(b.x)].SampleLevel(sClamp, float3(dir.x, dir.z, dir.y), rough * (b.y - 1)).rgb;
++}
++
++float3 SampleProbes(float3 P, float3 R, float rough, out float weight)
++{
++	weight = 0;
++	uint n = min(probeParams.y, 64u);
++	if (!n) return 0;
++	float d0 = 1e30, d1 = 1e30, r0 = 1;
++	uint i0 = 0, i1 = 0;
++	[loop] for (uint i = 0; i < n; i++) {
++		float4 a = asfloat(BUF(probeParams.x).Load4(i * 32));
++		float3 dd = a.xyz - P;
++		float q = dot(dd, dd);
++		if (q < d0) { d1 = d0; i1 = i0; d0 = q; i0 = i; r0 = a.w; }
++		else if (q < d1) { d1 = q; i1 = i; }
++	}
++	float e0, e1;
++	float3 c = ProbeOne(i0, P, R, rough, e0);
++	if (n > 1) {
++		float3 c1 = ProbeOne(i1, P, R, rough, e1);
++		c = lerp(c, c1, e0 / max(e0 + e1, 1e-3));
++	}
++	weight = saturate(2.0 - e0 / max(r0, 1.0));    // full inside the nearest probe's space, gone at twice its size
++	return min(c, 64.0);
 +}
 +
 +float D_GGX(float NoH, float a) { float a2 = a * a; float f = (NoH * a2 - NoH) * NoH + 1.0; return a2 / (PI * f * f); }
@@ -28941,6 +29584,7 @@ index 00000000..94a4c8f0
 +	float specOcc = saturate(pow(NoV + ao, exp2(-16 * rough - 1)) - 1 + ao);
 +	float3 spec = 0;
 +	float ssrHit = 0;
++	float probeW = 0;
 +	{
 +		// rough reflections: a small cone of sky samples around R
 +		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
@@ -28957,6 +29601,11 @@ index 00000000..94a4c8f0
 +		}
 +		// below the horizon the "sky" is the ground: darken reflections that point down
 +		spec *= saturate(R.z * 4 + 0.6);
++		// reflection probes: what is really around (rooms, walls, the ground) instead of the open sky
++		if (probeParams.y) {
++			float3 pc = SampleProbes(P, R, rough, probeW);
++			spec = lerp(spec, pc * asfloat(probeParams.z) / max(skyParams.z, 1e-3), probeW);
++		}
 +		// screen-space reflections from last frame's lit scene
 +		if (ssrSrv && rough < 0.45 && !plainLegacy) {
 +			float3 O = P + N * (2.0 + viewZ * 0.002);
@@ -28993,8 +29642,8 @@ index 00000000..94a4c8f0
 +	}
 +	if (baked) {
 +		Lo += g2 * ao;
-+		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only what SSR finds on screen
-+		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, ssrHit);
++		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
++		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 +	}
 +	else {
 +		Lo += SkyAmbient(N) * diff * ao * skyParams.z;
@@ -29011,10 +29660,10 @@ index 00000000..94a4c8f0
 +}
 diff --git a/code/rd-katarn/katarn/shaders/post.hlsl b/code/rd-katarn/katarn/shaders/post.hlsl
 new file mode 100644
-index 00000000..73f04236
+index 00000000..0d95fb78
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/post.hlsl
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,202 @@
 +// KatarnEngine - camera: auto exposure, bloom, filmic tone mapping, FXAA
 +#include "common.hlsli"
 +
@@ -29176,8 +29825,9 @@ index 00000000..73f04236
 +float4 TonemapPS(FsOut i) : SV_Target0
 +{
 +	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
-+	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
-+	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
++	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
++	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
++	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 +	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
 +	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 +	if (skyParams.w > 0.5) {
@@ -29197,8 +29847,9 @@ index 00000000..73f04236
 +{
 +	float2 rcp = 1.0 / float2(dstSize);
 +	float2 uv = (viewport.xy + i.uv * viewport.zw) * rcp;
-+	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
-+	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
++	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
++	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
++	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 +	float4 m = Tex2D[srcSrv].SampleLevel(sClamp, uv, 0);
 +	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * rcp, 0).a;
 +	float ne = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, -0.5) * rcp, 0).a;
@@ -29237,6 +29888,66 @@ index 00000000..169a54c8
 +	float3 c = Tex2D[srcTex].SampleLevel(sClampPoint, i.uv, 0).rgb;
 +	c = pow(saturate(c * brightness), 1.0 / gamma);
 +	return float4(c, 1);
++}
+diff --git a/code/rd-katarn/katarn/shaders/probes.hlsl b/code/rd-katarn/katarn/shaders/probes.hlsl
+new file mode 100644
+index 00000000..4723a3cd
+--- /dev/null
++++ b/code/rd-katarn/katarn/shaders/probes.hlsl
+@@ -0,0 +1,54 @@
++// KatarnEngine - reflection probe filtering: each mip of a captured cube is a wider cone of the level above it, so
++// rougher surfaces read blurrier reflections (sampled across face edges, no seams)
++#include "common.hlsli"
++
++cbuffer Draw : register(b0)
++{
++	uint srcSrv;     // the level above, Texture2DArray of the six faces
++	uint dstUav;     // this level, RWTexture2DArray
++	uint dstSize;
++	uint mip;
++};
++
++// D3D cube face conventions (face, s, t in -1..1) <-> direction
++float3 FaceDir(uint face, float2 st)
++{
++	float s = st.x, t = st.y;
++	if (face == 0) return float3(1, -t, -s);
++	if (face == 1) return float3(-1, -t, s);
++	if (face == 2) return float3(s, 1, t);
++	if (face == 3) return float3(s, -1, -t);
++	if (face == 4) return float3(s, -t, 1);
++	return float3(-s, -t, -1);
++}
++
++float3 Fetch(float3 d)
++{
++	float3 a = abs(d);
++	uint face; float ma, sc, tc;
++	if (a.x >= a.y && a.x >= a.z) { face = d.x > 0 ? 0 : 1; ma = a.x; sc = d.x > 0 ? -d.z : d.z; tc = -d.y; }
++	else if (a.y >= a.z) { face = d.y > 0 ? 2 : 3; ma = a.y; sc = d.x; tc = d.y > 0 ? d.z : -d.z; }
++	else { face = d.z > 0 ? 4 : 5; ma = a.z; sc = d.z > 0 ? d.x : -d.x; tc = -d.y; }
++	float2 uv = float2(sc, tc) / ma * 0.5 + 0.5;
++	return Tex2DArray[srcSrv].SampleLevel(sClamp, float3(uv, face), 0).rgb;
++}
++
++[numthreads(8, 8, 1)]
++void FilterCS(uint3 id : SV_DispatchThreadID)
++{
++	if (id.x >= dstSize || id.y >= dstSize) return;
++	float3 d = normalize(FaceDir(id.z, (id.xy + 0.5) / dstSize * 2.0 - 1.0));
++	float3 t = normalize(cross(abs(d.z) < 0.99 ? float3(0, 0, 1) : float3(1, 0, 0), d));
++	float3 b = cross(d, t);
++	float r = 2.0 / dstSize * (0.6 + 0.12 * mip);   // a bit more than this texel's footprint
++	float3 acc = 0;
++	float wsum = 0;
++	[loop] for (int j = 0; j < 5; j++)
++		[loop] for (int i = 0; i < 5; i++) {
++			float2 o = float2(i, j) * 0.5 - 1.0;
++			float w = exp(-2.0 * dot(o, o));
++			acc += min(Fetch(normalize(d + (t * o.x + b * o.y) * r)), 512.0) * w;
++			wsum += w;
++		}
++	UavTexArray[dstUav][id] = float4(acc / wsum, 1);
 +}
 diff --git a/code/rd-katarn/katarn/shaders/saber.hlsl b/code/rd-katarn/katarn/shaders/saber.hlsl
 new file mode 100644
@@ -30367,10 +31078,10 @@ index 00000000..dafe6958
 +extern PFNGLUNLOCKARRAYSEXTPROC qglUnlockArraysEXT;
 diff --git a/code/rd-katarn/tr_WorldEffects.cpp b/code/rd-katarn/tr_WorldEffects.cpp
 new file mode 100644
-index 00000000..5464b70b
+index 00000000..fd6e3cb5
 --- /dev/null
 +++ b/code/rd-katarn/tr_WorldEffects.cpp
-@@ -0,0 +1,2187 @@
+@@ -0,0 +1,2189 @@
 +/*
 +===========================================================================
 +Copyright (C) 2000 - 2013, Raven Software, Inc.
@@ -30416,6 +31127,7 @@ index 00000000..5464b70b
 +#include "../Ravl/CVec.h"
 +#include "../Ratl/vector_vs.h"
 +#include "../Ratl/bits_vs.h"
++#include "katarn/kt_render.h"
 +
 +////////////////////////////////////////////////////////////////////////////////////////
 +// Defines
@@ -31968,6 +32680,7 @@ index 00000000..5464b70b
 +	if (!tr.world ||
 +		(tr.refdef.rdflags & RDF_NOWORLDMODEL) ||
 +		(backEnd.refdef.rdflags & RDF_SKYBOXPORTAL) ||
++		(backEnd.refdef.rdflags & kt::RDF_KT_PROBE) ||
 +		!mParticleClouds.size() ||
 +		ri.CL_IsRunningInGameCinematic())
 +	{	//  no world rendering or no world or no particle clouds
@@ -34613,10 +35326,10 @@ index 00000000..250f277f
 +}
 diff --git a/code/rd-katarn/tr_bsp.cpp b/code/rd-katarn/tr_bsp.cpp
 new file mode 100644
-index 00000000..8fb3809d
+index 00000000..c58f4375
 --- /dev/null
 +++ b/code/rd-katarn/tr_bsp.cpp
-@@ -0,0 +1,1476 @@
+@@ -0,0 +1,1503 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -34791,6 +35504,19 @@ index 00000000..8fb3809d
 +===============
 +*/
 +#define	LIGHTMAP_SIZE	128
++// KatarnEngine: q3map2 -deluxe maps (worldspawn "deluxeMapping" "1"): every odd lightmap is the light direction of
++// the one before it (world space, rgb = dir * 0.5 + 0.5)
++int kt_worldDeluxe = 0;
++static bool KT_DeluxeMapped(const lump_t* l)
++{
++	if (l->filelen <= 0) return false;
++	std::string ents(reinterpret_cast<const char*>(fileBase + l->fileofs), l->filelen);
++	size_t at = ents.find("\"deluxeMapping\"");
++	if (at == std::string::npos) return false;
++	at = ents.find('"', at + 15);
++	return at != std::string::npos && at + 1 < ents.size() && ents[at + 1] == '1';
++}
++
 +static	void R_LoadLightmaps( lump_t *l, const char *psMapName, world_t &worldData )
 +{
 +	byte				*buf, *buf_p;
@@ -34860,6 +35586,12 @@ index 00000000..8fb3809d
 +				image[j*4+3] = 255;
 +
 +				sumIntensity += intensity;
++			}
++		} else if ( kt_worldDeluxe && (i & 1) ) {
++			// a direction, not a colour: as stored
++			for ( j = 0 ; j < LIGHTMAP_SIZE * LIGHTMAP_SIZE; j++ ) {
++				image[j*4+0] = buf_p[j*3+0]; image[j*4+1] = buf_p[j*3+1]; image[j*4+2] = buf_p[j*3+2];
++				image[j*4+3] = 255;
 +			}
 +		} else {
 +			for ( j = 0 ; j < LIGHTMAP_SIZE * LIGHTMAP_SIZE; j++ ) {
@@ -36038,6 +36770,7 @@ index 00000000..8fb3809d
 +
 +	// load into heap
 +	R_LoadShaders( &header->lumps[LUMP_SHADERS], worldData );
++	if (!index) kt_worldDeluxe = KT_DeluxeMapped(&header->lumps[LUMP_ENTITIES]) ? 1 : 0;
 +	R_LoadLightmaps( &header->lumps[LUMP_LIGHTMAPS], name, worldData );
 +	R_LoadPlanes (&header->lumps[LUMP_PLANES], worldData);
 +	R_LoadFogs( &header->lumps[LUMP_FOGS], &header->lumps[LUMP_BRUSHES], &header->lumps[LUMP_BRUSHSIDES], worldData, index );
@@ -36062,6 +36795,13 @@ index 00000000..8fb3809d
 +	if (kt::World_Load(base))
 +		ri.Printf(PRINT_ALL, "KatarnEngine: HD world maps/%s.kworld loaded\n", base);
 +		tr.world = &worldData;
++
++		// KatarnEngine: reflection probe positions from the entities (needs tr.world for the clusters)
++		{
++			const lump_t& el = header->lumps[LUMP_ENTITIES];
++			std::string ents(reinterpret_cast<const char*>(fileBase + el.fileofs), el.filelen > 0 ? el.filelen : 0);
++			kt::Probes_SetEntities(ents.c_str());
++		}
 +	}
 +
 +
@@ -36095,10 +36835,10 @@ index 00000000..8fb3809d
 +}
 diff --git a/code/rd-katarn/tr_cmds.cpp b/code/rd-katarn/tr_cmds.cpp
 new file mode 100644
-index 00000000..04ad9bdb
+index 00000000..fa266c51
 --- /dev/null
 +++ b/code/rd-katarn/tr_cmds.cpp
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,522 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -36126,6 +36866,7 @@ index 00000000..04ad9bdb
 +#include "../server/exe_headers.h"
 +
 +#include "tr_local.h"
++#include "katarn/kt_render.h"
 +
 +
 +/*
@@ -36577,6 +37318,9 @@ index 00000000..04ad9bdb
 +			cmd->buffer = (int)GL_BACK;
 +		}
 +	}
++
++	// KatarnEngine: reflection probe captures (views drawn before the game's own)
++	kt::Probes_BeginFrame();
 +}
 +
 +
@@ -46179,10 +46923,10 @@ index 00000000..f9285afd
 +}
 diff --git a/code/rd-katarn/tr_local.h b/code/rd-katarn/tr_local.h
 new file mode 100644
-index 00000000..bfb14a3d
+index 00000000..bb0f898c
 --- /dev/null
 +++ b/code/rd-katarn/tr_local.h
-@@ -0,0 +1,1851 @@
+@@ -0,0 +1,1852 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -46577,6 +47321,7 @@ index 00000000..bfb14a3d
 +	int				ktRmoOrder;     // 0 r=rough g=metal b=ao (rmo), 1 r=ao g=rough b=metal (orm)
 +	image_t* ktSpec;
 +	float			ktSkin;         // rend2 skin keyword: subsurface strength (0 = none)
++	float			ktParallax;     // parallax depth (uv units) from the normal map's alpha height, 0 = none
 +	byte			constantColor[4];			// for CGEN_CONST and AGEN_CONST
 +
 +	uint32_t		stateBits;					// GLS_xxxx mask
@@ -52048,10 +52793,10 @@ index 00000000..29778a6e
 +extern CQuickSpriteSystem SQuickSprite;
 diff --git a/code/rd-katarn/tr_scene.cpp b/code/rd-katarn/tr_scene.cpp
 new file mode 100644
-index 00000000..d0b6b549
+index 00000000..275369b6
 --- /dev/null
 +++ b/code/rd-katarn/tr_scene.cpp
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,417 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -52079,6 +52824,7 @@ index 00000000..d0b6b549
 +#include "../server/exe_headers.h"
 +
 +#include "tr_local.h"
++#include "katarn/kt_render.h"
 +
 +int			r_firstSceneDrawSurf;
 +
@@ -52340,6 +53086,7 @@ index 00000000..d0b6b549
 +	if (!tr.world && !( fd->rdflags & RDF_NOWORLDMODEL ) ) {
 +		Com_Error (ERR_DROP, "R_RenderScene: NULL worldmodel");
 +	}
++	kt::Probes_NoteScene(fd);
 +
 +//	memcpy( tr.refdef.text, fd->text, sizeof( tr.refdef.text ) );
 +
@@ -52469,10 +53216,10 @@ index 00000000..d0b6b549
 +}
 diff --git a/code/rd-katarn/tr_shade.cpp b/code/rd-katarn/tr_shade.cpp
 new file mode 100644
-index 00000000..9416aa39
+index 00000000..053ef285
 --- /dev/null
 +++ b/code/rd-katarn/tr_shade.cpp
-@@ -0,0 +1,2481 @@
+@@ -0,0 +1,2484 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -52505,6 +53252,7 @@ index 00000000..9416aa39
 +#include <set>
 +#include <string>
 +#include "katarn/kt_render.h"
++extern int kt_worldDeluxe;   // tr_bsp.cpp
 +
 +/*
 +
@@ -54330,6 +55078,8 @@ index 00000000..9416aa39
 +		taken = 3;
 +	}
 +	if (!st->active || st->bundle[0].isLightmap || (st->ss && st->ss->surfaceSpriteType)) return 0;
++	// a second texture collapsed into the stage that is not a modulating lightmap (an added glow / detail): forward
++	if (st->bundle[1].image && !(st->bundle[1].isLightmap && sh->multitextureEnv == GL_MODULATE)) return 0;
 +	// self-lit content stays forward, as the old renderer drew it: glow stages (saber blades, lights) and models whose
 +	// colour is not lit (rgbGen identity / const / entity / vertex on an entity = full bright)
 +	if (st->glow) return 0;
@@ -54388,13 +55138,27 @@ index 00000000..9416aa39
 +	if (bspMode && world) {
 +		// BSP map surface: its lightmap, else its vertex light, else full bright, becomes the baked light
 +		image_t* lm = lmStage ? KT_StageImage(const_cast<textureBundle_t*>(&lmStage->bundle[0])) : nullptr;
-+		if (lm) { flags = (flags & ~2u) | 4; d.lightmapTex = lm->texnum; d.lmuv = input->texCoords[0][1]; d.lmuvStride = sizeof(input->texCoords[0]); }
++		// texture + $lightmap collapsed into one multitexture stage (the usual case): the lightmap is bundle 1
++		if (!lm && st->bundle[1].isLightmap && sh->multitextureEnv == GL_MODULATE) lm = KT_StageImage(&st->bundle[1]);
++		if (lm) {
++			flags = (flags & ~2u) | 4; d.lightmapTex = lm->texnum; d.lmuv = input->texCoords[0][1]; d.lmuvStride = sizeof(input->texCoords[0]);
++			if (kt_worldDeluxe)   // deluxe-mapped map: the lightmap after this one holds its light directions
++				for (int li = 0; li + 1 < tr.numLightmaps; li += 2)
++					if (tr.lightmaps[li] == lm) { if (tr.lightmaps[li + 1]) d.deluxeTex = tr.lightmaps[li + 1]->texnum; break; }
++		}
 +		else flags = (flags & ~2u) | 8;
 +	}
 +	ComputeTexCoords(st);
 +	if (flags & (2 | 8)) {
-+		ComputeColors(st, static_cast<alphaGen_t>(0), static_cast<colorGen_t>(0));
-+		d.colors = reinterpret_cast<const uint8_t*>(input->svars.colors);
++		if ((flags & 8) && (st->rgbGen == CGEN_LIGHTING_DIFFUSE || st->rgbGen == CGEN_LIGHTING_DIFFUSE_ENTITY)) {
++			// model shaders on map surfaces (misc_model trees, props baked into the BSP): the old renderer lit them from
++			// the world entity, which has no light (black silhouettes); their vertex colours hold the light the compiler baked
++			d.colors = reinterpret_cast<const uint8_t*>(input->vertexColors);
++		}
++		else {
++			ComputeColors(st, static_cast<alphaGen_t>(0), static_cast<colorGen_t>(0));
++			d.colors = reinterpret_cast<const uint8_t*>(input->svars.colors);
++		}
 +	}
 +	d.xyz = input->xyz[0]; d.xyzStride = sizeof(input->xyz[0]);
 +	d.normal = input->normal[0]; d.normalStride = sizeof(input->normal[0]);
@@ -54415,6 +55179,7 @@ index 00000000..9416aa39
 +	d.rmoOrder = st->ktRmoOrder;
 +	d.skin = st->ktSkin;
 +	d.specTex = st->ktSpec ? st->ktSpec->texnum : 0;
++	d.parallax = st->ktParallax;
 +	d.flags = flags;
 +	d.roughness = world ? 0.7f : 0.78f;   // characters: cloth / skin (0.55 read as plastic)
 +	d.metallic = 0.0f;
@@ -54772,21 +55537,6 @@ index 00000000..9416aa39
 +	// call shader function
 +	//
 +	kt_skipStages = KT_TryDeferred(input);
-+	{
-+		// diagnostics: what saber shaders look like to this renderer (katarn_log.txt, once per shader)
-+		static std::set<std::string> logged;
-+		char n[MAX_QPATH]; Q_strncpyz(n, input->shader->name, sizeof(n)); Q_strlwr(n);
-+		if ((strstr(n, "saber") || strstr(n, "blade")) && logged.size() < 200 && logged.insert(n).second) {
-+			const shader_t* sh = input->shader;
-+			kt::Log("saber shader '%s': explicit %d default %d sort %.1f stages %d entity reType %d deferred %u\n", sh->name, sh->explicitlyDefined ? 1 : 0,
-+				sh->defaultShader ? 1 : 0, sh->sort, sh->numUnfoggedPasses, backEnd.currentEntity ? (int)backEnd.currentEntity->e.reType : -1, kt_skipStages);
-+			for (int k = 0; k < sh->numUnfoggedPasses && k < 4; k++) {
-+				const shaderStage_t* x = &input->xstages[k];
-+				kt::Log("   stage %d: active %d image '%s' stateBits 0x%08x rgbGen %d alphaGen %d glow %d\n", k, x->active ? 1 : 0,
-+					x->bundle[0].image ? x->bundle[0].image->imgName : "-", x->stateBits, (int)x->rgbGen, (int)x->alphaGen, x->glow ? 1 : 0);
-+			}
-+		}
-+	}
 +	RB_IterateStagesGeneric( input );
 +	kt::GL_SetStage(nullptr, false);
 +	const bool kt_deferred = kt_skipStages != 0;
@@ -56344,10 +57094,10 @@ index 00000000..5df2dbef
 +}
 diff --git a/code/rd-katarn/tr_shader.cpp b/code/rd-katarn/tr_shader.cpp
 new file mode 100644
-index 00000000..ece4d2ac
+index 00000000..429ff8ac
 --- /dev/null
 +++ b/code/rd-katarn/tr_shader.cpp
-@@ -0,0 +1,3987 @@
+@@ -0,0 +1,4008 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -58008,7 +58758,10 @@ index 00000000..ece4d2ac
 +			token = COM_ParseExt(text, qfalse);
 +			if (token[0]) {
 +				image_t* im = R_FindImageFile(token, static_cast<qboolean>(!shader.noMipMaps), static_cast<qboolean>(!shader.noPicMip), qfalse, GL_REPEAT);
-+				if (!Q_stricmpn(kw, "normal", 6)) stage->ktNormal = im;
++				if (!Q_stricmpn(kw, "normal", 6)) {
++					stage->ktNormal = im;
++					if (!Q_stricmp(kw, "normalHeightMap") && !stage->ktParallax) stage->ktParallax = 0.05f;
++				}
 +				else if (!Q_stricmp(kw, "specularMap")) stage->ktSpec = im;
 +				else { stage->ktRmo = im; stage->ktRmoOrder = !Q_stricmpn(kw, "orm", 3) ? 1 : 0; }
 +			}
@@ -58022,7 +58775,13 @@ index 00000000..ece4d2ac
 +			stage->ktSkin = v[3] > 0 ? v[3] : 0.5f;
 +			SkipRestOfLine(text);
 +		}
-+		else if (!Q_stricmp(token, "normalScale") || !Q_stricmp(token, "specularScale") || !Q_stricmp(token, "parallaxDepth")
++		else if (!Q_stricmp(token, "parallaxDepth"))
++		{
++			token = COM_ParseExt(text, qfalse);
++			if (token[0]) stage->ktParallax = Q_max(0.0f, Q_min(0.25f, (float)atof(token)));
++			SkipRestOfLine(text);
++		}
++		else if (!Q_stricmp(token, "normalScale") || !Q_stricmp(token, "specularScale")
 +			|| !Q_stricmp(token, "gloss") || !Q_stricmp(token, "roughness") || !Q_stricmp(token, "specularReflectance") || !Q_stricmp(token, "specularExponent")
 +			|| !Q_stricmp(token, "cubeMapScale") || !Q_stricmp(token, "parallaxBias") || !Q_stricmp(token, "metallic") || !Q_stricmp(token, "emissiveScale"))
 +		{
@@ -59360,10 +60119,21 @@ index 00000000..ece4d2ac
 +static void KT_AutoMaterialMaps( void )
 +{
 +	if ( shader.sky ) return;
++	// lightmapped map surfaces too (like rend2's r_normalMapping): their first texture stage
++	bool lightmapped = false;
++	for ( int i = 0; i < MAX_SHADER_STAGES && stages[i].active; i++ ) if ( stages[i].bundle[0].isLightmap || stages[i].bundle[1].isLightmap ) lightmapped = true;
++	bool worldDone = false;
 +	for ( int i = 0; i < MAX_SHADER_STAGES; i++ ) {
 +		shaderStage_t *st = &stages[i];
 +		if ( !st->active ) break;
-+		if ( st->rgbGen != CGEN_LIGHTING_DIFFUSE || st->bundle[0].isLightmap || st->bundle[0].numImageAnimations > 1 ) continue;
++		if ( st->bundle[0].isLightmap || st->bundle[0].numImageAnimations > 1 ) continue;
++		if ( st->rgbGen != CGEN_LIGHTING_DIFFUSE ) {
++			if ( !lightmapped || worldDone ) continue;
++			const uint32_t bl = st->stateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS );
++			if ( bl && bl != ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ZERO ) && bl != ( GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO )
++				&& bl != ( GLS_SRCBLEND_ZERO | GLS_DSTBLEND_SRC_COLOR ) ) continue;
++			worldDone = true;
++		}
 +		const image_t *diffuse = st->bundle[0].image;
 +		if ( !diffuse || !diffuse->imgName[0] || diffuse->imgName[0] == '*' ) continue;
 +		char base[MAX_QPATH], name[MAX_QPATH];
@@ -59372,6 +60142,7 @@ index 00000000..ece4d2ac
 +		if ( !st->ktNormal ) {
 +			Com_sprintf( name, sizeof( name ), "%s_nh", base );
 +			st->ktNormal = R_FindImageFile( name, mip, pic, qfalse, GL_REPEAT );
++			if ( st->ktNormal && !st->ktParallax ) st->ktParallax = 0.05f;   // normal + height
 +			if ( !st->ktNormal ) { Com_sprintf( name, sizeof( name ), "%s_n", base ); st->ktNormal = R_FindImageFile( name, mip, pic, qfalse, GL_REPEAT ); }
 +		}
 +		if ( !st->ktRmo && !st->ktSpec ) {
@@ -67153,6 +67924,3 @@ index 00000000..30779823
 +
 +	R_RecursiveWorldNode( tr.world->nodes, 31, ( 1 << tr.refdef.num_dlights ) - 1 );
 +}
--- 
-2.43.0
-
