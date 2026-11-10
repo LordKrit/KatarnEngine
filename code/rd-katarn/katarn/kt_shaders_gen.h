@@ -1287,10 +1287,10 @@ float4 PS(FsOut i) : SV_Target0
 )KTSRC",
 nullptr };
 static const char* const kt_src_saber_parts[] = {
-R"KTSRC(// KatarnEngine - lightsaber blades, drawn into the HDR scene in place of the old glow sprites and core lines.
-// mode 0: the glow around the blade (the saber's own glow texture as a radial profile, or a soft gaussian);
-// mode 1: the core strip with the saber's own core texture (additive, or alpha-blended for dark blades).
-// Premultiplied output: rgb + dst * (1 - a).
+R"KTSRC(// KatarnEngine - lightsaber blades in the style of Star Wars Battlefront II (2017): a thin, white-hot core with a
+// saturated coloured edge, a tight bright inner glow and a wide soft outer glow, rounded ends, a slight hum
+// flicker. Drawn into the HDR scene (bloom does the rest), occluded by the scene depth.
+// bladeAlpha 1 = darksaber: a black core with a white rim. Premultiplied output: rgb + dst * (1 - a).
 // KatarnEngine - shared HLSL (shader model 5.1, bindless descriptor tables)
 #ifndef KT_COMMON
 #define KT_COMMON
@@ -1410,14 +1410,14 @@ FsOut FullscreenVS(uint id : SV_VertexID)
 
 cbuffer Blade : register(b0)
 {
-	float3 bladeA; float glowR;      // glow: hilt; core: muzzle end
-	float3 bladeB; float coreR;      // tip
+	float3 bladeA; float glowR;      // hilt, glow radius (the game's saber radius)
+	float3 bladeB; float coreR;      // tip, core radius
 	float3 bladeColor; float bladeIntensity;
 	uint bladeTex; uint bladeMode; uint bladeAlpha; uint bladePad;
 	float3 vertexColor; float bladePad2;
 };
 
-struct VsOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float2 uv : TEXCOORD1; };
+struct VsOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; };
 
 VsOut VS(uint vid : SV_VertexID)
 {
@@ -1428,57 +1428,56 @@ VsOut VS(uint vid : SV_VertexID)
 	float3 toCam = normalize(camPos.xyz - mid);
 	float3 side = cross(d, toCam);
 	side = dot(side, side) > 1e-6 ? normalize(side) : normalize(cross(d, float3(0, 0, 1)));
-	float w = bladeMode == 0 ? glowR * 2.5 : coreR;
-	float ext = bladeMode == 0 ? w : 0;
+	float w = glowR * 2.2;
 	static const float2 c[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1) };
 	float2 q = c[vid];
-	float3 p = (q.y < 0 ? bladeA - d * ext : bladeB + d * ext) + side * q.x * w + (bladeMode == 0 ? toCam * w : 0);
+	float3 p = (q.y < 0 ? bladeA - d * w : bladeB + d * w) + side * q.x * w + toCam * w;
 	VsOut o;
 	o.pos = mul(viewProj, float4(p, 1));
 	o.wpos = p;
-	o.uv = float2(q.x * 0.5 + 0.5, q.y < 0 ? 1.0 : 0.0);   // core textures: u across, v along (tip at 0)
 	return o;
 }
 
 float4 PS(VsOut i) : SV_Target0
 {
+	// distance from the view ray to the blade segment (a capsule: rounded tip)
 	float3 ro = camPos.xyz, rd = normalize(i.wpos - ro);
 	float3 ab = bladeB - bladeA, ao = ro - bladeA;
 	float a = dot(ab, ab), b = dot(ab, rd), c = dot(ab, ao), e = dot(rd, ao);
-	float s = saturate((c * 1 - b * e) / max(a - b * b, 1e-6));
+	float s = saturate((c - b * e) / max(a - b * b, 1e-6));
 	float3 Pb = bladeA + ab * s;
 	float t = max(dot(Pb - ro, rd), 0);
 	float dist = length(ro + rd * t - Pb);
-	// hidden behind the scene
+
 	float sd = Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r;
 	float4 cp = mul(viewProj, float4(Pb, 1));
 	float bd = cp.z / max(cp.w, 1e-4);
 	float vis = (sd > 0 && ViewDepth(sd) < ViewDepth(bd) - glowR * 0.5) ? 0.0 : 1.0;
-	float scale = bladeIntensity / max(Exposure(), 1e-6) * vis;
 
-	if (bladeMode == 1) {
-		float4 tc = bladeTex ? Tex2D[NonUniformResourceIndex(bladeTex)].Sample(sWrap, i.uv) : float4(1, 1, 1, 1);
-		float3 col = tc.rgb * vertexColor;
-		if (bladeAlpha) {
-			float al = saturate(tc.a * vis);
-			return float4(Sane(col * al), al);   // dark blade: covers what is behind it
-		}
-		return float4(Sane(col * scale * 2.0), 0);
+	// hum: a slight flicker along and over time
+	float tm = projParams.w;
+	float hum = 1.0 + 0.035 * sin(tm * 47.0 + s * 9.0) + 0.025 * sin(tm * 113.0);
+
+	float rc = max(coreR, 0.35);                     // core radius
+	float w = glowR * 2.2;
+	float window = saturate(1 - dist / w); window *= window;
+	float core = 1 - smoothstep(rc * 0.55, rc * 1.25, dist);           // white-hot centre
+	float edge = exp(-pow(dist / (rc * 1.9), 2)) * (1 - core);        // saturated rim right outside the core
+	float inner = exp(-pow(dist / (rc * 3.5), 2));
+	float outer = exp(-pow(dist / (glowR * 0.95), 2)) * window;
+	float scale = bladeIntensity / max(Exposure(), 1e-6) * vis * hum;
+
+	if (bladeAlpha) {
+		// darksaber: black core, white crackling rim
+		float rim = (edge * 3.0 + inner * 0.6 + outer * 0.2);
+		float3 col = float3(1, 1, 1) * rim * scale;
+		return float4(Sane(col), saturate(core * vis));
 	}
-	float w = glowR * 2.5;
-	float window = saturate(1 - dist / w);
-	window *= window;                                   // fades out before the edge of its quad
-	float3 glow;
-	if (bladeTex) {
-		// the saber's glow texture is a radial blob: read its profile from the centre outwards
-		float r = saturate(dist / w) * 0.5;
-		glow = Tex2D[NonUniformResourceIndex(bladeTex)].SampleLevel(sClamp, float2(0.5 + r, 0.5), 0).rgb * vertexColor * 2.0;
-	}
-	else glow = bladeColor * (exp(-(dist * dist) / max(glowR * glowR * 0.35, 1e-3)) * 3.0);
-	float3 col = glow * window;
-	// keep a little white-hot centre even when the core texture is missing or faint
-	float core = saturate(1 - dist / max(coreR, 0.1));
-	col += lerp(bladeColor, 1.0, 0.85) * core * core * 4.0;
+	float3 C = bladeColor;
+	float3 col = 1.0 * core * 14.0
+		+ C * edge * 9.0
+		+ C * inner * 3.0
+		+ C * outer * 0.9;
 	return float4(Sane(col * scale), 0);
 }
 )KTSRC",

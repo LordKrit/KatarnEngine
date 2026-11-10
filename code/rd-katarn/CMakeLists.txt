@@ -43,6 +43,8 @@ set(KatarnFiles
 	)
 
 add_library(${SPKatarn} SHARED ${KatarnFiles})
+# Ghoul2 surfaces up to 16000 vertices (HD ports; rend2 has no such limit), CPU-skinned through tess
+target_compile_definitions(${SPKatarn} PRIVATE SHADER_MAX_VERTEXES=16000)
 if(NOT MSVC)
 	set_target_properties(${SPKatarn} PROPERTIES PREFIX "")
 endif()

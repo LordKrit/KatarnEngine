@@ -1128,12 +1128,12 @@ void R_AddSaberBlade(const float* start, const float* dir, float length, float r
 	RState::Blade b = {};
 	float c[3] = { rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f };
 	float mx = Q_max(c[0], Q_max(c[1], c[2]));
-	if (mx < 0.01f) return;   // dark blades: only their alpha-blended core is drawn
-	for (int q = 0; q < 3; q++) { b.a[q] = start[q]; b.b[q] = start[q] + dir[q] * length; b.color[q] = mx > 0.01f ? powf(c[q] / mx, 2.2f) : 0.0f; }
+	const bool dark = mx < 0.01f;   // darksaber style: black core, white rim
+	for (int q = 0; q < 3; q++) { b.a[q] = start[q]; b.b[q] = start[q] + dir[q] * length; b.color[q] = dark ? 1.0f : powf(c[q] / mx, 2.2f); }
 	b.glowR = Q_max(1.0f, radius);
 	b.coreR = Q_max(0.6f, radius * 0.22f);
 	b.intensity = kt_saberGlow ? kt_saberGlow->value * 0.5f : 1.0f;
-	b.tex = glowTex; b.mode = 0; b.alpha = 0;
+	b.tex = 0; b.mode = 0; b.alpha = dark ? 1 : 0;   // procedural (BF2-style) blade
 	// the glow texture is tinted by the entity colour (rgbGen vertex): use that, linearised
 	for (int q = 0; q < 3; q++) b.vcol[q] = powf(vertexRgba[q] / 255.0f, 2.2f);
 	R.blades.push_back(b);

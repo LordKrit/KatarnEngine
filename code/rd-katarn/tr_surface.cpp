@@ -418,7 +418,7 @@ static void RB_SurfaceLine()
 			const image_t* im = st->active ? st->bundle[0].image : nullptr;
 			const uint32_t bl = st->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
 			const bool alphaBlend = bl == (GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA);
-			kt::R_AddSaberCore(ce->oldorigin, ce->origin, ce->radius, ce->shaderRGBA, im ? im->texnum : 0, alphaBlend);
+			(void)ce; (void)im; (void)alphaBlend;   // the blade (core included) is drawn from the glow entity
 			return;
 		}
 	}

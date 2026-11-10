@@ -30,7 +30,9 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 //
 
 // surface geometry should not exceed these limits
+#ifndef SHADER_MAX_VERTEXES
 #define	SHADER_MAX_VERTEXES	4000	// raised from 1000 (cloth / dense robes)
+#endif
 #define	SHADER_MAX_INDEXES	(6*SHADER_MAX_VERTEXES)
 
 // the maximum size of game reletive pathnames
