@@ -1,110 +1,45 @@
-# Movie Duels
+# KatarnEngine
 
-Movie Duels is a remastered edition of the original, 2009 “Movie Duels 2” mod for Jedi Knight: Jedi Academy, with updated missions, maps, models, sounds, and various other improvements.
+KatarnEngine is a Direct3D 12 renderer for **Movie Duels** / **OpenJK** single player (Star Wars Jedi Knight: Jedi Academy),
+with the look of a modern engine (Unreal / Frostbite style): physically based deferred lighting, HD worlds cooked from
+Blender, and rend2-compatible materials.
 
-This repository is built on the OpenJK codebase and introduces many new features, such as manual blocking and various other changes to the gameplay.
+It is a fork of [MovieDuels-SJE-SP-Rend2](https://github.com/MovieDuels/MovieDuels-SJE-SP-Rend2) (itself built on
+[OpenJK](https://github.com/JACoders/OpenJK)). The renderer is `code/rd-katarn` (built as
+`MovieDuels-rdsp-katarn_x86_64.dll`); the game, the engine and the other renderers are unchanged from upstream apart
+from small fixes. See [README_MovieDuels.md](README_MovieDuels.md) for the original project.
 
-## Contributors
-* Mike7704
-* GCJ
-* Jace Solaris
+## Features
+- **Direct3D 12**, bindless resources; the game's GL 1.x calls are translated to D3D12 (`code/rd-katarn/katarn/kt_gl.cpp`)
+- **Deferred PBR**: GBuffer, GGX lighting, cascaded sun shadows, SSAO, screen-space reflections, volumetric sun shafts,
+  height fog, HDR with auto exposure, bloom, ACES tone mapping, FXAA
+- **HD worlds** (`.kworld`): Blender scenes exported and cooked into clustered geometry with LODs, baked materials,
+  BC7 textures, terrain splat materials, still and flowing water, lights and sky (tools in `tools/katarn`)
+- **rend2-compatible materials**: `.shader` and `.mtr` files, `normalMap`, `rmoMap` / `ormMap`, `specularMap`, `skin`;
+  Ghoul2 surfaces up to 16000 vertices
+- **Characters** lit per pixel: by the HD world's sun and sky, or by the light grid of classic BSP maps
+- **Lightsabers**: blade light on the scene, rend2-style dynamic glow, white-hot core
+- Water / waterfall FX pass, crash reports (`katarn_crash.txt`), log (`katarn_log.txt`)
 
-# OpenJK
+## Building (Windows x64)
+```
+cmake -B build -DBuildSPKatarn=ON
+cmake --build build --config Release --target MovieDuels-rdsp-katarn_x86_64
+```
+Also builds with MinGW-w64 (cross compile from Linux). Shaders are HLSL (`code/rd-katarn/katarn/shaders`), compiled at
+run time (shader model 5.1); after editing one, run `python3 gen.py` in that folder to re-embed them.
 
-OpenJK is an effort by the JACoders group to maintain and improve the game engines on which the Jedi Academy (JA) and Jedi Outcast (JO) games run on, while maintaining *full backwards compatibility* with the existing games. *This project does not attempt to rebalance or otherwise modify core gameplay*.
+Run Movie Duels with `+set cl_renderer rdsp-katarn`.
 
-Our aims are to:
-* Improve the stability of the engine by fixing bugs and improving performance.
-* Provide a clean base from which new JO and JA code modifications can be made.
-* Make available this engine to more operating systems. To date, we have ports on Linux and macOS.
+## HD world tools (`tools/katarn`)
+- `katarn_export.py`: Blender 5.2 exporter (meshes, materials as node graphs, lights, sky)
+- `katarn_cook.cpp`: cooker (clusters, LODs, material baking, BC7, collision `.map` for WzMap)
+- `Export_NabooTheed.bat`, `Cook_NabooTheed.bat`, `Collision_NabooTheed.bat`: example pipeline
 
-Currently, the most stable portion of this project is the Jedi Academy multiplayer code, with the single player code in a reasonable state.
-
-Rough support for Jedi Outcast single player is also available, however this should be considered heavily work in progress. This is not currently actively worked on or tested. OpenJK does not have Jedi Outcast multiplayer support.
-
-Please use discretion when making issue requests on GitHub. The [JKHub sub-forum](http://jkhub.org/forum/51-discussion/) is a better place for support queries, discussions, and feature requests.
-
-<a href="https://discord.gg/dPNCfeQ"><img src="https://img.shields.io/badge/discord-join-7289DA.svg?logo=discord&longCache=true&style=flat" /></a>
-[![Forum](https://img.shields.io/badge/forum-JKHub.org%20OpenJK-brightgreen.svg)](http://jkhub.org/forum/51-discussion/)
-
-[![Coverity Scan Build Status](https://scan.coverity.com/projects/1153/badge.svg)](https://scan.coverity.com/projects/1153)
+## Useful cvars
+`kt_shadows`, `kt_ssao`, `kt_ssr`, `kt_volumetric`, `kt_bloom`, `kt_exposure`, `kt_fxaa`, `kt_dynamicGlow`,
+`kt_saberLight`, `kt_saberGlowScale`, `kt_debugView` (1 albedo, 2 normals, 3 AO, 4 shadows), `kt_speeds`
 
 ## License
-
-OpenJK is licensed under GPLv2 as free software. You are free to use, modify and redistribute OpenJK following the terms in LICENSE.txt.
-
-
-## For players
-
-To install OpenJK, you will first need Jedi Academy installed. If you don't already own the game you can buy it from online stores such as [Steam](http://store.steampowered.com/app/6020/), [Amazon](http://www.amazon.com/Star-Wars-Jedi-Knight-Academy-Pc/dp/B0000A2MCN) or [GOG](https://www.gog.com/game/star_wars_jedi_knight_jedi_academy).
-
-Installing and running OpenJK:
-
-1. [Download the latest build](http://builds.openjk.org) for your operating system.
-2. Extract the contents of the file into the Jedi Academy `GameData/` folder. For Steam users, this will be in `<Steam Folder>/steamapps/common/Jedi Academy/GameData`.
-3. Run `openjk.x86.exe` (Windows), `openjk.i386` (Linux 32-bit), `openjk.x86_64` (Linux 64-bit) or the `OpenJK` app bundle (macOS), depending on your operating system.
-
-
-**Linux Instructions**
-
-If you do not have a windows partition and need to download the game base.
-
-1. Download  and Install SteamCMD [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD#Linux) .
-2. Set the download path using steamCMD, force_install_dir <path> .
-3. Using SteamCMD Set the platform to windows to download any windows game on steam. @sSteamCmdForcePlatformType "windows"
-4. Using SteamCMD download the game,  app_update 6020.
-5. [Download the latest build](http://builds.openjk.org) for your operating system.
-6. Extract the contents of the file into the Jedi Academy `GameData/` folder. For Steam users, this will be in `<Steam Folder>/steamapps/common/Jedi Academy/GameData`.
-
-
-**macOS Instructions**
-
-If you have the Mac App Store Version of Jedi Academy, follow these steps to get OpenJK runnning under macOS:
-
-1. Install [Homebrew](http://brew.sh/) if you don't have it.
-2. Open the Terminal app, and enter the command `brew install sdl2`.
-3. Extract the contents of the OpenJK DMG ([Download the latest build](http://builds.openjk.org)) into the game directory `/Applications/Star Wars Jedi Knight: Jedi Academy.app/Contents/`
-4. Run `OpenJK.app` or `OpenJK SP.app` 
-5. Savegames, Config Files and Log Files are stored in `/Users/<USER>/Library/Application Support/OpenJK/`
-
-
-## For Developers
-
-
-### Building OpenJK
-
-* [Compilation guide](https://github.com/JACoders/OpenJK/wiki/Compilation-guide)
-* [Debugging guide](https://github.com/JACoders/OpenJK/wiki/Debugging)
-
-
-### Contributing to OpenJK
-
-* [Fork](https://github.com/JACoders/OpenJK/fork) the project on GitHub
-* Create a new branch and make your changes
-* Send a [pull request](https://help.github.com/articles/creating-a-pull-request) to upstream (JACoders/OpenJK)
-
-
-### Using OpenJK as a base for a new mod
-
-* [Fork](https://github.com/JACoders/OpenJK/fork) the project on GitHub
-* Change the GAMEVERSION define in codemp/game/g_local.h from "OpenJK" to your project name
-* If you make a nice change, please consider back-porting to upstream via pull request as described above. This is so everyone benefits without having to reinvent the wheel for every project.
-
-
-## Maintainers (in alphabetical order)
-
-* Ensiform
-* Razish
-* Xycaleth
-
-
-## Significant contributors (in alphabetical order)
-
-* eezstreet
-* exidl
-* ImperatorPrime
-* mrwonko
-* redsaurus
-* Scooper
-* Sil
-* smcv
+GPLv2, like OpenJK and Movie Duels (see [LICENSE.txt](LICENSE.txt)). Jedi Academy and its assets belong to their owners;
+this repository contains source code only.

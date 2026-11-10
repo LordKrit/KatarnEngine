@@ -186,3 +186,11 @@ pip-log.txt
 #############
 .idea
 tools/katarn/*.exe
+
+# KatarnEngine
+build/
+*.kworld
+*.kworld.tmp
+katarn_log.txt
+katarn_crash.txt
+tools/katarn/*.exe
