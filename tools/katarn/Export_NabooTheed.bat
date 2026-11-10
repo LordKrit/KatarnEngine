@@ -13,6 +13,7 @@ for %%P in (
   "C:\Program Files (x86)\Steam\steamapps\common\Blender\blender.exe"
   "D:\Steam\steamapps\common\Blender\blender.exe"
   "D:\SteamLibrary\steamapps\common\Blender\blender.exe"
+  "F:\SteamLibrary\steamapps\common\Blender\blender.exe"
 ) do if exist %%P set "BL=%%~P"
 if not defined BL for /f "delims=" %%B in ('where blender 2^>nul') do if not defined BL set "BL=%%B"
 if not defined BL (
