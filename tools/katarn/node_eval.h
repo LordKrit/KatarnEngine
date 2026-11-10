@@ -27,6 +27,8 @@ struct BakeImage { int w = 0, h = 0; std::vector<float> px; };   // RGBA, row 0 
 
 struct NodeCtx {
 	int W = 1, H = 1;
+	int y0 = 0, fullH = 0;           // tiled bakes: this tile is rows y0..y0+H of a fullH-row grid (0 = untiled)
+	int FH() const { return fullH > 0 ? fullH : H; }
 	std::function<std::shared_ptr<BakeImage>(const std::string& file, bool linearize)> loadImage;
 	std::vector<std::string> warnings;
 	const Json* groups = nullptr;
@@ -197,7 +199,7 @@ struct NodeGraph {
 		Field f; f.n = 3; f.d.resize((size_t)ctx->W * ctx->H * 3);
 		for (int y = 0; y < ctx->H; y++) for (int x = 0; x < ctx->W; x++) {
 			size_t i = (size_t)y * ctx->W + x;
-			float el = ((y + 0.5f) / ctx->H - 0.5f) * 3.14159265f, phi = (0.5f - (x + 0.5f) / ctx->W) * 2 * 3.14159265f;
+			float el = ((ctx->y0 + y + 0.5f) / ctx->FH() - 0.5f) * 3.14159265f, phi = (0.5f - (x + 0.5f) / ctx->W) * 2 * 3.14159265f;
 			f.d[i * 3] = cosf(el) * cosf(phi); f.d[i * 3 + 1] = cosf(el) * sinf(phi); f.d[i * 3 + 2] = sinf(el);
 		}
 		return f;
@@ -209,7 +211,7 @@ struct NodeGraph {
 		for (int y = 0; y < ctx->H; y++) for (int x = 0; x < ctx->W; x++) {
 			size_t i = (size_t)y * ctx->W + x;
 			f.d[i * 3] = (x + 0.5f) / ctx->W;
-			f.d[i * 3 + 1] = (y + 0.5f) / ctx->H;    // Blender UV: v up; grid row 0 = v near 0
+			f.d[i * 3 + 1] = (ctx->y0 + y + 0.5f) / ctx->FH();    // Blender UV: v up; grid row 0 = v near 0
 			f.d[i * 3 + 2] = 0;
 		}
 		return f;
@@ -540,12 +542,13 @@ Field NodeGraph::eval(const std::string& name, const std::string& sock)
 		Field base = linked(n, "Normal") ? in(n, "Normal", 3) : Field::C3(0, 0, 1);
 		bool inv = P["invert"].t == Json::BOOL && P["invert"].b;
 		if (h.constant()) return base;
-		int W = C.W, H = C.H;
+		int W = C.W, H = C.H, FH = C.FH();
+		bool tiled = FH != H;
 		return Map(C, 3, { &h, &s, &base }, [&](size_t i, float* o) {
 			int x = (int)(i % W), y = (int)(i / W);
-			auto H_ = [&](int xx, int yy) { xx = (xx % W + W) % W; yy = (yy % H + H) % H; return h.at((size_t)yy * W + xx, 0); };
+			auto H_ = [&](int xx, int yy) { xx = (xx % W + W) % W; yy = tiled ? std::min(std::max(yy, 0), H - 1) : (yy % H + H) % H; return h.at((size_t)yy * W + xx, 0); };
 			float k = s.at(i, 0) * dist.at(0, 0) * (inv ? -1.0f : 1.0f) * 2.0f;
-			float dx = (H_(x + 1, y) - H_(x - 1, y)) * 0.5f * W * k * 0.01f, dy = (H_(x, y + 1) - H_(x, y - 1)) * 0.5f * H * k * 0.01f;
+			float dx = (H_(x + 1, y) - H_(x - 1, y)) * 0.5f * W * k * 0.01f, dy = (H_(x, y + 1) - H_(x, y - 1)) * 0.5f * FH * k * 0.01f;
 			float nb[3] = { base.at(i, 0) - dx, base.at(i, 1) - dy, base.at(i, 2) };
 			float l = sqrtf(nb[0] * nb[0] + nb[1] * nb[1] + nb[2] * nb[2]); if (l < 1e-6f) { nb[2] = 1; l = 1; }
 			o[0] = nb[0] / l; o[1] = nb[1] / l; o[2] = nb[2] / l;

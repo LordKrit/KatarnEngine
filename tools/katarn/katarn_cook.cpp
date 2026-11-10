@@ -45,6 +45,17 @@
 #include <array>
 #include <list>
 #include <chrono>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <psapi.h>
+#include <process.h>
+#include <io.h>
+#define kt_fseek _fseeki64
+#else
+#include <unistd.h>
+#define kt_fseek fseeko
+#endif
 
 #include <stdarg.h>
 static FILE* g_cookLog = nullptr;
@@ -146,7 +157,85 @@ static size_t COLL_BUDGET = 150000;
 static std::vector<std::string> SKIP = { "HeightFog", "Sky_Cottonball" };
 static std::string exportDir;
 
-static int NumThreads() { return THREADS > 0 ? THREADS : (int)std::max(1u, std::thread::hardware_concurrency()); }
+// default: half the cores, so the PC stays usable (and cooler) during a long cook
+static int NumThreads() { return THREADS > 0 ? THREADS : (int)std::max(1u, std::thread::hardware_concurrency() / 2); }
+
+// ================================================================================================ memory
+static int BANDS = 0;          // 0 = from the export size and the memory limit
+static size_t MAXMEM_MB = 0;      // 0 = auto (60% of physical RAM)
+static size_t ProcessMB()
+{
+#ifdef _WIN32
+	PROCESS_MEMORY_COUNTERS pmc = {};
+	if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return pmc.PagefileUsage >> 20;
+	return 0;
+#else
+	FILE* f = fopen("/proc/self/statm", "r");
+	unsigned long a = 0, r = 0;
+	if (f) { if (fscanf(f, "%lu %lu", &a, &r) != 2) r = 0; fclose(f); }
+	return (size_t)r * 4096 >> 20;
+#endif
+}
+static size_t PhysicalMB()
+{
+#ifdef _WIN32
+	MEMORYSTATUSEX ms = {}; ms.dwLength = sizeof(ms);
+	if (GlobalMemoryStatusEx(&ms)) return (size_t)(ms.ullTotalPhys >> 20);
+	return 8192;
+#else
+	long pages = sysconf(_SC_PHYS_PAGES), ps = sysconf(_SC_PAGE_SIZE);
+	return pages > 0 ? (size_t)((uint64_t)pages * ps >> 20) : 8192;
+#endif
+}
+static std::atomic<size_t> g_peakMB(0);
+static std::atomic<bool> g_cookDone(false);
+// stops the cook cleanly (with a message) before it can take the whole PC down
+static void MemoryWatchdog()
+{
+	while (!g_cookDone) {
+		size_t mb = ProcessMB();
+		if (mb > g_peakMB) g_peakMB = mb;
+		if (mb > MAXMEM_MB) {
+			printf("\n\n  ! STOPPED: the cook is using %zu MB, over the %zu MB limit.\n"
+				"    Try --threads 2, a smaller --texbudget, or raise the limit with --maxmem <MB>.\n", mb, MAXMEM_MB);
+			fflush(stdout);
+			_exit(3);
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(250));
+	}
+}
+
+// ================================================================================================ spill file
+// cooked geometry and texture data go to a temporary file as soon as they are finished, so the cook never holds
+// the whole world in memory; the .kworld is assembled from it at the end.
+static FILE* g_spill = nullptr;
+static uint64_t g_spillPos = 0;
+static std::mutex g_spillMutex;
+static uint64_t SpillWrite(const void* data, size_t bytes)
+{
+	std::lock_guard<std::mutex> lk(g_spillMutex);
+	uint64_t at = g_spillPos;
+	kt_fseek(g_spill, (int64_t)at, SEEK_SET);
+	if (bytes && fwrite(data, 1, bytes, g_spill) != bytes) { printf("\n  ! cannot write the spill file (disk full?)\n"); _exit(4); }
+	g_spillPos += bytes;
+	return at;
+}
+static void SpillRead(uint64_t at, void* data, size_t bytes)
+{
+	std::lock_guard<std::mutex> lk(g_spillMutex);
+	kt_fseek(g_spill, (int64_t)at, SEEK_SET);
+	if (bytes && fread(data, 1, bytes, g_spill) != bytes) { printf("\n  ! cannot read the spill file\n"); _exit(4); }
+}
+static void SpillCopy(uint64_t at, uint64_t bytes, FILE* out)
+{
+	std::vector<uint8_t> buf(16u << 20);
+	while (bytes) {
+		size_t n = (size_t)std::min<uint64_t>(buf.size(), bytes);
+		SpillRead(at, buf.data(), n);
+		fwrite(buf.data(), 1, n, out);
+		at += n; bytes -= n;
+	}
+}
 static double Now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
 static void ParallelFor(size_t n, const std::function<void(size_t)>& fn, int threads = 0)
@@ -228,7 +317,7 @@ static std::shared_ptr<BakeImage> LoadSource(const std::string& file, bool linea
 	std::lock_guard<std::mutex> lk(imgMutex);
 	imgLru.push_front({ key, img });
 	imgBytes += img->px.size() * 4;
-	while (imgBytes > (3ull << 29) && imgLru.size() > 1) { imgBytes -= imgLru.back().second->px.size() * 4; imgLru.pop_back(); }
+	while (imgBytes > std::min<size_t>(3ull << 29, (MAXMEM_MB << 20) / 6) && imgLru.size() > 1) { imgBytes -= imgLru.back().second->px.size() * 4; imgLru.pop_back(); }
 	return img;
 }
 
@@ -248,7 +337,7 @@ static std::pair<int, int> SourceDims(const std::string& file)
 
 // ================================================================================================ texture encoding
 enum TexKind { TK_COLOR, TK_NORMAL, TK_DATA };
-struct TexOut { KwTexture k; std::vector<uint8_t> data; };
+struct TexOut { KwTexture k; std::vector<uint8_t> data; uint64_t spillAt = 0, bytes = 0; };
 static std::vector<TexOut> textures;
 static std::mutex texMutex;
 static std::map<uint64_t, int> texByHash;
@@ -333,6 +422,9 @@ static int AddTexture(const BakeImage& img, TexKind kind, bool parallel)
 	auto it = texByHash.find(h);
 	if (it != texByHash.end()) return it->second;
 	int idx = (int)textures.size();
+	t.bytes = t.data.size();
+	t.spillAt = SpillWrite(t.data.data(), t.data.size());
+	std::vector<uint8_t>().swap(t.data);
 	textures.push_back(std::move(t));
 	texByHash[h] = idx;
 	return idx;
@@ -403,62 +495,103 @@ static void BakeMaterial(MatInfo& mi, KwMaterial& k, std::vector<std::string>& w
 		if (bc.t == Json::ARR) for (int i = 0; i < 4; i++) k.baseColor[i] = (float)bc[(size_t)i].num(i == 3 ? 1 : 0.8);
 		return;
 	}
-	NodeCtx ctx;
-	ctx.groups = groups;
-	ctx.W = ctx.H = std::max(4, mi.res);
-	ctx.loadImage = [](const std::string& f, bool lin) { return LoadSource(f, lin); };
-	NodeGraph g;
-	g.nodes = &graph["nodes"];
-	g.ctx = &ctx;
-	Surface s = EvalShader(g, out);
-	int W = ctx.W, H = ctx.H;
-	auto toImage = [&](std::function<void(size_t, float*)> fn) {
-		BakeImage img; img.w = W; img.h = H; img.px.resize((size_t)W * H * 4);
-		for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
-			size_t i = (size_t)y * W + x;                       // field: row 0 = v near 0 (bottom)
-			fn(i, &img.px[((size_t)(H - 1 - y) * W + x) * 4]);  // image: row 0 = top
+	// the graph is evaluated in bands of rows (every node keeps its output while the graph runs, so a whole
+	// 2048 x 2048 bake at once could need gigabytes); results go into the four output images
+	const int W = std::max(4, mi.res), H = W;
+	int bandRows = std::max(1, std::min(H, (int)((256u * 1024u) / (unsigned)W)));
+	if (const char* br = getenv("KT_BAKE_ROWS")) bandRows = std::max(1, std::min(H, atoi(br)));
+	struct Out { std::vector<float> px; bool varies = false; float c[4] = {}; bool any = false; };
+	Out oBase, oNorm, oOrm, oEmis;
+	bool blend = false, alphaVaries = false, alphaAny = false;
+	float alpha0 = 1;
+	float emisMax = 1e-6f;
+	std::vector<std::string> cw;
+	auto put = [&](Out& o, const Field* f, int y0, int rows, int ch, const std::function<void(const Field*, size_t, float*)>& fn) {
+		// constant over this band and equal to what we had so far: keep it as a constant
+		float v[4];
+		if (f->constant()) {
+			fn(f, 0, v);
+			if (!o.any) { memcpy(o.c, v, 16); o.any = true; }
+			else if (!o.varies && memcmp(o.c, v, 16) != 0) o.varies = true;
 		}
+		else o.varies = true;
+		if (!o.varies) return;                 // still one constant: no image needed (yet)
+		if (o.px.empty()) {                    // first band that varies: earlier bands were the constant
+			o.px.resize((size_t)W * H * 4);
+			for (int y = 0; y < y0; y++) for (int x = 0; x < W; x++) memcpy(&o.px[((size_t)(H - 1 - y) * W + x) * 4], o.c, 16);
+		}
+		for (int y = 0; y < rows; y++) for (int x = 0; x < W; x++) {
+			size_t i = (size_t)y * W + x;                                          // field: row 0 = v near 0 (bottom)
+			fn(f, f->constant() ? 0 : i, &o.px[((size_t)(H - 1 - (y0 + y)) * W + x) * 4]);   // image: row 0 = top
+		}
+		(void)ch;
+	};
+	for (int y0 = 0; y0 < H; y0 += bandRows) {
+		int rows = std::min(bandRows, H - y0);
+		NodeCtx ctx;
+		ctx.groups = groups;
+		ctx.W = W; ctx.H = rows; ctx.y0 = y0; ctx.fullH = H;
+		ctx.loadImage = [](const std::string& f, bool lin) { return LoadSource(f, lin); };
+		NodeGraph g;
+		g.nodes = &graph["nodes"];
+		g.ctx = &ctx;
+		Surface s = EvalShader(g, out);
+		blend |= s.transparentBlend;
+		if (!s.alpha.constant()) alphaVaries = true;
+		else if (!alphaAny) { alpha0 = s.alpha.d[0]; alphaAny = true; }
+		else if (s.alpha.d[0] != alpha0) alphaVaries = true;
+		// base + alpha share one output: a band varies if either does
+		Field ba; ba.n = 4;
+		if (s.base.constant() && s.alpha.constant()) ba.d = { s.base.d[0], s.base.d[1], s.base.d[2], s.alpha.d[0] };
+		else {
+			ba.d.resize((size_t)W * rows * 4);
+			for (size_t i = 0; i < (size_t)W * rows; i++) { ba.d[i * 4] = s.base.at(i, 0); ba.d[i * 4 + 1] = s.base.at(i, 1); ba.d[i * 4 + 2] = s.base.at(i, 2); ba.d[i * 4 + 3] = s.alpha.at(i, 0); }
+		}
+		put(oBase, &ba, y0, rows, 4, [](const Field* f, size_t i, float* o) { o[0] = f->at(i, 0); o[1] = f->at(i, 1); o[2] = f->at(i, 2); o[3] = Clamp01(f->at(i, 3)); });
+		put(oNorm, &s.normal, y0, rows, 3, [](const Field* f, size_t i, float* o) {
+			float x = f->at(i, 0), y = f->at(i, 1), z = f->at(i, 2), l = sqrtf(x * x + y * y + z * z);
+			if (l < 1e-6f) { x = 0; y = 0; z = 1; l = 1; }
+			o[0] = x / l * 0.5f + 0.5f; o[1] = y / l * 0.5f + 0.5f; o[2] = z / l * 0.5f + 0.5f; o[3] = 1;
+		});
+		Field rm; rm.n = 2;
+		if (s.rough.constant() && s.metal.constant()) rm.d = { s.rough.d[0], s.metal.d[0] };
+		else { rm.d.resize((size_t)W * rows * 2); for (size_t i = 0; i < (size_t)W * rows; i++) { rm.d[i * 2] = s.rough.at(i, 0); rm.d[i * 2 + 1] = s.metal.at(i, 0); } }
+		put(oOrm, &rm, y0, rows, 2, [](const Field* f, size_t i, float* o) { o[0] = 1; o[1] = Clamp01(f->at(i, 0)); o[2] = Clamp01(f->at(i, 1)); o[3] = 1; });
+		for (float v : s.emission.d) emisMax = std::max(emisMax, v);
+		put(oEmis, &s.emission, y0, rows, 3, [](const Field* f, size_t i, float* o) { o[0] = f->at(i, 0); o[1] = f->at(i, 1); o[2] = f->at(i, 2); o[3] = 1; });
+		for (auto& w : ctx.warnings) if (std::find(cw.begin(), cw.end(), w) == cw.end()) cw.push_back(w);
+	}
+	auto image = [&](Out& o) {
+		BakeImage img; img.w = W; img.h = H;
+		if (o.px.empty()) { img.px.resize((size_t)W * H * 4); for (size_t i = 0; i < img.px.size(); i += 4) memcpy(&img.px[i], o.c, 16); }
+		else img.px = std::move(o.px);
 		return img;
 	};
 	// albedo + alpha
-	if (s.base.constant() && s.alpha.constant()) {
-		for (int c = 0; c < 3; c++) k.baseColor[c] = s.base.d[c];
-		k.baseColor[3] = s.alpha.d[0];
-	}
+	if (!oBase.varies) { for (int c = 0; c < 4; c++) k.baseColor[c] = oBase.c[c]; }
 	else {
 		k.baseColor[0] = k.baseColor[1] = k.baseColor[2] = k.baseColor[3] = 1;
-		k.albedoTex = AddTexture(toImage([&](size_t i, float* o) { o[0] = s.base.at(i, 0); o[1] = s.base.at(i, 1); o[2] = s.base.at(i, 2); o[3] = Clamp01(s.alpha.at(i, 0)); }), TK_COLOR, false);
+		k.albedoTex = AddTexture(image(oBase), TK_COLOR, false);
 	}
-	if (!s.alpha.constant() || s.alpha.d[0] < 0.99f) {
+	if (alphaVaries || alpha0 < 0.99f) {
 		if (!(k.flags & KWM_MASK)) k.flags |= KWM_MASK | KWM_TWOSIDED;
 	}
-	if (s.transparentBlend) k.flags |= KWM_BLEND;
+	if (blend) k.flags |= KWM_BLEND;
 	// normal
-	const float up[3] = { 0, 0, 1 };
-	if (!FieldIs(s.normal, up, 3, 1e-3f))
-		k.normalTex = AddTexture(toImage([&](size_t i, float* o) {
-			float x = s.normal.at(i, 0), y = s.normal.at(i, 1), z = s.normal.at(i, 2), l = sqrtf(x * x + y * y + z * z);
-			if (l < 1e-6f) { x = 0; y = 0; z = 1; l = 1; }
-			o[0] = x / l * 0.5f + 0.5f; o[1] = y / l * 0.5f + 0.5f; o[2] = z / l * 0.5f + 0.5f; o[3] = 1;
-		}), TK_NORMAL, false);
+	bool flatN = !oNorm.varies && fabsf(oNorm.c[0] - 0.5f) < 5e-4f && fabsf(oNorm.c[1] - 0.5f) < 5e-4f;
+	if (!flatN) k.normalTex = AddTexture(image(oNorm), TK_NORMAL, false);
 	// roughness / metallic
-	if (s.rough.constant() && s.metal.constant()) { k.roughness = Clamp01(s.rough.d[0]); k.metallic = Clamp01(s.metal.d[0]); }
-	else {
-		k.roughness = 1; k.metallic = 1;
-		k.ormTex = AddTexture(toImage([&](size_t i, float* o) { o[0] = 1; o[1] = Clamp01(s.rough.at(i, 0)); o[2] = Clamp01(s.metal.at(i, 0)); o[3] = 1; }), TK_DATA, false);
-	}
+	if (!oOrm.varies) { k.roughness = oOrm.c[1]; k.metallic = oOrm.c[2]; }
+	else { k.roughness = 1; k.metallic = 1; k.ormTex = AddTexture(image(oOrm), TK_DATA, false); }
 	// emission (Blender strength 1 ~ a white diffuse surface under 1 W/m2; scaled to Katarn's sun units)
-	const float zero[3] = { 0, 0, 0 };
-	if (!FieldIs(s.emission, zero, 3)) {
-		if (s.emission.constant()) for (int c = 0; c < 3; c++) k.emissive[c] = s.emission.d[c] * 2.0f;
-		else {
-			float mx = 1e-6f;
-			for (float v : s.emission.d) mx = std::max(mx, v);
-			k.emissive[0] = k.emissive[1] = k.emissive[2] = mx * 2.0f;
-			k.emissiveTex = AddTexture(toImage([&](size_t i, float* o) { for (int c = 0; c < 3; c++) o[c] = s.emission.at(i, c) / mx; o[3] = 1; }), TK_COLOR, false);
-		}
+	if (!oEmis.varies) { for (int c = 0; c < 3; c++) k.emissive[c] = oEmis.c[c] * 2.0f; }
+	else {
+		k.emissive[0] = k.emissive[1] = k.emissive[2] = emisMax * 2.0f;
+		BakeImage e = image(oEmis);
+		for (size_t i = 0; i < e.px.size(); i++) if ((i & 3) != 3) e.px[i] /= emisMax;
+		k.emissiveTex = AddTexture(e, TK_COLOR, false);
 	}
-	for (auto& w : ctx.warnings) warnings.push_back(w);
+	for (auto& w : cw) warnings.push_back(w);
 }
 
 // texture resolutions: big surfaces get more texels, within the memory budget
@@ -543,6 +676,8 @@ struct Bucket {
 	// output
 	std::vector<KwLod> lods;
 	std::vector<uint32_t> lodIdx;   // all LODs, concatenated
+	uint64_t vAt = 0, iAt = 0;      // in the spill file once the LODs are built
+	uint32_t nv = 0, ni = 0;
 	float bmin[3] = { 1e30f, 1e30f, 1e30f }, bmax[3] = { -1e30f, -1e30f, -1e30f };
 };
 static std::map<std::array<int, 4>, Bucket*> buckets;
@@ -662,7 +797,7 @@ int main(int argc, char** argv)
 	if (argc < 4) {
 		printf("usage: katarn_cook <export folder> <output folder> <map name> [--units 40] [--maxtex 2048] [--texbudget 2500]\n"
 			"       [--quality 0-2] [--cell 2048] [--lod0-error 0.25] [--collision-error 8] [--collision-budget 150000]\n"
-			"       [--skip \"HeightFog,Sky_Cottonball\"] [--threads N]\n");
+			"       [--skip \"HeightFog,Sky_Cottonball\"] [--threads N] [--maxmem MB] [--bands N]\n");
 		return 1;
 	}
 	double t0 = Now();
@@ -675,6 +810,8 @@ int main(int argc, char** argv)
 		else if (a == "--texbudget") TEXBUDGET_MB = (float)atof(v.c_str());
 		else if (a == "--quality") QUALITY = atoi(v.c_str());
 		else if (a == "--threads") THREADS = atoi(v.c_str());
+		else if (a == "--bands") BANDS = atoi(v.c_str());
+		else if (a == "--maxmem") MAXMEM_MB = (size_t)atoll(v.c_str());
 		else if (a == "--cell") CELL = (float)atof(v.c_str());
 		else if (a == "--lod0-error") LOD0_ERROR = (float)atof(v.c_str());
 		else if (a == "--collision-error") COLL_ERROR = (float)atof(v.c_str());
@@ -694,8 +831,13 @@ int main(int argc, char** argv)
 	js.clear(); js.shrink_to_fit();
 	bc7enc_compress_block_init();
 	rgbcx::init();
-	printf("KatarnEngine cook: %s -> %s/%s.kworld\n  1 m = %g units, cells %g, textures up to %d within %g MB, %d threads\n",
-		exportDir.c_str(), outDir.c_str(), mapName.c_str(), UNITS, CELL, MAXTEX, TEXBUDGET_MB, NumThreads());
+	if (!MAXMEM_MB) MAXMEM_MB = PhysicalMB() * 6 / 10;
+	printf("KatarnEngine cook: %s -> %s/%s.kworld\n  1 m = %g units, cells %g, textures up to %d within %g MB, %d threads, memory limit %zu MB\n",
+		exportDir.c_str(), outDir.c_str(), mapName.c_str(), UNITS, CELL, MAXTEX, TEXBUDGET_MB, NumThreads(), MAXMEM_MB);
+	std::string spillPath = outDir + "/" + mapName + ".kworld.tmp";
+	g_spill = fopen(spillPath.c_str(), "w+b");
+	if (!g_spill) { printf("cannot create %s\n", spillPath.c_str()); return 1; }
+	std::thread watchdog(MemoryWatchdog);
 	const Json* groups = scene.has("groups") ? &scene["groups"] : nullptr;
 
 	// ---- materials (flags now, baked after we know how much surface each covers)
@@ -725,10 +867,27 @@ int main(int argc, char** argv)
 	std::vector<uint32_t> idx;
 	std::vector<float> tan, tsign;
 	std::vector<std::array<float, 4>> coreSamples;
+	// big worlds are gathered in interleaved bands of cells (cell x mod bands), so only one band's raw geometry is
+	// in memory at a time; each band's clusters get their LODs and go to the spill file before the next band
+	int nBands = BANDS;
+	if (nBands <= 0) {
+		double tris = 0;
+		for (size_t ii = 0; ii < insts.size(); ii++) {
+			size_t mi = (size_t)insts[ii]["mesh"].num();
+			if (mi < meshes.size()) tris += meshes[mi]["indexCount"].num() / 3;
+		}
+		double need = tris * 140.0 / 1048576.0, budget = MAXMEM_MB * 0.4;
+		nBands = std::max(1, std::min(64, (int)ceil(need / budget)));
+		printf("  %.1fM triangles in the export (~%.0f MB to gather): %d band%s\n", tris / 1e6, need, nBands, nBands > 1 ? "s" : "");
+	}
+	std::vector<Bucket*> blist;
+	std::atomic<size_t> done(0);
+	double tLods = 0;
+	for (int band = 0; band < nBands; band++) {
 	for (size_t ii = 0; ii < insts.size(); ii++) {
 		const Json& in = insts[ii];
 		std::string oname = in["object"].str();
-		if (Skip(oname)) { skipped++; continue; }
+		if (Skip(oname)) { if (band == 0) skipped++; continue; }
 		size_t mi = (size_t)in["mesh"].num();
 		if (mi >= meshes.size()) continue;
 		const Json& m = meshes[mi];
@@ -771,8 +930,8 @@ int main(int argc, char** argv)
 			for (int q = 0; q < 3; q++) { omin[q] = std::min(omin[q], wp[k * 3 + q]); omax[q] = std::max(omax[q], wp[k * 3 + q]); }
 		}
 		float oext = std::max(omax[0] - omin[0], std::max(omax[1] - omin[1], omax[2] - omin[2]));
-		for (int q = 0; q < 3; q++) { wmin[q] = std::min(wmin[q], omin[q]); wmax[q] = std::max(wmax[q], omax[q]); }
-		if (oext < 100 * UNITS) {
+		if (band == 0) for (int q = 0; q < 3; q++) { wmin[q] = std::min(wmin[q], omin[q]); wmax[q] = std::max(wmax[q], omax[q]); }
+		if (band == 0 && oext < 100 * UNITS) {
 			float ctr[3] = { (omin[0] + omax[0]) * 0.5f, (omin[1] + omax[1]) * 0.5f, (omin[2] + omax[2]) * 0.5f };
 			coreSamples.push_back({ ctr[0], ctr[1], ctr[2], (float)(ni / 3) });
 		}
@@ -784,10 +943,11 @@ int main(int argc, char** argv)
 			if (mats[mat].invisible) continue;
 			int cls = (mats[mat].flags & KWM_MASK) ? KWC_MASKED : (mats[mat].flags & KWM_TWOSIDED) ? KWC_TWOSIDED : KWC_OPAQUE;
 			int cx = (int)floorf((p0[0] + p1[0] + p2[0]) / (3 * CELL)), cy = (int)floorf((p0[1] + p1[1] + p2[1]) / (3 * CELL)), cz = (int)floorf((p0[2] + p1[2] + p2[2]) / (3 * CELL));
+			if (((cx % nBands) + nBands) % nBands != band) continue;
 			std::array<int, 4> key = { cx, cy, cz, cls };
 			Bucket*& B = buckets[key];
 			if (!B) { B = new Bucket(); B->cls = cls; B->cell[0] = cx; B->cell[1] = cy; B->cell[2] = cz; }
-			if (B->remapOwner != (int64_t)ii) { B->remap.clear(); B->remapOwner = (int64_t)ii; }
+			if (B->remapOwner != (int64_t)ii) { std::unordered_map<uint64_t, uint32_t>().swap(B->remap); B->remapOwner = (int64_t)ii; }
 			uint32_t out[3];
 			for (int q = 0; q < 3; q++) {
 				uint64_t rk = ((uint64_t)vi[q] << 16) | mat;
@@ -821,7 +981,27 @@ int main(int argc, char** argv)
 			mats[mat].area += 0.5 * sqrt((double)cr[0] * cr[0] + (double)cr[1] * cr[1] + (double)cr[2] * cr[2]);
 			inTris++;
 		}
-		if (ii % 500 == 0) { printf("\r  geometry %zu/%zu objects, %.1fM triangles, %zu clusters   ", ii + 1, insts.size(), inTris / 1e6, buckets.size()); fflush(stdout); }
+		if (ii % 500 == 0) { printf("\r  geometry band %d/%d: %zu/%zu objects, %.1fM triangles, %zu clusters   ", band + 1, nBands, ii + 1, insts.size(), inTris / 1e6, buckets.size()); fflush(stdout); }
+	}
+	// this band's clusters: LODs, then out to the spill file
+	std::vector<Bucket*> bandList;
+	for (auto& kv : buckets) if (((kv.first[0] % nBands) + nBands) % nBands == band) {
+		std::unordered_map<uint64_t, uint32_t>().swap(kv.second->remap);
+		bandList.push_back(kv.second); blist.push_back(kv.second);
+	}
+	double tl0 = Now();
+	ParallelFor(bandList.size(), [&](size_t i) {
+		Bucket& b = *bandList[i];
+		BuildLods(b);
+		b.nv = (uint32_t)b.v.size(); b.ni = (uint32_t)b.lodIdx.size();
+		b.vAt = SpillWrite(b.v.data(), b.v.size() * sizeof(KwVertex));
+		b.iAt = SpillWrite(b.lodIdx.data(), b.lodIdx.size() * 4);
+		std::vector<KwVertex>().swap(b.v);
+		std::vector<uint32_t>().swap(b.lodIdx);
+		size_t d = ++done;
+		if (d % 50 == 0) { printf("\r  LODs %zu clusters (band %d/%d)   ", d, band + 1, nBands); fflush(stdout); }
+	});
+	tLods += Now() - tl0;
 	}
 	for (auto& p : packs) if (p.second) fclose(p.second);
 	printf("\r  geometry: %.2fM triangles in %zu clusters (%zu objects skipped), world %.0f x %.0f x %.0f units, %.0fs\n",
@@ -844,18 +1024,10 @@ int main(int argc, char** argv)
 	printf("  playable core %.0f x %.0f x %.0f units around (%.0f %.0f %.0f)\n", cmax[0] - cmin[0], cmax[1] - cmin[1], cmax[2] - cmin[2],
 		(cmin[0] + cmax[0]) * 0.5f, (cmin[1] + cmax[1]) * 0.5f, (cmin[2] + cmax[2]) * 0.5f);
 
-	// ---- LODs
-	std::vector<Bucket*> blist;
-	for (auto& kv : buckets) blist.push_back(kv.second);
-	std::atomic<size_t> done(0);
-	ParallelFor(blist.size(), [&](size_t i) {
-		BuildLods(*blist[i]);
-		size_t d = ++done;
-		if (d % 50 == 0 || d == blist.size()) { printf("\r  LODs %zu/%zu clusters   ", d, blist.size()); fflush(stdout); }
-	});
+	// ---- LODs (built per band above)
 	size_t lod0 = 0, lodAll = 0, verts = 0;
-	for (Bucket* b : blist) { if (!b->lods.empty()) lod0 += b->lods[0].indexCount / 3; lodAll += b->lodIdx.size() / 3; verts += b->v.size(); }
-	printf("\r  LODs: LOD0 %.2fM triangles (from %.2fM), all levels %.2fM, %.2fM vertices, %.0fs\n", lod0 / 1e6, inTris / 1e6, lodAll / 1e6, verts / 1e6, Now() - t0);
+	for (Bucket* b : blist) { if (!b->lods.empty()) lod0 += b->lods[0].indexCount / 3; lodAll += b->ni / 3; verts += b->nv; }
+	printf("\r  LODs: LOD0 %.2fM triangles (from %.2fM), all levels %.2fM, %.2fM vertices (LODs took %.0fs), %.0fs\n", lod0 / 1e6, inTris / 1e6, lodAll / 1e6, verts / 1e6, tLods, Now() - t0);
 
 	// ---- materials: bake the node graphs
 	PlanResolutions();
@@ -870,7 +1042,7 @@ int main(int argc, char** argv)
 	std::map<std::string, int> wcount;
 	for (auto& w : warn) for (auto& s : w) wcount[s]++;
 	uint64_t texBytes = 0;
-	for (auto& t : textures) texBytes += t.data.size();
+	for (auto& t : textures) texBytes += t.bytes;
 	printf("\r  materials: %zu baked, %zu textures (%.0f MB), %.0fs\n", mats.size(), textures.size(), texBytes / 1048576.0, Now() - t0);
 	for (auto& w : wcount) printf("    note: %s (%d materials)\n", w.first.c_str(), w.second);
 
@@ -967,22 +1139,22 @@ int main(int argc, char** argv)
 		if (b->lods.empty()) continue;
 		KwCluster c = {};
 		memcpy(c.boundsMin, b->bmin, 12); memcpy(c.boundsMax, b->bmax, 12);
-		c.baseVertex = (uint32_t)vCount; c.numVertices = (uint32_t)b->v.size();
+		c.baseVertex = (uint32_t)vCount; c.numVertices = b->nv;
 		c.firstLod = (uint32_t)lods.size(); c.numLods = (uint32_t)b->lods.size();
 		c.cls = (uint32_t)b->cls;
 		uint32_t ib = (uint32_t)iCount;
 		for (KwLod l : b->lods) { l.firstIndex += ib; lods.push_back(l); }
-		iCount += b->lodIdx.size();
-		vCount += b->v.size();
+		iCount += b->ni;
+		vCount += b->nv;
 		clusters.push_back(c);
 		cbucket.push_back(b);
 	}
 	std::vector<KwTexture> ktex;
 	uint64_t tdatSize = 0;
-	for (auto& t : textures) { KwTexture k = t.k; k.offset = tdatSize; k.size = t.data.size(); tdatSize += (k.size + 255) & ~255ull; ktex.push_back(k); }
+	for (auto& t : textures) { KwTexture k = t.k; k.offset = tdatSize; k.size = t.bytes; tdatSize += (k.size + 255) & ~255ull; ktex.push_back(k); }
 	std::string kpath = outDir + "/" + mapName + ".kworld";
 	FILE* f = fopen(kpath.c_str(), "wb");
-	if (!f) { printf("cannot write %s\n", kpath.c_str()); return 1; }
+	if (!f) { printf("cannot write %s\n", kpath.c_str()); fflush(stdout); _exit(1); }
 	struct Sec { uint32_t type; const void* data; uint64_t size; };
 	std::vector<Sec> secs = {
 		{ KW_VERT, nullptr, vCount * sizeof(KwVertex) }, { KW_INDX, nullptr, iCount * 4 },
@@ -1011,15 +1183,15 @@ int main(int argc, char** argv)
 		padTo(table[i].offset);
 		if (secs[i].type == KW_VERT || secs[i].type == KW_INDX) {
 			for (Bucket* b : cbucket) {
-				if (secs[i].type == KW_VERT) fwrite(b->v.data(), sizeof(KwVertex), b->v.size(), f);
-				else fwrite(b->lodIdx.data(), 4, b->lodIdx.size(), f);
+				if (secs[i].type == KW_VERT) SpillCopy(b->vAt, (uint64_t)b->nv * sizeof(KwVertex), f);
+				else SpillCopy(b->iAt, (uint64_t)b->ni * 4, f);
 			}
 			pos += secs[i].size;
 		}
 		else if (secs[i].type == KW_TDAT) {
 			for (auto& t : textures) {
-				fwrite(t.data.data(), 1, t.data.size(), f);
-				pos += t.data.size();
+				SpillCopy(t.spillAt, t.bytes, f);
+				pos += t.bytes;
 				padTo((pos + 255) & ~255ull);
 			}
 		}
@@ -1059,8 +1231,12 @@ int main(int argc, char** argv)
 		std::vector<float>& P = collPos[ci];
 		P.resize((size_t)c.numVertices * 3);
 		const Bucket* B = cbucket[ci];
-		const uint32_t* LI = B->lodIdx.data() + (l.firstIndex - (lods[c.firstLod].firstIndex - B->lods[0].firstIndex));
-		for (uint32_t k = 0; k < c.numVertices; k++) memcpy(&P[k * 3], B->v[k].pos, 12);
+		std::vector<KwVertex> BV(B->nv);
+		std::vector<uint32_t> BI(l.indexCount);
+		SpillRead(B->vAt, BV.data(), BV.size() * sizeof(KwVertex));
+		SpillRead(B->iAt + (uint64_t)(l.firstIndex - lods[c.firstLod].firstIndex + B->lods[0].firstIndex) * 4, BI.data(), BI.size() * 4);
+		const uint32_t* LI = BI.data();
+		for (uint32_t k = 0; k < c.numVertices; k++) memcpy(&P[k * 3], BV[k].pos, 12);
 		std::vector<uint32_t>& I = collTri[ci];
 		for (uint32_t t2 = 0; t2 + 2 < l.indexCount; t2 += 3) {
 			const float* a3 = &P[LI[t2] * 3], * b3 = &P[LI[t2 + 1] * 3], * c3 = &P[LI[t2 + 2] * 3];
@@ -1109,7 +1285,7 @@ int main(int argc, char** argv)
 	}
 	std::string mpath = outDir + "/" + mapName + ".map";
 	FILE* mf = fopen(mpath.c_str(), "w");
-	if (!mf) { printf("cannot write %s\n", mpath.c_str()); return 1; }
+	if (!mf) { printf("cannot write %s\n", mpath.c_str()); fflush(stdout); _exit(1); }
 	fprintf(mf, "// %s - collision and entities for the KatarnEngine HD world %s.kworld (the visible world is not in the BSP)\n", mapName.c_str(), mapName.c_str());
 	fprintf(mf, "{\n\"classname\" \"worldspawn\"\n\"message\" \"%s (KatarnEngine HD world)\"\n\"_katarn\" \"1\"\n", mapName.c_str());
 	auto box = [&](float x0, float y0, float z0, float x1, float y1, float z1, const char* sh) {
@@ -1209,5 +1385,10 @@ int main(int argc, char** argv)
 		fclose(sf);
 	}
 	printf("done in %.0fs\n", Now() - t0);
+	g_cookDone = true;
+	watchdog.join();
+	fclose(g_spill);
+	remove(spillPath.c_str());
+	printf("  peak memory %zu MB\n", (size_t)g_peakMB);
 	return 0;
 }
