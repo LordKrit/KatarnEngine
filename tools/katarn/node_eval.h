@@ -29,6 +29,7 @@ struct NodeCtx {
 	int W = 1, H = 1;
 	int y0 = 0, fullH = 0;           // tiled bakes: this tile is rows y0..y0+H of a fullH-row grid (0 = untiled)
 	int FH() const { return fullH > 0 ? fullH : H; }
+	float posScale[2] = { 0, 0 };    // > 0: Geometry Position = (u * posScale.x, v * posScale.y, 0) (planar projected bake)
 	std::function<std::shared_ptr<BakeImage>(const std::string& file, bool linearize)> loadImage;
 	std::vector<std::string> warnings;
 	const Json* groups = nullptr;
@@ -289,7 +290,11 @@ Field NodeGraph::eval(const std::string& name, const std::string& sock)
 	if (type == "NEW_GEOMETRY") {
 		if (sock == "Backfacing") return Field::C1(0);
 		if (sock == "Pointiness" || sock == "Random Per Island") return Field::C1(0.5f);
-		if (sock == "Position") return uv();
+		if (sock == "Position") {
+			Field f = uv();
+			if (C.posScale[0] > 0) for (size_t i = 0; i < f.d.size(); i += 3) { f.d[i] *= C.posScale[0]; f.d[i + 1] *= C.posScale[1]; f.d[i + 2] = 0; }
+			return f;
+		}
 		return C.worldMode ? dirs() : Field::C3(0, 0, 1);
 	}
 	if (type == "TEX_ENVIRONMENT") {

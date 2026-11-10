@@ -23,7 +23,9 @@ static struct World {
 	WorldEnv env;
 	ID3D12PipelineState* gbPSO[3] = {};          // per cluster class
 	ID3D12PipelineState* shPSO[2] = {};          // opaque, alpha-tested
-	Shader vs, ps, shadowPS;
+	ID3D12PipelineState* fxPSO = nullptr;
+	bool hasFX = false;         // water / flowing water into the HDR scene
+	Shader vs, ps, shadowPS, fxPS;
 	bool pipelines = false;
 	float bmin[3], bmax[3];
 	uint64_t drawnTris = 0;
@@ -60,6 +62,7 @@ static bool CreateWorldPipelines()
 	W.vs = R_Shader("world", "VS", "vs_5_1");
 	W.ps = R_Shader("world", "PS", "ps_5_1");
 	W.shadowPS = R_Shader("world", "ShadowPS", "ps_5_1");
+	W.fxPS = R_Shader("world", "FxPS", "ps_5_1");
 	if (!W.vs.ok || !W.ps.ok) return false;
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC d = {};
 	d.SampleMask = 0xffffffff;
@@ -93,6 +96,22 @@ static bool CreateWorldPipelines()
 	W.shPSO[0] = CreateGraphicsPSO(d, "world shadow");
 	d.PS = BCode(W.shadowPS);
 	W.shPSO[1] = CreateGraphicsPSO(d, "world shadow alpha");
+	// FX: no depth buffer (the shader tests against the scene depth and reads it for absorption); rgb + dst * a
+	if (W.fxPS.ok) {
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC f = d;
+		f.RasterizerState.DepthBias = 0; f.RasterizerState.SlopeScaledDepthBias = 0; f.RasterizerState.DepthBiasClamp = 0;
+		f.DepthStencilState.DepthEnable = FALSE;
+		f.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+		f.DSVFormat = DXGI_FORMAT_UNKNOWN;
+		f.NumRenderTargets = 1;
+		f.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		auto& rt = f.BlendState.RenderTarget[0];
+		rt.BlendEnable = TRUE; rt.SrcBlend = D3D12_BLEND_ONE; rt.DestBlend = D3D12_BLEND_SRC_ALPHA; rt.BlendOp = D3D12_BLEND_OP_ADD;
+		rt.SrcBlendAlpha = D3D12_BLEND_ZERO; rt.DestBlendAlpha = D3D12_BLEND_ONE; rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+		rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		f.PS = BCode(W.fxPS);
+		W.fxPSO = CreateGraphicsPSO(f, "world fx");
+	}
 	W.pipelines = true;
 	return W.gbPSO[0] && W.shPSO[0];
 }
@@ -116,7 +135,8 @@ void World_Shutdown()
 	World_Unload();
 	for (auto*& p : W.gbPSO) { if (p) p->Release(); p = nullptr; }
 	for (auto*& p : W.shPSO) { if (p) p->Release(); p = nullptr; }
-	Shader* s[] = { &W.vs, &W.ps, &W.shadowPS };
+	if (W.fxPSO) { W.fxPSO->Release(); W.fxPSO = nullptr; }
+	Shader* s[] = { &W.vs, &W.ps, &W.shadowPS, &W.fxPS };
 	for (auto* x : s) { if (x->blob) x->blob->Release(); *x = Shader(); }
 	W.pipelines = false;
 }
@@ -207,6 +227,8 @@ bool World_Load(const char* mapName)
 	readVec(KW_LODS, W.lods);
 	readVec(KW_MATL, W.mats);
 	readVec(KW_LITE, W.lights);
+	std::vector<uint8_t> splatRaw;
+	readVec(KW_SPLT, splatRaw);
 	std::vector<KwTexture> texs;
 	readVec(KW_TEXT, texs);
 	W.env = WorldEnv();
@@ -271,21 +293,43 @@ bool World_Load(const char* mapName)
 	if (envTex >= 0 && envTex < (int)W.textures.size() && W.textures[envTex].res) W.env.envSrv = W.textures[envTex].srvSrgb;
 
 	std::vector<KwMaterial> gm = W.mats;
+	auto view = [&](int32_t ti, bool srgb) -> int32_t {
+		if (ti < 0 || ti >= (int)W.textures.size() || !W.textures[ti].res) return 0;
+		return (int32_t)(srgb ? W.textures[ti].srvSrgb : W.textures[ti].srv);
+	};
 	for (auto& m : gm) {
-		auto view = [&](int32_t ti, bool srgb) -> int32_t {
-			if (ti < 0 || ti >= (int)W.textures.size() || !W.textures[ti].res) return 0;
-			return (int32_t)(srgb ? W.textures[ti].srvSrgb : W.textures[ti].srv);
-		};
 		m.albedoTex = view(m.albedoTex, true);
 		m.normalTex = view(m.normalTex, false);
 		m.ormTex = view(m.ormTex, false);
 		m.emissiveTex = view(m.emissiveTex, true);
 	}
 	if (gm.empty()) { KwMaterial d = {}; d.baseColor[0] = d.baseColor[1] = d.baseColor[2] = d.baseColor[3] = 0.8f; d.roughness = 0.6f; gm.push_back(d); }
-	CreateBuffer(W.materials, gm.size() * sizeof(KwMaterial), false, "world materials");
+	// splat (terrain) records go after the materials in the same buffer; their texture indices become views too
+	std::vector<uint8_t> splat = splatRaw;
+	const uint32_t splatBase = (uint32_t)(gm.size() * sizeof(KwMaterial));
+	for (size_t o = 0; o + sizeof(KwSplatHeader) <= splat.size(); ) {
+		KwSplatHeader* sh = (KwSplatHeader*)&splat[o];
+		sh->tintTex = view(sh->tintTex, false);
+		for (uint32_t i = 0; i < sh->numLayers && o + sizeof(KwSplatHeader) + (i + 1) * sizeof(KwSplatLayer) <= splat.size(); i++) {
+			uint8_t* lp = &splat[o + sizeof(KwSplatHeader) + i * sizeof(KwSplatLayer)];
+			if (sh->kind == 1) { KwFlowLayer* F = (KwFlowLayer*)lp; F->tex = view(F->tex, false); continue; }
+			KwSplatLayer* L = (KwSplatLayer*)lp;
+			L->albedoTex = view(L->albedoTex, true);
+			L->nohTex = view(L->nohTex, false);
+			L->maskTex = view(L->maskTex, false);
+		}
+		o += sizeof(KwSplatHeader) + sh->numLayers * sizeof(KwSplatLayer);
+	}
+	for (size_t i = 0; i < gm.size(); i++)
+		if (W.mats[i].flags & (KWM_SPLAT | KWM_FLOW)) gm[i].albedoTex = (int32_t)(splatBase + (uint32_t)W.mats[i].albedoTex);
+	size_t matBytes = gm.size() * sizeof(KwMaterial) + splat.size();
+	CreateBuffer(W.materials, (matBytes + 15) & ~(size_t)15, false, "world materials");
 	UploadBuffer(W.materials, 0, gm.data(), gm.size() * sizeof(KwMaterial));
+	if (!splat.empty()) UploadBuffer(W.materials, splatBase, splat.data(), splat.size());
 	FlushUploads();
 
+	W.hasFX = false;
+	for (auto& c : W.clusters) if (c.cls == KWC_FX) W.hasFX = true;
 	W.active = true;
 	W.name = mapName;
 	uint64_t tris = 0;
@@ -355,7 +399,7 @@ void World_DrawGBuffer(ID3D12GraphicsCommandList* cl, const WorldView& v)
 	ID3D12PipelineState* last = nullptr;
 	W.drawnTris = 0; W.drawnClusters = 0;
 	for (const KwCluster& c : W.clusters) {
-		if (!c.numLods || !BoxVisible(fr, c.boundsMin, c.boundsMax)) continue;
+		if (!c.numLods || c.cls == KWC_FX || !BoxVisible(fr, c.boundsMin, c.boundsMax)) continue;
 		float dist = Q_max(1.0f, BoxDistance(v.cam, c.boundsMin, c.boundsMax));
 		uint32_t l = 0;
 		if (lock >= 0) l = Q_min((uint32_t)lock, c.numLods - 1);
@@ -373,6 +417,23 @@ void World_DrawGBuffer(ID3D12GraphicsCommandList* cl, const WorldView& v)
 	}
 }
 
+// water / flowing water: forward into the HDR target (bound by the caller), after lighting
+void World_DrawFX(ID3D12GraphicsCommandList* cl, const WorldView& v)
+{
+	if (!W.active || !W.pipelines || !W.fxPSO || !W.hasFX) return;
+	Frustum fr;
+	FrustumFromMatrix(v.viewProj, fr, false);
+	BindGeometry(cl);
+	cl->SetPipelineState(W.fxPSO);
+	uint32_t k[4] = { W.materials.srv, 0, 0, 0 };
+	cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 4, k, 0);
+	for (const KwCluster& c : W.clusters) {
+		if (!c.numLods || c.cls != KWC_FX || !BoxVisible(fr, c.boundsMin, c.boundsMax)) continue;
+		const KwLod& lod = W.lods[c.firstLod];
+		cl->DrawIndexedInstanced(lod.indexCount, 1, lod.firstIndex, (INT)c.baseVertex, 0);
+	}
+}
+
 void World_DrawShadow(ID3D12GraphicsCommandList* cl, int cascade, const float* vp, float texelWorld)
 {
 	if (!W.active || !W.pipelines) return;
@@ -381,7 +442,7 @@ void World_DrawShadow(ID3D12GraphicsCommandList* cl, int cascade, const float* v
 	BindGeometry(cl);
 	ID3D12PipelineState* last = nullptr;
 	for (const KwCluster& c : W.clusters) {
-		if (!c.numLods || (c.flags & 1) || !BoxVisible(fr, c.boundsMin, c.boundsMax)) continue;
+		if (!c.numLods || (c.flags & 1) || c.cls == KWC_FX || !BoxVisible(fr, c.boundsMin, c.boundsMax)) continue;
 		uint32_t l = 0;
 		while (l + 1 < c.numLods && W.lods[c.firstLod + l + 1].error <= texelWorld * 1.5f) l++;
 		const KwLod& lod = W.lods[c.firstLod + l];

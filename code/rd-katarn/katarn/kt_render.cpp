@@ -946,8 +946,22 @@ static void RenderWorldView()
 		Dispatch(cl, R.csLighting, k, 8, gx, gy);
 	}
 
-	// ---- forward legacy content into the HDR scene
+	// ---- water / flowing water (reads the scene depth, blends into the lit scene)
 	Transition(cl, R.hdr, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	if (hd) {
+		cl->OMSetRenderTargets(1, &R.hdr.rtv[0], FALSE, nullptr);
+		cl->RSSetViewports(1, &vp);
+		cl->RSSetScissorRects(1, &rect);
+		cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
+		WorldView wv;
+		wv.viewProj = R.viewProj;
+		wv.cam[0] = v.origin[0]; wv.cam[1] = v.origin[1]; wv.cam[2] = v.origin[2];
+		wv.pixelScale = v.h * 0.5f * c.projParams[1];
+		wv.lodError = 1.0f;
+		World_DrawFX(cl, wv);
+	}
+
+	// ---- forward legacy content into the HDR scene
 	Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 	FlushStream(1);
 

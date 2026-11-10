@@ -44,6 +44,7 @@ const WorldEnv& World_Env();
 void World_AppendLights(std::vector<GpuLight>& out, const float* camPos);
 // GBuffer: targets and view constants already bound
 void World_DrawGBuffer(ID3D12GraphicsCommandList* cl, const WorldView& v);
+void World_DrawFX(ID3D12GraphicsCommandList* cl, const WorldView& v);   // HDR target bound, depth readable
 void World_DrawShadow(ID3D12GraphicsCommandList* cl, int cascade, const float* cascadeViewProj, float texelWorld);
 void World_Shutdown();
 void World_Stats(uint32_t& clusters, uint64_t& tris);

@@ -443,6 +443,9 @@ struct MatInfo {
 	int srcRes = 0;             // largest source image side
 	int res = 0;                // bake resolution
 	std::vector<std::string> images;
+	bool planar = false;        // textures projected from world X / Y: UVs are generated, one tile is baked
+	float period[2] = { 1, 1 }; // tile size, Blender metres
+	float repeats = 1;          // how many times the most repeated source image fits in a tile
 };
 static std::vector<MatInfo> mats;
 static std::map<std::string, uint32_t> matIndex;
@@ -483,6 +486,491 @@ static bool FieldIs(const Field& f, const float* v, int n, float eps = 1e-4f)
 	return true;
 }
 
+// ================================================================================================ splat (terrain) materials
+// Terrain materials in the export blend tiled texture layers by world-position masks (Geometry > Position >
+// Mapping > Image). A bake over UV space cannot represent that, so they are recognised here and turned into a
+// splat record the shader evaluates per pixel (see KwSplatHeader).
+static std::vector<uint8_t> splatBlob;
+static std::mutex splatMutex;
+
+struct GraphView {
+	const Json& nodes;
+	const Json* node(const std::string& n) const { const Json& j = nodes[n.c_str()]; return j.t == Json::OBJ ? &j : nullptr; }
+	static const Json* input(const Json& nd, const char* id)
+	{
+		for (auto& i : nd["inputs"].a) if (i["id"].str() == id) return &i;
+		for (auto& i : nd["inputs"].a) if (i["name"].str() == id && !(i["enabled"].t == Json::BOOL && !i["enabled"].b)) return &i;
+		return nullptr;
+	}
+	// the (node, socket) feeding an input, or false
+	bool link(const Json& nd, const char* id, std::string& from, std::string& sock) const
+	{
+		const Json* in = input(nd, id);
+		if (!in) return false;
+		const Json& l = (*in)["link"];
+		if (l.t != Json::ARR || l.size() != 2) return false;
+		from = l[(size_t)0].str(); sock = l[1].str();
+		return true;
+	}
+	float value(const Json& nd, const char* id, int c = 0, float d = 0) const
+	{
+		const Json* in = input(nd, id);
+		if (!in) return d;
+		const Json& v = (*in)["value"];
+		if (v.t == Json::NUM) return (float)v.n;
+		if (v.t == Json::ARR && (size_t)c < v.size()) return (float)v[(size_t)c].num(d);
+		return d;
+	}
+	// a MAPPING (or nothing) between Geometry > Position and an image: scale + location, rotation must be 0
+	bool positionMapping(const Json& tex, float xf[4]) const
+	{
+		std::string from, sock;
+		if (!link(tex, "Vector", from, sock)) return false;
+		const Json* m = node(from);
+		if (!m) return false;
+		std::string t = (*m)["type"].str();
+		if (t == "NEW_GEOMETRY") { if (sock != "Position") return false; xf[0] = xf[1] = 1; xf[2] = xf[3] = 0; return true; }
+		if (t != "MAPPING") return false;
+		std::string f2, s2;
+		if (!link(*m, "Vector", f2, s2)) return false;
+		const Json* g = node(f2);
+		if (!g || (*g)["type"].str() != "NEW_GEOMETRY" || s2 != "Position") return false;
+		if (fabsf(value(*m, "Rotation", 2)) > 1e-4f || fabsf(value(*m, "Rotation", 0)) > 1e-4f || fabsf(value(*m, "Rotation", 1)) > 1e-4f) return false;
+		xf[0] = value(*m, "Scale", 0, 1); xf[1] = value(*m, "Scale", 1, 1);
+		xf[2] = value(*m, "Location", 0); xf[3] = value(*m, "Location", 1);
+		return true;
+	}
+};
+
+struct SplatLayerSrc { std::string color, noh; float scale = 1; std::string mask; int chan = 0; float smin = 0, smax = 1; std::string mapping; bool normalOnly = false; };
+
+
+// ================================================================================================ planar projected materials
+// "Top projected" materials texture by world X / Y (Geometry > Position > Mapping or Multiply-Add > Image). When every
+// such image repeats a whole number of times over one period, one tile can be baked and the cooker generates UVs
+// from the world position instead (the sampler repeats the tile).
+static bool LinearAxis(const GraphView& g, const std::string& from, const std::string& sock, int& axis, float& a, float& b)
+{
+	const Json* n = g.node(from);
+	if (!n) return false;
+	std::string t = (*n)["type"].str();
+	if (t == "SEPXYZ") {
+		std::string f, s2;
+		if (!g.link(*n, "Vector", f, s2) || s2 != "Position") return false;
+		const Json* geo = g.node(f);
+		if (!geo || (*geo)["type"].str() != "NEW_GEOMETRY") return false;
+		axis = sock == "X" ? 0 : sock == "Y" ? 1 : 2;
+		a = 1; b = 0;
+		return axis < 2;
+	}
+	if (t == "MATH") {
+		std::string op = (*n)["props"]["operation"].str();
+		std::string f, s2;
+		if (!g.link(*n, "Value", f, s2)) return false;
+		if (!LinearAxis(g, f, s2, axis, a, b)) return false;
+		std::string dummy, d2;
+		if (g.link(*n, "Value_001", dummy, d2) || g.link(*n, "Value_002", dummy, d2)) return false;
+		float v1 = g.value(*n, "Value_001"), v2 = g.value(*n, "Value_002");
+		if (op == "MULTIPLY_ADD") { a *= v1; b = b * v1 + v2; return true; }
+		if (op == "MULTIPLY") { a *= v1; b *= v1; return true; }
+		if (op == "ADD") { b += v1; return true; }
+		return false;
+	}
+	return false;
+}
+// the image's coordinate as u = a[0] x + b[0], v = a[1] y + b[1]
+static bool PlanarCoords(const GraphView& g, const Json& tex, float a[2], float b[2])
+{
+	float xf[4];
+	if (g.positionMapping(tex, xf)) { a[0] = xf[0]; a[1] = xf[1]; b[0] = xf[2]; b[1] = xf[3]; return true; }
+	std::string f, s2;
+	if (!g.link(tex, "Vector", f, s2)) return false;
+	const Json* c = g.node(f);
+	if (!c || (*c)["type"].str() != "COMBXYZ") return false;
+	std::string xf2, xs, yf, ys;
+	if (!g.link(*c, "X", xf2, xs) || !g.link(*c, "Y", yf, ys)) return false;
+	int ax0, ax1; float a0, b0, a1, b1;
+	if (!LinearAxis(g, xf2, xs, ax0, a0, b0) || !LinearAxis(g, yf, ys, ax1, a1, b1) || ax0 != 0 || ax1 != 1) return false;
+	a[0] = a0; b[0] = b0; a[1] = a1; b[1] = b1;
+	return true;
+}
+static bool DetectPlanar(const Json& m, float period[2], float& repeats)
+{
+	const Json& graph = m["graph"];
+	if (graph.t != Json::OBJ) return false;
+	GraphView g{ graph["nodes"] };
+	bool usesPos = false;
+	for (auto& kv : graph["nodes"].o)
+		for (auto& in : kv.second["inputs"].a) {
+			const Json& l = in["link"];
+			if (l.t != Json::ARR || l.size() != 2) continue;
+			const Json* src = g.node(l[(size_t)0].str());
+			if (src && (*src)["type"].str() == "NEW_GEOMETRY") {
+				if (l[1].str() != "Position") return false;    // normal / pointiness etc.: not a plain projection
+				usesPos = true;
+			}
+			if (src && (*src)["type"].str() == "SEPXYZ" && l[1].str() == "Z") {
+				std::string f, s2;
+				if (g.link(*src, "Vector", f, s2) && s2 == "Position") return false;   // height dependent
+			}
+		}
+	if (!usesPos) return false;
+	std::vector<std::array<float, 2>> as;
+	for (auto& kv : graph["nodes"].o) {
+		const Json& n = kv.second;
+		if (n["type"].str() != "TEX_IMAGE") continue;
+		std::string f, s2;
+		if (!g.link(n, "Vector", f, s2)) continue;   // UV mapped image: fine (but then the tile would not match)
+		float a[2], b[2];
+		if (!PlanarCoords(g, n, a, b)) return false;
+		if (n["props"]["extension"].str("REPEAT") != "REPEAT") return false;
+		if (fabsf(a[0]) < 1e-5f || fabsf(a[1]) < 1e-5f) return false;
+		as.push_back({ fabsf(a[0]), fabsf(a[1]) });
+	}
+	if (as.empty()) return false;
+	repeats = 1;
+	for (int ax = 0; ax < 2; ax++) {
+		float base = 1.0f / as[0][ax], best = 0;
+		for (int k = 1; k <= 24 && !best; k++) {
+			float P = base * k;
+			if (P > 64.0f) break;
+			bool ok = true;
+			for (auto& a : as) { float r = a[ax] * P; if (fabsf(r - roundf(r)) > 0.02f * std::max(1.0f, r)) { ok = false; break; } }
+			if (ok) best = P;
+		}
+		if (!best) return false;
+		period[ax] = best;
+		for (auto& a : as) repeats = std::max(repeats, a[ax] * best);
+	}
+	return true;
+}
+static int SplatTexture(const std::string& file, TexKind kind)
+{
+	auto img = LoadSource(file, kind == TK_COLOR);
+	if (!img) return -1;
+	BakeImage b = *img;
+	if (b.w > MAXTEX || b.h > MAXTEX) b = Resample(b, std::min(b.w, MAXTEX), std::min(b.h, MAXTEX));
+	return AddTexture(b, kind, true);
+}
+
+// returns true and fills k when the material is a splat terrain
+static bool TrySplat(const Json& m, KwMaterial& k, std::vector<std::string>& warnings, bool dry = false)
+{
+	const Json& graph = m["graph"];
+	if (graph.t != Json::OBJ) return false;
+	GraphView g{ graph["nodes"] };
+	const Json* bsdf = nullptr;
+	for (auto& kv : graph["nodes"].o) if (kv.second["type"].str() == "BSDF_PRINCIPLED") { bsdf = &kv.second; break; }
+	if (!bsdf) return false;
+	std::string from, sock;
+	if (!g.link(*bsdf, "Base Color", from, sock)) return false;
+	KwSplatHeader h = {};
+	h.tintTex = -1; h.tintMul = 1; h.normalStrength = 1; h.invUnits = 1.0f / UNITS; h.roughness = g.value(*bsdf, "Roughness", 0, 0.5f);
+	std::string tintFile;
+	// optional tint: MULTIPLY(chain, SCALE(image))
+	const Json* top = g.node(from);
+	if (top && (*top)["type"].str() == "MIX" && (*top)["props"]["blend_type"].str() == "MULTIPLY") {
+		std::string bf, bs, af, as;
+		if (g.link(*top, "B_Color", bf, bs) && g.link(*top, "A_Color", af, as)) {
+			const Json* vm = g.node(bf);
+			std::string tf, ts;
+			if (vm && (*vm)["type"].str() == "VECT_MATH" && g.link(*vm, "Vector", tf, ts)) {
+				const Json* ti = g.node(tf);
+				if (ti && (*ti)["type"].str() == "TEX_IMAGE" && g.positionMapping(*ti, h.tintXf)) {
+					tintFile = (*ti)["props"]["image"].str();
+					h.tintMul = g.value(*vm, "Scale", 0, 1);
+				}
+			}
+			from = af; sock = as;
+		}
+	}
+	// walk a MIX chain down to its base image: returns layers base first
+	auto walk = [&](std::string n, std::vector<SplatLayerSrc>& out) -> bool {
+		std::vector<SplatLayerSrc> rev;
+		for (int guard = 0; guard < 64; guard++) {
+			const Json* nd = g.node(n);
+			if (!nd) return false;
+			std::string t = (*nd)["type"].str();
+			if (t == "TEX_IMAGE") {
+				SplatLayerSrc L; L.color = (*nd)["props"]["image"].str();
+				float xf[4];
+				if (!g.positionMapping(*nd, xf)) return false;
+				L.scale = xf[0];
+				std::string vf, vs; g.link(*nd, "Vector", vf, vs); L.mapping = vf;
+				rev.push_back(L);
+				break;
+			}
+			if (t != "MIX" || (*nd)["props"]["blend_type"].str() != "MIX") return false;
+			std::string ff, fs, bf, bs, af, as;
+			bool hasF = g.link(*nd, "Factor_Float", ff, fs) || g.link(*nd, "Factor", ff, fs);
+			bool hasB = g.link(*nd, "B_Color", bf, bs) || g.link(*nd, "B_Float", bf, bs) || g.link(*nd, "B", bf, bs);
+			bool hasA = g.link(*nd, "A_Color", af, as) || g.link(*nd, "A_Float", af, as) || g.link(*nd, "A", af, as);
+			if (!hasF || !hasB || !hasA) return false;
+			SplatLayerSrc L;
+			const Json* bi = g.node(bf);
+			if (!bi || (*bi)["type"].str() != "TEX_IMAGE") return false;
+			float xf[4];
+			if (!g.positionMapping(*bi, xf)) return false;
+			L.color = (*bi)["props"]["image"].str(); L.scale = xf[0];
+			std::string vf, vs; g.link(*bi, "Vector", vf, vs); L.mapping = vf;
+			// weight
+			const Json* fn = g.node(ff);
+			if (!fn) return false;
+			std::string ft = (*fn)["type"].str();
+			const Json* maskImg = nullptr;
+			if (ft == "SEPARATE_COLOR") {
+				L.chan = fs == "Red" ? 0 : fs == "Green" ? 1 : fs == "Blue" ? 2 : 3;
+				std::string mf, ms;
+				if (!g.link(*fn, "Color", mf, ms)) return false;
+				maskImg = g.node(mf);
+			}
+			else if (ft == "TEX_IMAGE") { L.chan = fs == "Alpha" ? 3 : 0; maskImg = fn; }
+			else if (ft == "MAP_RANGE") {
+				std::string vf2, vs2;
+				if (!g.link(*fn, "Value", vf2, vs2)) return false;
+				const Json* sx = g.node(vf2);
+				std::string gf, gs;
+				if (!sx || (*sx)["type"].str() != "SEPXYZ" || vs2 != "Z" || !g.link(*sx, "Vector", gf, gs) || gs != "Normal") return false;
+				float f0 = g.value(*fn, "From Min"), f1 = g.value(*fn, "From Max", 0, 1), t0 = g.value(*fn, "To Min"), t1 = g.value(*fn, "To Max", 0, 1);
+				if (t0 > t1) { L.smin = f0; L.smax = f1; } else { L.smin = f1; L.smax = f0; }   // weight = 1 at smin, 0 at smax
+				L.chan = 4;
+			}
+			else return false;
+			if (maskImg) {
+				if ((*maskImg)["type"].str() != "TEX_IMAGE") return false;
+				float mxf[4];
+				if (!g.positionMapping(*maskImg, mxf)) return false;
+				L.mask = (*maskImg)["props"]["image"].str();
+				memcpy(h.maskXf, mxf, 16);
+			}
+			rev.push_back(L);
+			n = af;
+		}
+		if (rev.empty()) return false;
+		out.assign(rev.rbegin(), rev.rend());
+		return true;
+	};
+	std::vector<SplatLayerSrc> col;
+	if (!walk(from, col) || col.size() < 2) return false;
+	// normal chain: Normal Map <- (Combine Color <- Separate Color <-) chain
+	std::vector<SplatLayerSrc> nrm;
+	std::string nf, ns;
+	if (g.link(*bsdf, "Normal", nf, ns)) {
+		const Json* nm = g.node(nf);
+		if (nm && (*nm)["type"].str() == "NORMAL_MAP") {
+			h.normalStrength = g.value(*nm, "Strength", 0, 1);
+			std::string cf, cs;
+			if (g.link(*nm, "Color", cf, cs)) {
+				const Json* cc = g.node(cf);
+				std::string rf, rs;
+				if (cc && (*cc)["type"].str() == "COMBINE_COLOR" && g.link(*cc, "Red", rf, rs)) {
+					const Json* sc = g.node(rf);
+					std::string sf, ss;
+					if (sc && (*sc)["type"].str() == "SEPARATE_COLOR" && g.link(*sc, "Color", sf, ss)) walk(sf, nrm);
+				}
+			}
+		}
+	}
+	// roughness: from the layers' alpha (smoothness) when it is a chain
+	std::string rf, rs;
+	if (g.link(*bsdf, "Roughness", rf, rs)) h.roughness = -1;
+	// merge: the normal chain sets the order (it may hold normal-only layers); its images are the colour layers' NOH
+	std::vector<SplatLayerSrc> layers;
+	size_t ci = 0;
+	for (auto& n : nrm) {
+		if (ci < col.size() && n.mapping == col[ci].mapping) { SplatLayerSrc L = col[ci++]; L.noh = n.color; layers.push_back(L); }
+		else { SplatLayerSrc L = n; L.noh = n.color; L.color.clear(); L.normalOnly = true; layers.push_back(L); }
+	}
+	for (; ci < col.size(); ci++) layers.push_back(col[ci]);
+	if (layers.empty() || layers[0].normalOnly) return false;
+	if (getenv("KT_SPLAT_DEBUG")) {
+		printf("splat %s: tint %s x%.2f, normal %.2f, rough %.2f, mask xf %g %g %g %g\n", m["name"].str("?").c_str(), tintFile.c_str(), h.tintMul, h.normalStrength, h.roughness, h.maskXf[0], h.maskXf[1], h.maskXf[2], h.maskXf[3]);
+		for (auto& L : layers) printf("   %-40s noh %-40s scale %.3f mask %s.%d slope %.2f-%.2f%s\n", L.color.c_str(), L.noh.c_str(), L.scale, L.mask.c_str(), L.chan, L.smin, L.smax, L.normalOnly ? " NORMAL-ONLY" : "");
+	}
+	if (dry) return true;
+	// textures
+	std::map<std::string, int> cache;
+	auto tex = [&](const std::string& f, TexKind kind) -> int {
+		if (f.empty()) return -1;
+		std::string key = f + "|" + std::to_string((int)kind);
+		auto it = cache.find(key);
+		if (it != cache.end()) return it->second;
+		int t = SplatTexture(f, kind);
+		if (t < 0) warnings.push_back("splat: cannot read " + f);
+		return cache[key] = t;
+	};
+	h.numLayers = (uint32_t)layers.size();
+	h.tintTex = tex(tintFile, TK_DATA);
+	std::vector<KwSplatLayer> out;
+	for (auto& L : layers) {
+		KwSplatLayer o = {};
+		o.albedoTex = L.normalOnly ? -1 : tex(L.color, TK_COLOR);
+		o.nohTex = tex(L.noh, TK_DATA);
+		o.scale = L.scale;
+		o.maskTex = L.chan == 4 ? -1 : tex(L.mask, TK_DATA);
+		o.maskChan = (uint32_t)L.chan;
+		o.slopeMin = L.smin; o.slopeMax = L.smax;
+		o.flags = L.normalOnly ? KWS_NORMAL_ONLY : 0;
+		out.push_back(o);
+	}
+	std::lock_guard<std::mutex> lk(splatMutex);
+	k.albedoTex = (int32_t)splatBlob.size();
+	k.flags |= KWM_SPLAT;
+	k.baseColor[0] = k.baseColor[1] = k.baseColor[2] = k.baseColor[3] = 1;
+	k.roughness = h.roughness < 0 ? 1.0f : h.roughness;
+	const uint8_t* hp = (const uint8_t*)&h;
+	splatBlob.insert(splatBlob.end(), hp, hp + sizeof(h));
+	const uint8_t* lp = (const uint8_t*)out.data();
+	splatBlob.insert(splatBlob.end(), lp, lp + out.size() * sizeof(KwSplatLayer));
+	char buf[160];
+	snprintf(buf, sizeof(buf), "splat terrain: %zu layers (evaluated in the shader)", out.size());
+	warnings.push_back(buf);
+	return true;
+}
+
+
+// ================================================================================================ water
+// Still water (rivers, fountains): a volume-absorption material or one named like water. Rendered by the FX pass
+// (animated waves, sky reflection, depth absorption), so only its parameters are kept.
+static bool IsWaterMaterial(const std::string& name, const Json& m)
+{
+	std::string lo = name;
+	for (auto& c : lo) c = (char)tolower((unsigned char)c);
+	if (lo.find("waterfall") != std::string::npos || lo.find("_fal") != std::string::npos) return false;
+	const Json& graph = m["graph"];
+	if (graph.t == Json::OBJ)
+		for (auto& kv : graph["nodes"].o) if (kv.second["type"].str() == "VOLUME_ABSORPTION") return true;
+	if (lo.find("water") != std::string::npos) return true;
+	size_t w = lo.find("_wat");
+	return w != std::string::npos && (w + 4 == lo.size() || lo[w + 4] == '.' || lo[w + 4] == '_');
+}
+static void WaterParams(const Json& m, KwMaterial& k)
+{
+	k.baseColor[0] = 0.02f; k.baseColor[1] = 0.05f; k.baseColor[2] = 0.05f; k.baseColor[3] = 1;
+	k.emissive[0] = 0.25f; k.emissive[1] = 0.55f; k.emissive[2] = 0.5f;
+	k.roughness = 0.03f; k.normalScale = 0.25f; k.metallic = 0;
+	const Json& graph = m["graph"];
+	if (graph.t == Json::OBJ) {
+		GraphView g{ graph["nodes"] };
+		for (auto& kv : graph["nodes"].o) {
+			const Json& n = kv.second;
+			std::string t = n["type"].str();
+			if (t == "BSDF_PRINCIPLED") {
+				std::string f, s2;
+				if (!g.link(n, "Base Color", f, s2)) for (int c = 0; c < 3; c++) k.baseColor[c] = g.value(n, "Base Color", c, k.baseColor[c]);
+				if (!g.link(n, "Roughness", f, s2)) k.roughness = g.value(n, "Roughness", 0, k.roughness);
+			}
+			if (t == "VOLUME_ABSORPTION") for (int c = 0; c < 3; c++) k.emissive[c] = g.value(n, "Color", c, k.emissive[c]);
+			if (t == "BUMP") k.normalScale = g.value(n, "Strength", 0, k.normalScale);
+		}
+	}
+	else {
+		const Json& bc = m["baseColor"];
+		if (bc.t == Json::ARR) for (int c = 0; c < 3; c++) k.baseColor[c] = (float)bc[(size_t)c].num(k.baseColor[c]);
+	}
+	k.flags = (k.flags & ~(uint32_t)(KWM_MASK | KWM_BLEND)) | KWM_WATER | KWM_TWOSIDED;
+}
+
+// ================================================================================================ flowing water
+// Waterfall sheets: alpha built from scrolling texture channels (Mapping Location <- Vector Math Scale <- Value,
+// i.e. animated by the frame). Parsed into a flow record the FX pass animates.
+static bool TryFlow(const Json& m, KwMaterial& k, std::vector<std::string>& warnings, bool dry = false)
+{
+	if (m["alphaMode"].str() != "BLEND") return false;
+	const Json& graph = m["graph"];
+	if (graph.t != Json::OBJ) return false;
+	GraphView g{ graph["nodes"] };
+	const Json* bsdf = nullptr;
+	for (auto& kv : graph["nodes"].o) if (kv.second["type"].str() == "BSDF_PRINCIPLED") { bsdf = &kv.second; break; }
+	if (!bsdf) return false;
+	std::string af, as;
+	if (!g.link(*bsdf, "Alpha", af, as)) return false;
+	struct Term { std::string img; int chan; float scale[2], speed[2]; int op; };
+	std::vector<Term> terms;
+	float mul = 1;
+	// a leaf: Separate Color channel of a scrolling image (or a vertex colour, taken as 1)
+	auto leaf = [&](const std::string& n, const std::string& sock, Term& t) -> int {   // 1 term, 0 constant one, -1 no
+		const Json* nd = g.node(n);
+		if (!nd) return -1;
+		std::string ty = (*nd)["type"].str();
+		if (ty == "SEPARATE_COLOR") {
+			std::string f, s2;
+			if (!g.link(*nd, "Color", f, s2)) return -1;
+			const Json* src = g.node(f);
+			if (!src) return -1;
+			if ((*src)["type"].str() == "VERTEX_COLOR") return 0;
+			if ((*src)["type"].str() != "TEX_IMAGE") return -1;
+			t.img = (*src)["props"]["image"].str();
+			t.chan = sock == "Red" ? 0 : sock == "Green" ? 1 : sock == "Blue" ? 2 : 3;
+			std::string mf, ms;
+			if (!g.link(*src, "Vector", mf, ms)) { t.scale[0] = t.scale[1] = 1; t.speed[0] = t.speed[1] = 0; return 1; }
+			const Json* map = g.node(mf);
+			if (!map || (*map)["type"].str() != "MAPPING") return -1;
+			t.scale[0] = g.value(*map, "Scale", 0, 1); t.scale[1] = g.value(*map, "Scale", 1, 1);
+			t.speed[0] = t.speed[1] = 0;
+			std::string lf, ls;
+			if (g.link(*map, "Location", lf, ls)) {
+				const Json* vm = g.node(lf);
+				if (!vm || (*vm)["type"].str() != "VECT_MATH") return -1;
+				t.speed[0] = g.value(*vm, "Vector", 0); t.speed[1] = g.value(*vm, "Vector", 1);
+			}
+			else { t.speed[0] = 0; t.speed[1] = 0; }
+			return 1;
+		}
+		if (ty == "VERTEX_COLOR") return 0;
+		return -1;
+	};
+	// left-deep expression of MATH ADD / MULTIPLY
+	std::function<bool(const std::string&, const std::string&)> expr = [&](const std::string& n, const std::string& sock) -> bool {
+		Term t = {};
+		int lf = leaf(n, sock, t);
+		if (lf == 1) { t.op = terms.empty() ? 0 : 1; terms.push_back(t); return true; }
+		const Json* nd = g.node(n);
+		if (!nd || (*nd)["type"].str() != "MATH") return false;
+		std::string op = (*nd)["props"]["operation"].str();
+		if (op != "ADD" && op != "MULTIPLY") return false;
+		std::string f0, s0, f1, s1;
+		bool l0 = g.link(*nd, "Value", f0, s0), l1 = g.link(*nd, "Value_001", f1, s1);
+		if (!l0) return false;
+		if (!expr(f0, s0)) return false;
+		if (!l1) { float v = g.value(*nd, "Value_001"); if (op == "MULTIPLY") mul *= v; else return false; return true; }
+		Term r = {};
+		int rl = leaf(f1, s1, r);
+		if (rl == 0) return true;            // * vertex colour (1)
+		if (rl != 1) return false;
+		r.op = op == "ADD" ? 1 : 2;
+		terms.push_back(r);
+		return true;
+	};
+	if (!expr(af, as) || terms.empty() || terms.size() > 8) return false;
+	if (dry) return true;
+	KwSplatHeader h = {};
+	h.kind = 1; h.numLayers = (uint32_t)terms.size(); h.tintTex = -1; h.tintMul = mul; h.invUnits = 1.0f / UNITS;
+	std::vector<KwFlowLayer> L;
+	for (auto& t : terms) {
+		KwFlowLayer f = {};
+		f.tex = SplatTexture(t.img, TK_DATA);
+		f.chan = (uint32_t)t.chan; f.scale[0] = t.scale[0]; f.scale[1] = t.scale[1]; f.speed[0] = t.speed[0]; f.speed[1] = t.speed[1];
+		f.op = (uint32_t)t.op;
+		L.push_back(f);
+	}
+	const Json& bc = m["baseColor"];
+	k.baseColor[0] = 0.85f; k.baseColor[1] = 0.92f; k.baseColor[2] = 0.95f; k.baseColor[3] = 1;
+	if (bc.t == Json::ARR) for (int c = 0; c < 3; c++) k.baseColor[c] = (float)bc[(size_t)c].num(k.baseColor[c]);
+	const Json& em = m["emission"];
+	if (em.t == Json::ARR) for (int c = 0; c < 3; c++) k.emissive[c] = (float)em[(size_t)c].num(0);
+	k.roughness = (float)m["roughness"].num(0.15);
+	k.flags = (k.flags & ~(uint32_t)(KWM_MASK | KWM_BLEND)) | KWM_FLOW | KWM_TWOSIDED;
+	std::lock_guard<std::mutex> lk(splatMutex);
+	k.albedoTex = (int32_t)splatBlob.size();
+	const uint8_t* hp = (const uint8_t*)&h;
+	splatBlob.insert(splatBlob.end(), hp, hp + sizeof(h));
+	const uint8_t* lp = (const uint8_t*)L.data();
+	splatBlob.insert(splatBlob.end(), lp, lp + L.size() * sizeof(KwFlowLayer));
+	warnings.push_back("flowing water (animated in the FX pass)");
+	return true;
+}
+
 static void BakeMaterial(MatInfo& mi, KwMaterial& k, std::vector<std::string>& warnings, const Json* groups)
 {
 	const Json& m = *mi.json;
@@ -493,6 +981,9 @@ static void BakeMaterial(MatInfo& mi, KwMaterial& k, std::vector<std::string>& w
 	k.flags = mi.flags;
 	const Json& graph = m["graph"];
 	const char* out = graph.t == Json::OBJ ? OutputShaderNode(graph["nodes"]) : nullptr;
+	if (mi.flags & KWM_WATER) { WaterParams(m, k); return; }
+	if ((mi.flags & KWM_FLOW) && TryFlow(m, k, warnings)) return;
+	if (out && TrySplat(m, k, warnings)) return;
 	if (!out) {
 		const Json& bc = m["baseColor"];
 		if (bc.t == Json::ARR) for (int i = 0; i < 4; i++) k.baseColor[i] = (float)bc[(size_t)i].num(i == 3 ? 1 : 0.8);
@@ -534,6 +1025,7 @@ static void BakeMaterial(MatInfo& mi, KwMaterial& k, std::vector<std::string>& w
 		NodeCtx ctx;
 		ctx.groups = groups;
 		ctx.W = W; ctx.H = rows; ctx.y0 = y0; ctx.fullH = H;
+		if (mi.planar) { ctx.posScale[0] = mi.period[0]; ctx.posScale[1] = mi.period[1]; }
 		ctx.loadImage = [](const std::string& f, bool lin) { return LoadSource(f, lin); };
 		NodeGraph g;
 		g.nodes = &graph["nodes"];
@@ -601,9 +1093,17 @@ static void BakeMaterial(MatInfo& mi, KwMaterial& k, std::vector<std::string>& w
 static void PlanResolutions()
 {
 	for (auto& m : mats) {
+		KwMaterial dk; std::vector<std::string> dw;
+		if ((m.flags & (KWM_WATER | KWM_FLOW)) || (m.json && TrySplat(*m.json, dk, dw, true))) { m.srcRes = 0; m.area = 0; continue; }   // shader-evaluated
 		m.srcRes = 0;
 		for (auto& f : m.images) { auto d = SourceDims(f); m.srcRes = std::max(m.srcRes, std::max(d.first, d.second)); }
 		m.srcRes = std::min(m.srcRes, MAXTEX);
+		if (m.planar) {
+			int r = 64;
+			while (r * 2 <= MAXTEX && r * 2 <= m.srcRes * m.repeats) r *= 2;
+			m.srcRes = r;
+			m.area = 1e12;   // always the full tile resolution
+		}
 	}
 	auto resFor = [&](const MatInfo& m, double s) {
 		if (m.srcRes <= 0) return 4;
@@ -815,7 +1315,7 @@ static void WriteCollision(const std::vector<KwCluster>& clusters, const std::ve
 	std::vector<int> collLod(clusters.size(), -1);
 	for (size_t ci = 0; ci < clusters.size(); ci++) {
 		const KwCluster& c = clusters[ci];
-		if (c.cls == KWC_MASKED) continue;
+		if (c.cls == KWC_MASKED || c.cls == KWC_FX) continue;
 		if (!(c.boundsMin[2] < hi[2] && c.boundsMax[2] > lo[2] && c.boundsMax[0] > lo[0] && c.boundsMin[0] < hi[0] && c.boundsMax[1] > lo[1] && c.boundsMin[1] < hi[1])) continue;
 		float d2 = 0;
 		for (int q = 0; q < 3; q++) {
@@ -1161,11 +1661,27 @@ int main(int argc, char** argv)
 		}
 		std::sort(mi.images.begin(), mi.images.end());
 		mi.images.erase(std::unique(mi.images.begin(), mi.images.end()), mi.images.end());
+		mi.planar = DetectPlanar(kv.second, mi.period, mi.repeats);
+		if (!mi.invisible && IsWaterMaterial(mi.name, kv.second)) { mi.flags |= KWM_WATER; mi.planar = false; }
+		else { KwMaterial dk; std::vector<std::string> dw; if (TryFlow(kv.second, dk, dw, true)) mi.flags |= KWM_FLOW; }
 		matIndex[mi.name] = (uint32_t)mats.size();
 		mats.push_back(mi);
 	}
 	if (mats.empty()) { MatInfo d; d.name = "__default"; d.json = &jm; mats.push_back(d); }
+	{
+		size_t np = 0;
+		for (auto& mi : mats) if (mi.planar) np++;
+		if (np) printf("  %zu materials projected from world position (tiled, UVs generated)\n", np);
+		size_t nw = 0, nf = 0;
+		for (auto& mi : mats) { if (mi.flags & KWM_WATER) nw++; if (mi.flags & KWM_FLOW) nf++; }
+		if (nw || nf) printf("  water: %zu still water materials, %zu flowing (waterfalls)\n", nw, nf);
+	}
 
+	if (getenv("KT_SPLAT_DEBUG")) {
+		for (auto& mi : mats) { KwMaterial dk; std::vector<std::string> dw; TrySplat(*mi.json, dk, dw, true); }
+		for (auto& mi : mats) if (mi.planar) printf("planar %-50s period %.2f x %.2f m, repeats %.1f\n", mi.name.c_str(), mi.period[0], mi.period[1], mi.repeats);
+		fflush(stdout); _exit(0);
+	}
 	// ---- geometry -> world-space buckets (cell x class)
 	const Json& meshes = scene["meshes"];
 	const Json& insts = scene["instances"];
@@ -1251,7 +1767,7 @@ int main(int argc, char** argv)
 			const float* p0 = &wp[vi[0] * 3], * p1 = &wp[vi[1] * 3], * p2 = &wp[vi[2] * 3];
 			uint16_t mat = triMat[t / 3];
 			if (mats[mat].invisible) continue;
-			int cls = (mats[mat].flags & KWM_MASK) ? KWC_MASKED : (mats[mat].flags & KWM_TWOSIDED) ? KWC_TWOSIDED : KWC_OPAQUE;
+			int cls = (mats[mat].flags & (KWM_WATER | KWM_FLOW)) ? KWC_FX : (mats[mat].flags & KWM_MASK) ? KWC_MASKED : (mats[mat].flags & KWM_TWOSIDED) ? KWC_TWOSIDED : KWC_OPAQUE;
 			int cx = (int)floorf((p0[0] + p1[0] + p2[0]) / (3 * CELL)), cy = (int)floorf((p0[1] + p1[1] + p2[1]) / (3 * CELL)), cz = (int)floorf((p0[2] + p1[2] + p2[2]) / (3 * CELL));
 			if (((cx % nBands) + nBands) % nBands != band) continue;
 			std::array<int, 4> key = { cx, cy, cz, cls };
@@ -1277,6 +1793,10 @@ int main(int argc, char** argv)
 				OctEncode(tw, kv.tangent);
 				kv.tangentSign = (int16_t)((tsign[vi[q]] < 0) != mirror ? -1 : 1);
 				kv.uv[0] = s.uv[0]; kv.uv[1] = 1.0f - s.uv[1];
+				if (mats[mat].planar) {   // world-projected: UV from the world position, one baked tile repeats
+					kv.uv[0] = kv.pos[0] / UNITS / mats[mat].period[0];
+					kv.uv[1] = 1.0f - kv.pos[1] / UNITS / mats[mat].period[1];
+				}
 				kv.material = mat;
 				out[q] = (uint32_t)B->v.size();
 				B->v.push_back(kv);
@@ -1457,6 +1977,7 @@ int main(int argc, char** argv)
 		c.baseVertex = (uint32_t)vCount; c.numVertices = b->nv;
 		c.firstLod = (uint32_t)lods.size(); c.numLods = (uint32_t)b->lods.size();
 		c.cls = (uint32_t)b->cls;
+		c.flags = b->cls == KWC_FX ? 1u : 0u;   // water casts no shadow
 		uint32_t ib = (uint32_t)iCount;
 		for (KwLod l : b->lods) { l.firstIndex += ib; lods.push_back(l); }
 		iCount += b->ni;
@@ -1475,7 +1996,7 @@ int main(int argc, char** argv)
 		{ KW_VERT, nullptr, vCount * sizeof(KwVertex) }, { KW_INDX, nullptr, iCount * 4 },
 		{ KW_CLUS, clusters.data(), clusters.size() * sizeof(KwCluster) }, { KW_LODS, lods.data(), lods.size() * sizeof(KwLod) },
 		{ KW_MATL, kmats.data(), kmats.size() * sizeof(KwMaterial) }, { KW_TEXT, ktex.data(), ktex.size() * sizeof(KwTexture) },
-		{ KW_LITE, lights.data(), lights.size() * sizeof(KwLight) }, { KW_ENVT, envText.data(), envText.size() }, { KW_TDAT, nullptr, tdatSize },
+		{ KW_LITE, lights.data(), lights.size() * sizeof(KwLight) }, { KW_ENVT, envText.data(), envText.size() }, { KW_SPLT, splatBlob.data(), splatBlob.size() }, { KW_TDAT, nullptr, tdatSize },
 	};
 	KwHeader h = {};
 	memcpy(h.magic, KW_MAGIC, 8);
