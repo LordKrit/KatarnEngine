@@ -27,6 +27,7 @@ void GL_ResetState();
 static cvar_t* kt_debug, * kt_ssao, * kt_shadows, * kt_shadowRes, * kt_shadowDist, * kt_bloom, * kt_exposure, * kt_manualExposure;
 static cvar_t* kt_fxaa, * kt_glowBoost, * kt_debugView, * kt_shaderDir, * kt_legacyDeferred, * kt_sun, * kt_fog, * kt_aoRadius, * kt_aoIntensity;
 static cvar_t* kt_tonemap = nullptr;
+static cvar_t* kt_fogScale = nullptr;
 static cvar_t* kt_dynGlow, * kt_contactShadows, * kt_lightShadows;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
@@ -40,6 +41,7 @@ static void RegisterCvars()
 	kt_bloom = ri.Cvar_Get("kt_bloom", "0.06", CVAR_ARCHIVE);
 	kt_exposure = ri.Cvar_Get("kt_exposure", "0", CVAR_ARCHIVE);
 	kt_tonemap = ri.Cvar_Get("kt_tonemap", "1", CVAR_ARCHIVE);           // HD worlds: 1 AgX (Blender's look), 0 ACES
+	kt_fogScale = ri.Cvar_Get("kt_fogScale", "0.25", CVAR_ARCHIVE);      // HD world fog density (Blender renders have none)
 	kt_manualExposure = ri.Cvar_Get("kt_manualExposure", "0", CVAR_ARCHIVE);
 	kt_fxaa = ri.Cvar_Get("kt_fxaa", "1", CVAR_ARCHIVE);
 	kt_glowBoost = ri.Cvar_Get("kt_glowBoost", "3", CVAR_ARCHIVE);
@@ -693,7 +695,7 @@ void R_BeginView(const ViewDesc& v)
 	if (env.envSrv) { c.indices2[0] = env.envSrv; c.skyParams[1] = env.envStrength; float rs = env.envLight / Q_max(1e-4f, env.envStrength); memcpy(&c.indices2[2], &rs, 4); }
 	if (env.hasSH) { c.indices2[1] = 1; for (int k = 0; k < 9; k++) for (int q = 0; q < 3; q++) c.ambientSH[k][q] = env.sh[k][q]; }
 	if (kt_fog->integer) {
-		c.fogParams[0] = env.fogDensity; c.fogParams[1] = env.fogFalloff; c.fogParams[2] = env.fogHeight; c.fogParams[3] = env.fogStart;
+		c.fogParams[0] = env.fogDensity * Q_max(0.0f, kt_fogScale->value); c.fogParams[1] = env.fogFalloff; c.fogParams[2] = env.fogHeight; c.fogParams[3] = env.fogStart;
 	}
 	c.fogColor[0] = env.fogColor[0]; c.fogColor[1] = env.fogColor[1]; c.fogColor[2] = env.fogColor[2]; c.fogColor[3] = env.fogMax;
 	c.indices0[0] = R.gb0.srv; c.indices0[1] = R.gb1.srv; c.indices0[2] = R.gb2.srv; c.indices0[3] = R.depth.srv;

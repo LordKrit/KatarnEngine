@@ -38,6 +38,12 @@ def log(*a):
 
 log("blend", blend, "->", OUT, "| Blender", bpy.app.version_string)
 
+
+def _excepthook(t, v, tb):
+    import traceback
+    log("EXPORT FAILED:\n" + "".join(traceback.format_exception(t, v, tb)))
+sys.excepthook = _excepthook
+
 # --------------------------------------------------------------------------- images
 images = {}      # image name -> exported record
 
@@ -524,11 +530,14 @@ def match_render_settings():
             except Exception:
                 pass
             return
-        if True:
+        try:
             if lc.hide_viewport or col.hide_viewport:
                 n_col += 1
             lc.hide_viewport = False
-            col.hide_viewport = False
+            if col.hide_viewport and not col.library:
+                col.hide_viewport = False
+        except Exception as e:
+            log("  note: collection %s: %s" % (col.name, e))
         for ch in lc.children:
             walk(ch)
     walk(vl.layer_collection)
@@ -566,7 +575,15 @@ def match_render_settings():
         % (n_ob, n_col, n_mod, n_ps))
 
 
-match_render_settings()
+if os.environ.get("KATARN_VIEWPORT_ONLY"):
+    log("render visibility: skipped (KATARN_VIEWPORT_ONLY), exporting what the viewport shows")
+else:
+    try:
+        match_render_settings()
+    except Exception as e:
+        import traceback
+        log("render visibility failed, exporting what the viewport shows:\n" + traceback.format_exc())
+log("evaluating the scene...")
 bpy.context.view_layer.update()
 dg = bpy.context.evaluated_depsgraph_get()
 dg.update()

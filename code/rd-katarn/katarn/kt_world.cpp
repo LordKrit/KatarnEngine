@@ -239,6 +239,20 @@ bool World_Load(const char* mapName)
 		fread(&text[0], 1, s->size, f);
 		ParseEnv(text, W.env, envTex);
 	}
+	{
+		// maps/<map>.kenv next to the .kworld: the same "key value" lines, read after the cooked ones, so sun, fog,
+		// exposure and sky can be tuned without cooking the world again
+		std::string ep = path.substr(0, path.size() - 7) + ".kenv";
+		if (FILE* ef = fopen(ep.c_str(), "rb")) {
+			std::string t;
+			char buf[4096]; size_t n;
+			while ((n = fread(buf, 1, sizeof(buf), ef)) > 0) t.append(buf, n);
+			fclose(ef);
+			int dummy = envTex;
+			ParseEnv(t, W.env, dummy);
+			ri.Printf(PRINT_ALL, "KatarnEngine: environment overrides from %s\n", ep.c_str());
+		}
+	}
 	memcpy(W.bmin, h.boundsMin, 12);
 	memcpy(W.bmax, h.boundsMax, 12);
 

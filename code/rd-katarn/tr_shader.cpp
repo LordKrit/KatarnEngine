@@ -2958,10 +2958,41 @@ Returns a freshly allocated shader with all the needed info
 from the current global working shader
 =========================
 */
+// KatarnEngine: rend2's automatic material maps. A lit model stage with no normal / material maps of its own looks
+// for <diffuse>_nh / _n next to its texture, then <diffuse>_rmo / _orm / _specGloss (as rend2 does with
+// r_normalMapping / r_specularMapping), so models made for rend2 without a shader file still get their PBR maps.
+static void KT_AutoMaterialMaps()
+{
+	if (shader.sky) return;
+	for (int i = 0; i < MAX_SHADER_STAGES; i++) {
+		shaderStage_t* st = &stages[i];
+		if (!st->active) break;
+		if (st->rgbGen != CGEN_LIGHTING_DIFFUSE || st->bundle[0].isLightmap || st->bundle[0].numImageAnimations > 1) continue;
+		const image_t* diffuse = st->bundle[0].image;
+		if (!diffuse || !diffuse->imgName[0] || diffuse->imgName[0] == '*') continue;
+		char base[MAX_QPATH], name[MAX_QPATH];
+		COM_StripExtension(diffuse->imgName, base, sizeof(base));
+		const qboolean mip = static_cast<qboolean>(!shader.noMipMaps), pic = static_cast<qboolean>(!shader.noPicMip);
+		if (!st->ktNormal) {
+			Com_sprintf(name, sizeof(name), "%s_nh", base);
+			st->ktNormal = R_FindImageFile(name, mip, pic, qfalse, GL_REPEAT);
+			if (!st->ktNormal) { Com_sprintf(name, sizeof(name), "%s_n", base); st->ktNormal = R_FindImageFile(name, mip, pic, qfalse, GL_REPEAT); }
+		}
+		if (!st->ktRmo && !st->ktSpec) {
+			Com_sprintf(name, sizeof(name), "%s_rmo", base);
+			st->ktRmo = R_FindImageFile(name, mip, pic, qfalse, GL_REPEAT); st->ktRmoOrder = 0;
+			if (!st->ktRmo) { Com_sprintf(name, sizeof(name), "%s_orm", base); st->ktRmo = R_FindImageFile(name, mip, pic, qfalse, GL_REPEAT); st->ktRmoOrder = 1; }
+			if (!st->ktRmo) { Com_sprintf(name, sizeof(name), "%s_specGloss", base); st->ktSpec = R_FindImageFile(name, mip, pic, qfalse, GL_REPEAT); }
+		}
+	}
+}
+
 static shader_t* FinishShader() {
 	int				stage = 0, lm_stage = 0;
 
 	qboolean has_lightmap_stage = qfalse;
+
+	KT_AutoMaterialMaps();
 
 	//
 	// set sky stuff appropriate
