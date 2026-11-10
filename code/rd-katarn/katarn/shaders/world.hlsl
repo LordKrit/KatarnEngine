@@ -45,9 +45,23 @@ struct VsOut {
 	nointerpolation uint mat : MATERIAL;
 };
 
+// wind on leaves, flowers, vines and curtains (KWM_FOLIAGE): a sway that varies across the world, with gusts
+float3 Wind(float3 p, float t)
+{
+	float ph = dot(p, float3(0.013, 0.017, 0.007));
+	float gust = 0.55 + 0.45 * sin(t * 0.37 + p.x * 0.0011 + p.y * 0.0007);
+	float3 d;
+	d.x = sin(t * 1.7 + ph * 6.2831) + 0.5 * sin(t * 3.9 + ph * 13.0);
+	d.y = 0.7 * cos(t * 1.3 + ph * 5.1) + 0.4 * sin(t * 4.7 + ph * 11.0);
+	d.z = 0.35 * sin(t * 2.9 + ph * 9.0);
+	return d * gust;
+}
+
 VsOut VS(VsIn i)
 {
 	VsOut v;
+	if (extraParams.w > 0 && (BUF(materialBuf).Load(i.mat.x * 64 + 60) & 128))
+		i.pos += Wind(i.pos, projParams.w) * extraParams.w;
 	v.pos = mul(drawMode == 1 ? cascadeViewProj[cascade] : viewProj, float4(i.pos, 1));
 	v.normal = DecodeNormal(i.n);
 	v.tangent = float4(DecodeNormal(i.t), i.mat.y > 32767 ? -1.0 : 1.0);

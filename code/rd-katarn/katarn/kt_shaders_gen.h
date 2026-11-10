@@ -60,7 +60,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -265,7 +265,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -477,8 +477,8 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 				float shade = clamp(saturate(dot(n, L)) / n0l, 0.0, 2.0);
 				baked *= lerp(1.0, shade, dirAmt);
 				float3 f0s = lerp((rmoTex != 0 || specTex != 0) ? 0.04 : 0.012, a.rgb, saturate(metal));
-				bakedSpec = min(SpecGGX(n, V, L, clamp(rou)KTSRC",
-R"KTSRC(gh, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
+				bakedSpec = min(SpecGGX(n,)KTSRC",
+R"KTSRC( V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
 			}
 		}
 		else if (normalTex) baked *= saturate(dot(n, n0));   // no direction known: the bumps shade against the surface
@@ -584,7 +584,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -829,10 +829,10 @@ float ShadowFast(float3 P, float viewZ)
 	return Tex2DArray[indices1.x].SampleCmpLevelZero(sShadow, float3(suv, c), sc.z - shadowParams.y * 2);
 }
 
-float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
+float3 ApplyFog(float3 col, float3 P, float3 V,)KTSRC",
+R"KTSRC( float dist)
 {
-	)KTSRC",
-R"KTSRC(if (fogParams.x <= 0) return col;
+	if (fogParams.x <= 0) return col;
 	float rayLen = max(dist - fogParams.w, 0);
 	float dz = P.z - camPos.z;
 	float f = fogParams.y;
@@ -1121,7 +1121,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -1338,8 +1338,8 @@ float3 AgX(float3 c)
 	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
 }
 
-float4 TonemapPS(FsOut i) )KTSRC",
-R"KTSRC(: SV_Target0
+float4 Ton)KTSRC",
+R"KTSRC(emapPS(FsOut i) : SV_Target0
 {
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
 	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
@@ -1444,7 +1444,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -1582,7 +1582,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -1758,7 +1758,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -1959,7 +1959,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -2209,7 +2209,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -2411,7 +2411,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
@@ -2517,9 +2517,23 @@ struct VsOut {
 	nointerpolation uint mat : MATERIAL;
 };
 
+// wind on leaves, flowers, vines and curtains (KWM_FOLIAGE): a sway that varies across the world, with gusts
+float3 Wind(float3 p, float t)
+{
+	float ph = dot(p, float3(0.013, 0.017, 0.007));
+	float gust = 0.55 + 0.45 * sin(t * 0.37 + p.x * 0.0011 + p.y * 0.0007);
+	float3 d;
+	d.x = sin(t * 1.7 + ph * 6.2831) + 0.5 * sin(t * 3.9 + ph * 13.0);
+	d.y = 0.7 * cos(t * 1.3 + ph * 5.1) + 0.4 * sin(t * 4.7 + ph * 11.0);
+	d.z = 0.35 * sin(t * 2.9 + ph * 9.0);
+	return d * gust;
+}
+
 VsOut VS(VsIn i)
 {
 	VsOut v;
+	if (extraParams.w > 0 && (BUF(materialBuf).Load(i.mat.x * 64 + 60) & 128))
+		i.pos += Wind(i.pos, projParams.w) * extraParams.w;
 	v.pos = mul(drawMode == 1 ? cascadeViewProj[cascade] : viewProj, float4(i.pos, 1));
 	v.normal = DecodeNormal(i.n);
 	v.tangent = float4(DecodeNormal(i.t), i.mat.y > 32767 ? -1.0 : 1.0);
@@ -2641,7 +2655,8 @@ void ShadowPS(VsOut i)
 	clip(a - m.alphaCutoff);
 }
 
-// ---- FX pass: water and flowing water, drawn into the lit HDR scene (blend: rgb + dst * a)
+// ---- FX pass: water and flowing water, drawn into the lit )KTSRC",
+R"KTSRC(HDR scene (blend: rgb + dst * a)
 float3 FxSky(float3 d, float lod)
 {
 	if (indices2.x) {
@@ -2659,8 +2674,7 @@ float4 FxFog(float3 P, float3 V, float dist)
 	float rayLen = max(dist - fogParams.w, 0);
 	float dz = P.z - camPos.z;
 	float f = fogParams.y;
-	float ca)KTSRC",
-R"KTSRC(mDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
+	float camDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
 	float fz = f * dz;
 	float lineInt = abs(fz) > 1e-4 ? (1 - exp(-fz)) / fz : 1 - 0.5 * fz;
 	float opacity = min(1 - exp(-camDens * lineInt * rayLen), fogColor.w);

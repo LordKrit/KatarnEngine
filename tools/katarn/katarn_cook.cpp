@@ -157,7 +157,14 @@ static float COLL_PAD = 8192.0f;
 static bool COLL_ONLY = false;
 static float COLL_WALL_MUL = 4.0f;  // walls / props: this many times the floor error     // --collision-only: rebuild the .map from an existing .kworld      // collision margin around the playable core
 static size_t COLL_BUDGET = 250000;
-static std::vector<std::string> SKIP = { "HeightFog", "Sky_Cottonball" };
+// objects left out (name contains): fog volumes, particle FX emitters and cards (smoke, fire, mist, birds - their
+// look comes from per-particle attributes the bake cannot see), battle wreckage
+static std::vector<std::string> SKIP = { "HeightFog", "Sky_Cottonball", "FX_", "fxsrc_", "DroidWreck", "AATWreck", "AATDebris",
+	"RubblePile", "BD_FogBillboard", "InvalidateLightPlane", "WindowEnlightenPlane" };
+// materials left out (name contains): scattered wreckage and ground clutter too small to see past a few metres
+static std::vector<std::string> SKIPMAT = { "DroidWreck", "Twig", "StreetDebris" };
+// scattered instances thinned (material name contains, fraction kept)
+static std::vector<std::pair<std::string, float>> THIN = { { "GroundLeaves", 0.5f } };
 static std::string exportDir;
 
 // default: half the cores, so the PC stays usable (and cooler) during a long cook
@@ -456,6 +463,7 @@ struct MatInfo {
 	const Json* json = nullptr;
 	uint32_t flags = 0;
 	bool invisible = false;     // volume-only / no surface: its geometry is left out
+	bool fxCard = false, skipped = false;
 	double area = 0;            // world area using it (units^2)
 	int srcRes = 0;             // largest source image side
 	int res = 0;                // bake resolution
@@ -1702,6 +1710,16 @@ int main(int argc, char** argv)
 		else if (a == "--collision-walls") COLL_WALL_MUL = (float)atof(v.c_str());
 		else if (a == "--collision-pad") COLL_PAD = (float)atof(v.c_str());
 		else if (a == "--collision-budget") COLL_BUDGET = (size_t)atoll(v.c_str());
+		else if (a == "--skipmat") { SKIPMAT.clear(); size_t s = 0; while (s <= v.size()) { size_t e = v.find(',', s); if (e == std::string::npos) e = v.size(); SKIPMAT.push_back(v.substr(s, e - s)); s = e + 1; } }
+		else if (a == "--thin") {   // pattern=fraction,pattern=fraction
+			THIN.clear(); size_t s = 0;
+			while (s < v.size()) {
+				size_t e = v.find(',', s); if (e == std::string::npos) e = v.size();
+				std::string t = v.substr(s, e - s); size_t q = t.find('=');
+				if (q != std::string::npos) THIN.push_back({ t.substr(0, q), (float)atof(t.c_str() + q + 1) });
+				s = e + 1;
+			}
+		}
 		else if (a == "--skip") { SKIP.clear(); size_t s = 0; while (s <= v.size()) { size_t e = v.find(',', s); if (e == std::string::npos) e = v.size(); SKIP.push_back(v.substr(s, e - s)); s = e + 1; } }
 	}
 	g_cookLog = fopen((outDir + "/" + mapName + "_cook_log.txt").c_str(), "w");
@@ -1736,7 +1754,11 @@ int main(int argc, char** argv)
 		if (kv.second["graph"].t == Json::OBJ) {
 			CollectImages(kv.second["graph"]["nodes"], groups, mi.images);
 			mi.invisible = OutputShaderNode(kv.second["graph"]["nodes"]) == nullptr;
+			// particle FX cards: colour / alpha / flipbook frame come from the instancer (geometry nodes attributes)
+			for (auto& nd : kv.second["graph"]["nodes"].o)
+				if (nd.second["type"].str() == "ATTRIBUTE" && nd.second["props"]["attribute_type"].str() == "INSTANCER") { mi.invisible = true; mi.fxCard = true; break; }
 		}
+		for (auto& s : SKIPMAT) if (!s.empty() && mi.name.find(s) != std::string::npos) { mi.invisible = true; mi.skipped = true; }
 		std::sort(mi.images.begin(), mi.images.end());
 		mi.images.erase(std::unique(mi.images.begin(), mi.images.end()), mi.images.end());
 		mi.planar = DetectPlanar(kv.second, mi.period, mi.repeats);
@@ -1747,6 +1769,9 @@ int main(int argc, char** argv)
 	}
 	if (mats.empty()) { MatInfo d; d.name = "__default"; d.json = &jm; mats.push_back(d); }
 	{
+		size_t nfx = 0, nsk = 0;
+		for (auto& mi : mats) { if (mi.fxCard) nfx++; if (mi.skipped) nsk++; }
+		if (nfx || nsk) printf("  left out: %zu particle FX card materials, %zu materials by name\n", nfx, nsk);
 		size_t np = 0;
 		for (auto& mi : mats) if (mi.planar) np++;
 		if (np) printf("  %zu materials projected from world position (tiled, UVs generated)\n", np);
@@ -1795,6 +1820,21 @@ int main(int argc, char** argv)
 		size_t mi = (size_t)in["mesh"].num();
 		if (mi >= meshes.size()) continue;
 		const Json& m = meshes[mi];
+		{
+			// all of it left out, or a thinned scatter (keep a fixed fraction of its instances)
+			bool anyVisible = false; float keep = 1.0f;
+			for (size_t si = 0; si < m["submeshes"].size(); si++) {
+				const std::string& smat = m["submeshes"][si]["material"].str();
+				auto it = matIndex.find(smat);
+				if (it == matIndex.end() || !mats[it->second].invisible) anyVisible = true;
+				for (auto& th : THIN) if (!th.first.empty() && smat.find(th.first) != std::string::npos) keep = std::min(keep, th.second);
+			}
+			if (!anyVisible) { if (band == 0) skipped++; continue; }
+			if (keep < 1.0f) {
+				uint32_t hsh = (uint32_t)ii * 2654435761u; hsh ^= hsh >> 15;
+				if ((hsh & 0xffff) >= (uint32_t)(keep * 65536.0f)) { if (band == 0) skipped++; continue; }
+			}
+		}
 		std::string pack = m["pack"].str();
 		FILE*& pf = packs[pack];
 		if (!pf) pf = fopen((exportDir + "/" + pack).c_str(), "rb");

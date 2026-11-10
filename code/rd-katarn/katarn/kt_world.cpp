@@ -359,6 +359,16 @@ bool World_Load(const char* mapName)
 		mapName, (unsigned)W.clusters.size(), tris / 1e6, (W.vb.size + W.ib.size) / 1048576.0, (unsigned)W.mats.size(),
 		(unsigned)W.textures.size(), (unsigned long long)(texBytes >> 20), (unsigned)W.lights.size(), W.env.envSrv ? "texture" : "atmosphere",
 		ri.Milliseconds() - t0);
+	// video memory: past the budget, Windows pages the world in and out every frame (a large, steady FPS loss)
+	IDXGIAdapter3* a3 = nullptr;
+	if (g.adapter && SUCCEEDED(g.adapter->QueryInterface(IID_PPV_ARGS(&a3)))) {
+		DXGI_QUERY_VIDEO_MEMORY_INFO mi = {};
+		if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mi))) {
+			Log("KatarnEngine: video memory %llu MB used of a %llu MB budget%s\n", (unsigned long long)(mi.CurrentUsage >> 20),
+				(unsigned long long)(mi.Budget >> 20), mi.CurrentUsage > mi.Budget ? " - OVER BUDGET: expect low FPS (cook with a smaller --texbudget or fewer objects)" : "");
+		}
+		a3->Release();
+	}
 	return true;
 }
 

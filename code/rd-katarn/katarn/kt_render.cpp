@@ -30,7 +30,7 @@ static cvar_t* kt_fxaa, * kt_glowBoost, * kt_debugView, * kt_shaderDir, * kt_leg
 static cvar_t* kt_tonemap = nullptr;
 static cvar_t* kt_fogScale = nullptr;
 static cvar_t* kt_dynGlow, * kt_contactShadows, * kt_lightShadows;
-static cvar_t* kt_probes = nullptr, * kt_probeScale = nullptr, * kt_parallax = nullptr;
+static cvar_t* kt_probes = nullptr, * kt_probeScale = nullptr, * kt_parallax = nullptr, * kt_wind = nullptr;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
 static void RegisterCvars()
@@ -67,7 +67,8 @@ static void RegisterCvars()
 	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);
 	kt_probes = ri.Cvar_Get("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
 	kt_probeScale = ri.Cvar_Get("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
-	kt_parallax = ri.Cvar_Get("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)   // 1: Katarn draws its own procedural blades instead of the game's
+	kt_parallax = ri.Cvar_Get("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
+	kt_wind = ri.Cvar_Get("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)   // 1: Katarn draws its own procedural blades instead of the game's
 
 	// settings saved by older builds (tuning experiments) are put back to the current defaults once
 	cvar_t* ver = ri.Cvar_Get("kt_configVersion", "0", CVAR_ARCHIVE);
@@ -753,6 +754,7 @@ void R_BeginView(const ViewDesc& v)
 	// sky portal maps: the portal view is drawn first; the main view keeps it where it drew nothing (its sky)
 	if (v.skyPortal) R.portalThisFrame = true;
 	c.extraParams[2] = (!v.skyPortal && R.portalThisFrame && !R.capture) ? 1.0f : 0.0f;
+	c.extraParams[3] = Q_max(0.0f, kt_wind->value) * 1.5f;   // HD world foliage sway, in units
 	if (v.world && !R.capture && kt_probes->integer) {
 		c.probeParams[0] = R.probeSrv[g.frameIndex];
 		c.probeParams[1] = ProbeList(v.origin);
@@ -771,6 +773,7 @@ void R_BeginView(const ViewDesc& v)
 			float t = i / 4.0f;
 			splits[i] = 0.82f * n * powf(f / n, t) + 0.18f * (n + (f - n) * t);
 		}
+		if (R.capture) splits[1] = splits[2] = splits[3] = n;   // probe capture: one cascade over the whole view
 		float tx = tanf(v.fovX * (float)M_PI / 360.0f), ty = tanf(v.fovY * (float)M_PI / 360.0f);
 		float fwd[3] = { v.axis[0][0], v.axis[0][1], v.axis[0][2] };
 		float lft[3] = { v.axis[1][0], v.axis[1][1], v.axis[1][2] };
@@ -988,6 +991,7 @@ static void RenderWorldView()
 			cl->OMSetRenderTargets(0, nullptr, FALSE, &R.shadow.dsv[ci]);
 			cl->RSSetViewports(1, &svp);
 			cl->RSSetScissorRects(1, &src);
+			if (R.capture && ci < 3) continue;   // probe capture: only the last cascade is used
 			World_DrawShadow(cl, ci, c.cascadeViewProj[ci], R.cascadeTexel[ci]);
 			if (!R.deferred.empty()) DrawDeferredList(cl, true, ci);
 		}
@@ -1507,7 +1511,7 @@ void Probes_BeginFrame()
 		{ { 1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } }, { { -1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } },
 		{ { 0, 0, 1 }, { 1, 0, 0 }, { 0, -1, 0 } }, { { 0, 0, -1 }, { 1, 0, 0 }, { 0, 1, 0 } },
 		{ { 0, 1, 0 }, { 1, 0, 0 }, { 0, 0, 1 } }, { { 0, -1, 0 }, { -1, 0, 0 }, { 0, 0, 1 } } };
-	int faces = World_Active() ? 2 : 6;
+	int faces = World_Active() ? 1 : 6;
 	while (faces-- > 0) {
 		if (PF.current < 0) {
 			// next: the probe nearest the camera
