@@ -28,6 +28,9 @@ endif(BuildSPGame)
 
 #    Add Modular Renderer project
 add_subdirectory("${SPDir}/rd-vanilla")
+if(BuildSPKatarn AND WIN32)
+	add_subdirectory("${SPDir}/rd-katarn")
+endif()
 
 #	Add rend2 JKA Renderer Project
 if(BuildSPSojourn)
