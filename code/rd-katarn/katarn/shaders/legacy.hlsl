@@ -76,7 +76,7 @@ float4 Shade(VsOut i)
 	if (drawTarget == 1) {
 		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
 		float s = (skyParams.w > 0.5 ? Overbright() : 1.0) / max(Exposure(), 1e-6);   // HD: legacy colours are scaled by identityLight
-		if (flags & (1u << 11)) s *= glowBoost;
+		if ((flags & (1u << 11)) && skyParams.w > 0.5) s *= glowBoost;   // HD worlds only: old maps keep their authored glow
 		s *= drawScale > 0 ? drawScale : 1.0;
 		c.rgb = min(c.rgb * s, 1500.0);   // stacked additive sprites (saber glow) must not overflow the half-float scene
 	}

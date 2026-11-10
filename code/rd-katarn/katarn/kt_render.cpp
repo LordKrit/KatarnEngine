@@ -63,6 +63,16 @@ static void RegisterCvars()
 	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
 	kt_saberGlow = ri.Cvar_Get("kt_saberGlowScale", "1", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene (1 = as authored, like rend2)
 	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
+
+	// settings saved by older builds (tuning experiments) are put back to the current defaults once
+	cvar_t* ver = ri.Cvar_Get("kt_configVersion", "0", CVAR_ARCHIVE);
+	if (ver->integer < 2) {
+		const char* reset[][2] = { { "kt_bloom", "0.06" }, { "kt_dynamicGlow", "1" }, { "kt_glowBoost", "3" }, { "kt_saberGlowScale", "1" },
+			{ "kt_saberLight", "1" }, { "kt_saberDraw2", "0" }, { "kt_exposure", "0" }, { "kt_manualExposure", "0" } };
+		for (auto& r : reset) ri.Cvar_Set(r[0], r[1]);
+		ri.Cvar_Set("kt_configVersion", "2");
+		ri.Printf(PRINT_ALL, "KatarnEngine: bloom, glow and saber settings reset to the defaults\n");
+	}
 }
 
 // ------------------------------------------------------------------------------------------------ math

@@ -575,6 +575,7 @@ def match_render_settings():
         % (n_ob, n_col, n_mod, n_ps))
 
 
+scene = bpy.context.scene
 if os.environ.get("KATARN_VIEWPORT_ONLY"):
     log("render visibility: skipped (KATARN_VIEWPORT_ONLY), exporting what the viewport shows")
 else:
