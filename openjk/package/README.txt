@@ -22,8 +22,10 @@ Files
   home\katarn\                     game folder: jagamex86_64.dll, the Naboo BSP, Tali, autoexec_sp.cfg, saves
   home\base\jagamex86_64.dll       the same game DLL, so the base folder never picks up another one
 
-Paths (top of the .bat files)
+Path (top of the .bat files)
   JA = Jedi Academy GameData folder (base\assets0.pk3 lives there)
-  KE = KatarnEngine's home\MD folder, where Naboo was cooked (naboo_theed.kworld and .bsp)
 
-Tali: drop your own Tali pk3 into home\katarn. If none is there, zz_tali.pk3 is copied from Movie Duels.
+Map: home\katarn\maps holds naboo_theed.kworld (HD world, 4 GB), naboo_theed.bsp (collision, spawn) and
+home\katarn\shaders\katarn_hd.shader. Copy_Naboo_Into_Package.bat fills them from a KatarnEngine cook.
+
+Tali: put the Tali pk3 in home\katarn.
