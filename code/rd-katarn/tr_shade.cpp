@@ -27,6 +27,8 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "tr_local.h"
+#include <set>
+#include <string>
 #include "katarn/kt_render.h"
 
 /*
@@ -2292,6 +2294,21 @@ void RB_StageIteratorGeneric()
 	// call shader function
 	//
 	kt_skipStages = KT_TryDeferred(input);
+	{
+		// diagnostics: what saber shaders look like to this renderer (katarn_log.txt, once per shader)
+		static std::set<std::string> logged;
+		char n[MAX_QPATH]; Q_strncpyz(n, input->shader->name, sizeof(n)); Q_strlwr(n);
+		if ((strstr(n, "saber") || strstr(n, "blade")) && logged.size() < 200 && logged.insert(n).second) {
+			const shader_t* sh = input->shader;
+			kt::Log("saber shader '%s': explicit %d default %d sort %.1f stages %d entity reType %d deferred %u\n", sh->name, sh->explicitlyDefined ? 1 : 0,
+				sh->defaultShader ? 1 : 0, sh->sort, sh->numUnfoggedPasses, backEnd.currentEntity ? (int)backEnd.currentEntity->e.reType : -1, kt_skipStages);
+			for (int k = 0; k < sh->numUnfoggedPasses && k < 4; k++) {
+				const shaderStage_t* x = &input->xstages[k];
+				kt::Log("   stage %d: active %d image '%s' stateBits 0x%08x rgbGen %d alphaGen %d glow %d\n", k, x->active ? 1 : 0,
+					x->bundle[0].image ? x->bundle[0].image->imgName : "-", x->stateBits, (int)x->rgbGen, (int)x->alphaGen, x->glow ? 1 : 0);
+			}
+		}
+	}
 	RB_IterateStagesGeneric(input);
 	kt::GL_SetStage(nullptr, false);
 	const bool kt_deferred = kt_skipStages != 0;
