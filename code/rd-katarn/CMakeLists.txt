@@ -38,6 +38,7 @@ set(KatarnFiles
 	"${KT}/katarn/kt_device.cpp"
 	"${KT}/katarn/kt_gl.cpp"
 	"${KT}/katarn/kt_render.cpp"
+	"${KT}/katarn/kt_crash.cpp"
 	"${KT}/katarn/kt_world.cpp"
 	)
 

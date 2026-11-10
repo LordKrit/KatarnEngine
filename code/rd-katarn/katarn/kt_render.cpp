@@ -422,8 +422,10 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 }
 
 // ------------------------------------------------------------------------------------------------ init
+void InstallCrashHandler();
 bool R_Init(void* hwnd, int width, int height)
 {
+	InstallCrashHandler();
 	RegisterCvars();
 	Config cfg;
 	cvar_t* swap = ri.Cvar_Get("r_swapInterval", "0", CVAR_ARCHIVE);
