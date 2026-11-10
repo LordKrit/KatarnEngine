@@ -127,7 +127,7 @@ static struct RState {
 	Texture hdrPrev;                 // last frame's lit scene (screen-space reflections)
 	bool hdrPrevValid = false;
 	std::vector<GpuLight> tubes;     // lightsaber blades this view (line lights)
-	struct Blade { float a[3], glowR, b[3], coreR, color[3], intensity; };
+	struct Blade { float a[3], glowR, b[3], coreR, color[3], intensity; uint32_t tex, mode, alpha, pad; float vcol[3], pad2; };
 	std::vector<Blade> blades;       // lightsaber blades to draw
 	ID3D12PipelineState* bladePSO = nullptr;
 	Texture bloomDown[6], bloomUp[6];
@@ -330,7 +330,8 @@ static bool CreatePipelines()
 			D3D12_GRAPHICS_PIPELINE_STATE_DESC d = BasePso();
 			d.VS = BC(bvs); d.PS = BC(bps);
 			auto& rt = d.BlendState.RenderTarget[0];
-			rt.BlendEnable = TRUE; rt.SrcBlend = D3D12_BLEND_ONE; rt.DestBlend = D3D12_BLEND_ONE;
+			// premultiplied: additive parts write a = 0, alpha-blended cores (dark blades) a = coverage
+			rt.BlendEnable = TRUE; rt.SrcBlend = D3D12_BLEND_ONE; rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
 			rt.SrcBlendAlpha = D3D12_BLEND_ZERO; rt.DestBlendAlpha = D3D12_BLEND_ONE;
 			d.DepthStencilState.DepthEnable = FALSE;
 			d.NumRenderTargets = 1;
@@ -1023,10 +1024,16 @@ static void RenderWorldView()
 		cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
 		cl->SetPipelineState(R.bladePSO);
 		cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		for (const auto& bl : R.blades) {
-			cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 12, &bl, 0);
-			cl->DrawInstanced(6, 1, 0, 0);
-		}
+		for (int pass = 0; pass < 2; pass++)            // glows, then cores on top
+			for (const auto& bl0 : R.blades) {
+				if ((int)bl0.mode != pass) continue;
+				RState::Blade bl = bl0;
+				GLTexture* t = bl.tex ? R_GLTexture(bl.tex, false) : nullptr;
+				R_ResolveTexture(t);
+				bl.tex = t ? R_TextureSrv(t, true) : 0;
+				cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 20, &bl, 0);
+				cl->DrawInstanced(6, 1, 0, 0);
+			}
 	}
 	// keep this frame's lit scene for next frame's screen-space reflections
 	if (hd && kt_ssr->integer) {
@@ -1113,17 +1120,31 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 }
 float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }
 bool SaberDraw() { return kt_saberDraw && kt_saberDraw->integer != 0; }
-void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba)
+void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba, uint32_t glowTex, const uint8_t* vertexRgba)
 {
 	if (!R.inView || length < 0.5f || R.blades.size() >= 128) return;
 	RState::Blade b = {};
 	float c[3] = { rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f };
 	float mx = Q_max(c[0], Q_max(c[1], c[2]));
-	if (mx < 0.01f) return;
-	for (int q = 0; q < 3; q++) { b.a[q] = start[q]; b.b[q] = start[q] + dir[q] * length; b.color[q] = powf(c[q] / mx, 2.2f); }
+	if (mx < 0.01f) return;   // dark blades: only their alpha-blended core is drawn
+	for (int q = 0; q < 3; q++) { b.a[q] = start[q]; b.b[q] = start[q] + dir[q] * length; b.color[q] = mx > 0.01f ? powf(c[q] / mx, 2.2f) : 0.0f; }
 	b.glowR = Q_max(1.0f, radius);
 	b.coreR = Q_max(0.6f, radius * 0.22f);
 	b.intensity = kt_saberGlow ? kt_saberGlow->value * 0.5f : 1.0f;
+	b.tex = glowTex; b.mode = 0; b.alpha = 0;
+	// the glow texture is tinted by the entity colour (rgbGen vertex): use that, linearised
+	for (int q = 0; q < 3; q++) b.vcol[q] = powf(vertexRgba[q] / 255.0f, 2.2f);
+	R.blades.push_back(b);
+}
+void R_AddSaberCore(const float* start, const float* end, float radius, const uint8_t* rgba, uint32_t tex, bool alphaBlend)
+{
+	if (!R.inView || R.blades.size() >= 128) return;
+	RState::Blade b = {};
+	for (int q = 0; q < 3; q++) { b.a[q] = start[q]; b.b[q] = end[q]; b.color[q] = powf(rgba[q] / 255.0f, 2.2f); b.vcol[q] = b.color[q]; }
+	b.glowR = Q_max(0.3f, radius);
+	b.coreR = b.glowR;
+	b.intensity = kt_saberGlow ? kt_saberGlow->value * 0.5f : 1.0f;
+	b.tex = tex; b.mode = 1; b.alpha = alphaBlend ? 1 : 0;
 	R.blades.push_back(b);
 }
 

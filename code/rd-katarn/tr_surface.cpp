@@ -412,7 +412,15 @@ static void RB_SurfaceLine()
 	if (kt::SaberDraw() && tess.shader) {
 		// the saber core line (KatarnEngine draws the whole blade)
 		char n[MAX_QPATH]; Q_strncpyz(n, tess.shader->name, sizeof(n)); Q_strlwr(n);
-		if (strstr(n, "saber") && !strstr(n, "trail")) return;
+		if (strstr(n, "saber") && !strstr(n, "trail")) {
+			const refEntity_t* ce = &backEnd.currentEntity->e;
+			const shaderStage_t* st = &tess.xstages[0];
+			const image_t* im = st->active ? st->bundle[0].image : nullptr;
+			const uint32_t bl = st->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
+			const bool alphaBlend = bl == (GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA);
+			kt::R_AddSaberCore(ce->oldorigin, ce->origin, ce->radius, ce->shaderRGBA, im ? im->texnum : 0, alphaBlend);
+			return;
+		}
 	}
 	vec3_t		right;
 	vec3_t		start, end;
@@ -1289,7 +1297,9 @@ static void RB_SurfaceSaberGlow()
 		if (rgba[0] | rgba[1] | rgba[2]) kt::R_AddSaberLight(e->origin, e->axis[0], e->saberLength, rgba);
 		if (kt::SaberDraw()) {
 			// KatarnEngine draws the blade itself (core + glow, HDR); the glow sprites are skipped
-			kt::R_AddSaberBlade(e->origin, e->axis[0], e->saberLength + e->radius * 0.5f, e->radius, rgba);
+			const shaderStage_t* st = &tess.xstages[0];
+			const image_t* im = st->active ? st->bundle[0].image : nullptr;
+			kt::R_AddSaberBlade(e->origin, e->axis[0], e->saberLength + e->radius * 0.5f, e->radius, rgba, im ? im->texnum : 0, e->shaderRGBA);
 			return;
 		}
 	}

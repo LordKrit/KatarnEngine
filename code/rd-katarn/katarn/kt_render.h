@@ -67,7 +67,8 @@ void R_AppendLegacy(const LegacyDraw& d);
 void R_AddSaberLight(const float* start, const float* dir, float length, const uint8_t* rgba);
 float SaberGlowBoost();
 bool SaberDraw();
-void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba);
+void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba, uint32_t glowTex, const uint8_t* vertexRgba);
+void R_AddSaberCore(const float* start, const float* end, float radius, const uint8_t* rgba, uint32_t tex, bool alphaBlend);
 void GL_SetStage(const void* stage, bool glow);   // the shader stage being drawn (glow boost)
 // projection to use for 3D views (D3D, reversed-Z infinite) - the GL translation layer swaps it in for the
 // front end's GL projection
