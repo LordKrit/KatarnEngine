@@ -166,6 +166,7 @@ static struct RState {
 	std::vector<LegacyDraw> stream;
 	std::vector<DeferredRec> deferred;
 	bool inView = false, viewWorld = false, reversedZ = false;
+	bool portalThisFrame = false;
 	ViewDesc view;
 	float proj[16] = {}, viewProj[16] = {}, prevViewProj[16] = {};
 	float vpNoJitter[16] = {}, lastVpNoJitter[16] = {};   // TAA: unjittered, this and the last full-screen world view
@@ -610,6 +611,7 @@ void R_BeginFrame()
 {
 	if (!R.ready) return;
 	EnsureList();
+	R.portalThisFrame = false;
 	int now = ri.Milliseconds();
 	R.dt = R.lastMsec ? Q_min(0.25f, Q_max(0.0005f, (now - R.lastMsec) * 0.001f)) : 0.016f;
 	R.lastMsec = now;
@@ -717,6 +719,9 @@ void R_BeginView(const ViewDesc& v)
 	c.postParams[3] = kt_glowBoost->value;
 	c.extraParams[0] = (float)(1 << tr.overbrightBits);
 	c.extraParams[1] = kt_tonemap->integer ? 1.0f : 0.0f;
+	// sky portal maps: the portal view is drawn first; the main view keeps it where it drew nothing (its sky)
+	if (v.skyPortal) R.portalThisFrame = true;
+	c.extraParams[2] = (!v.skyPortal && R.portalThisFrame) ? 1.0f : 0.0f;
 	if (!World_Active()) c.postParams[2] = 1.0f;   // legacy maps: fixed exposure (their content is display-referred)
 
 	// sun cascades

@@ -60,7 +60,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -264,7 +264,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -517,7 +517,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -755,8 +755,8 @@ float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 		sunVis = lit / STEPS;
 		sunVis = lerp(1, sunVis, saturate(maxD / max(dist, 1)));
 	}
-	float phase = pow(saturate()KTSRC",
-R"KTSRC(dot(-V, sunDir.xyz)), 8) * 0.25 + 0.04;   // forward scattering + a little everywhere
+	float p)KTSRC",
+R"KTSRC(hase = pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 + 0.04;   // forward scattering + a little everywhere
 	inscatter += sunColor.rgb * sunColor.w * phase * fogColor.rgb * (sunVis * 1.6 - 0.15 * (1 - sunVis));
 	return lerp(col, max(inscatter, 0), opacity);
 }
@@ -1010,7 +1010,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -1229,9 +1229,10 @@ float3 AgX(float3 c)
 float4 TonemapPS(FsOut i) : SV_Target0
 {
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
-	// legacy BSP maps: pixels not)KTSRC",
-R"KTSRC(hing drew (depth 0) keep what is already in the screen (a sky portal view)
-	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
+	// sky por)KTSRC",
+R"KTSRC(tal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
+	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
+	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 	if (skyParams.w > 0.5) {
@@ -1251,8 +1252,9 @@ float4 FxaaPS(FsOut i) : SV_Target0
 {
 	float2 rcp = 1.0 / float2(dstSize);
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * rcp;
-	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
-	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
+	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
+	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
+	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float4 m = Tex2D[srcSrv].SampleLevel(sClamp, uv, 0);
 	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * rcp, 0).a;
 	float ne = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, -0.5) * rcp, 0).a;
@@ -1330,7 +1332,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -1469,7 +1471,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -1669,7 +1671,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -1918,7 +1920,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -2119,7 +2121,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -2368,8 +2370,8 @@ float4 FxFog(float3 P, float3 V, float dist)
 	float f = fogParams.y;
 	float camDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
 	float fz = f * dz;
-	float lineInt = abs(fz) > 1e-4 ? (1)KTSRC",
-R"KTSRC( - exp(-fz)) / fz : 1 - 0.5 * fz;
+	float lineInt =)KTSRC",
+R"KTSRC( abs(fz) > 1e-4 ? (1 - exp(-fz)) / fz : 1 - 0.5 * fz;
 	float opacity = min(1 - exp(-camDens * lineInt * rayLen), fogColor.w);
 	float3 hd = normalize(float3(-V.xy, 0.05));
 	float3 inscatter = FxSky(hd, 8) * fogColor.rgb;

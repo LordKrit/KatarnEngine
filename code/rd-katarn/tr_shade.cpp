@@ -1881,6 +1881,8 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 		taken = 3;
 	}
 	if (!st->active || st->bundle[0].isLightmap || (st->ss && st->ss->surfaceSpriteType)) return 0;
+	// a second texture collapsed into the stage that is not a modulating lightmap (an added glow / detail): forward
+	if (st->bundle[1].image && !(st->bundle[1].isLightmap && sh->multitextureEnv == GL_MODULATE)) return 0;
 	// self-lit content stays forward, as the old renderer drew it: glow stages (saber blades, lights) and models whose
 	// colour is not lit (rgbGen identity / const / entity / vertex on an entity = full bright)
 	if (st->glow) return 0;
@@ -1939,6 +1941,8 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	if (bspMode && world) {
 		// BSP map surface: its lightmap, else its vertex light, else full bright, becomes the baked light
 		image_t* lm = lmStage ? KT_StageImage(const_cast<textureBundle_t*>(&lmStage->bundle[0])) : nullptr;
+		// texture + $lightmap collapsed into one multitexture stage (the usual case): the lightmap is bundle 1
+		if (!lm && st->bundle[1].isLightmap && sh->multitextureEnv == GL_MODULATE) lm = KT_StageImage(&st->bundle[1]);
 		if (lm) { flags = (flags & ~2u) | 4; d.lightmapTex = lm->texnum; d.lmuv = input->texCoords[0][1]; d.lmuvStride = sizeof(input->texCoords[0]); }
 		else flags = (flags & ~2u) | 8;
 	}
