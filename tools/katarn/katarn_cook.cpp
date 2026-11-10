@@ -152,8 +152,11 @@ static int QUALITY = 1;
 static int THREADS = 0;
 static float CELL = 2048.0f;
 static float LOD0_ERROR = 0.25f;
-static float COLL_ERROR = 8.0f;
-static size_t COLL_BUDGET = 150000;
+static float COLL_ERROR = 4.0f;
+static float COLL_PAD = 8192.0f;
+static bool COLL_ONLY = false;
+static float COLL_WALL_MUL = 4.0f;  // walls / props: this many times the floor error     // --collision-only: rebuild the .map from an existing .kworld      // collision margin around the playable core
+static size_t COLL_BUDGET = 250000;
 static std::vector<std::string> SKIP = { "HeightFog", "Sky_Cottonball" };
 static std::string exportDir;
 
@@ -792,17 +795,321 @@ static void Xform(const float* m, const float* p, float* o)   // 3-row matrix
 }
 
 // ================================================================================================ main
+// ================================================================================================ collision
+// The BSP is collision only: clusters near the playable area become thin detail brushes (one per triangle), at a
+// LOD whose error grows with the distance from the core, coarsened until the whole set fits the budget.
+// vAt[ci]: file offset of the cluster's vertices; iBase[ci] + firstIndex * 4: file offset of a LOD's indices
+// (both in g_spill, which is the spill file during a cook and the .kworld itself with --collision-only).
+static void WriteCollision(const std::vector<KwCluster>& clusters, const std::vector<KwLod>& lods, const std::vector<uint64_t>& vAt,
+	const std::vector<uint64_t>& iBase, const float* cmin, const float* cmax, const Json& scene, const std::string& outDir, const std::string& mapName)
+{
+	// ---- collision .map: opaque clusters inside the playable core, at the LOD that fits the budget
+	// the collision region: the playable core plus a wide margin (surrounding hills, docks, the valley below)
+	const float T = 64.0f;
+	float lo[3] = { floorf(cmin[0] - COLL_PAD), floorf(cmin[1] - COLL_PAD), floorf(cmin[2] - COLL_PAD) };
+	float hi[3] = { ceilf(cmax[0] + COLL_PAD), ceilf(cmax[1] + COLL_PAD), ceilf(cmax[2] + 4096.0f) };
+	auto inCore = [&](const float* p) { return p[0] > lo[0] && p[0] < hi[0] && p[1] > lo[1] && p[1] < hi[1] && p[2] > lo[2] && p[2] < hi[2]; };
+	// detail falls off with the distance from the core: full detail where you play, coarser further out
+	std::vector<float> errScale(clusters.size(), 1.0f);
+	std::vector<bool> nearCore(clusters.size(), false);
+	std::vector<int> collLod(clusters.size(), -1);
+	for (size_t ci = 0; ci < clusters.size(); ci++) {
+		const KwCluster& c = clusters[ci];
+		if (c.cls == KWC_MASKED) continue;
+		if (!(c.boundsMin[2] < hi[2] && c.boundsMax[2] > lo[2] && c.boundsMax[0] > lo[0] && c.boundsMin[0] < hi[0] && c.boundsMax[1] > lo[1] && c.boundsMin[1] < hi[1])) continue;
+		float d2 = 0;
+		for (int q = 0; q < 3; q++) {
+			float g = std::max(0.0f, std::max(cmin[q] - c.boundsMax[q], c.boundsMin[q] - cmax[q]));
+			d2 += g * g;
+		}
+		float d = sqrtf(d2);
+		nearCore[ci] = d <= 0.0f;
+		errScale[ci] = 1.0f + d / 1024.0f;
+		int pick = 0;
+		for (uint32_t l = 0; l < c.numLods; l++) { pick = (int)l; if (lods[c.firstLod + l].error >= COLL_ERROR * errScale[ci]) break; }
+		collLod[ci] = pick;
+	}
+	// collision triangles per cluster, split in two: walkable (floors, streets, stair treads: kept accurate, the player
+	// stands on them) and everything else (walls, carvings, props: much coarser, they only have to block).
+	// Then everything is coarsened until the whole set fits the budget, the surroundings first.
+	const size_t NS = clusters.size() * 2;
+	std::vector<std::vector<float>> collPos(NS);
+	std::vector<std::vector<uint32_t>> collTri(NS);
+	std::vector<float> slotErr(NS, COLL_ERROR);
+	std::vector<bool> slotNear(NS, false);
+	size_t collTotal = 0;
+	auto simplifySlot = [&](size_t k, float err, bool prune) {
+		std::vector<uint32_t>& I = collTri[k];
+		if (I.size() < 3) return;
+		float sc = meshopt_simplifyScale(collPos[k].data(), collPos[k].size() / 3, 12);
+		std::vector<uint32_t> d(I.size());
+		size_t n = meshopt_simplify(d.data(), I.data(), I.size(), collPos[k].data(), collPos[k].size() / 3, 12, 0, err / std::max(sc, 1.0f),
+			prune ? (unsigned)meshopt_SimplifyPrune : 0u, nullptr);
+		d.resize(n);
+		I.swap(d);
+	};
+	for (size_t ci = 0; ci < clusters.size(); ci++) {
+		if (collLod[ci] < 0) continue;
+		const KwCluster& c = clusters[ci];
+		const KwLod& l = lods[c.firstLod + collLod[ci]];
+		std::vector<float> P((size_t)c.numVertices * 3);
+		std::vector<KwVertex> BV(c.numVertices);
+		std::vector<uint32_t> BI(l.indexCount);
+		SpillRead(vAt[ci], BV.data(), BV.size() * sizeof(KwVertex));
+		SpillRead(iBase[ci] + (uint64_t)l.firstIndex * 4, BI.data(), BI.size() * 4);
+		for (uint32_t k = 0; k < c.numVertices; k++) memcpy(&P[k * 3], BV[k].pos, 12);
+		for (uint32_t t2 = 0; t2 + 2 < l.indexCount; t2 += 3) {
+			const float* a3 = &P[BI[t2] * 3], * b3 = &P[BI[t2 + 1] * 3], * c3 = &P[BI[t2 + 2] * 3];
+			float ctr[3] = { (a3[0] + b3[0] + c3[0]) / 3, (a3[1] + b3[1] + c3[1]) / 3, (a3[2] + b3[2] + c3[2]) / 3 };
+			if (!inCore(ctr)) continue;
+			float e1[3] = { b3[0] - a3[0], b3[1] - a3[1], b3[2] - a3[2] }, e2[3] = { c3[0] - a3[0], c3[1] - a3[1], c3[2] - a3[2] };
+			float nx = e1[1] * e2[2] - e1[2] * e2[1], ny = e1[2] * e2[0] - e1[0] * e2[2], nz = e1[0] * e2[1] - e1[1] * e2[0];
+			float nl = sqrtf(nx * nx + ny * ny + nz * nz);
+			int kind = (nl > 0 && nz / nl > 0.7f) ? 0 : 1;
+			std::vector<uint32_t>& I = collTri[ci * 2 + kind];
+			I.push_back(BI[t2]); I.push_back(BI[t2 + 1]); I.push_back(BI[t2 + 2]);
+		}
+		for (int kind = 0; kind < 2; kind++) {
+			size_t k = ci * 2 + kind;
+			std::vector<uint32_t>& I = collTri[k];
+			slotNear[k] = nearCore[ci];
+			slotErr[k] = COLL_ERROR * errScale[ci] * (kind ? COLL_WALL_MUL : 1.0f);
+			if (I.empty()) continue;
+			// weld by position (UV / material seams would stop the simplifier)
+			std::vector<unsigned int> remap(c.numVertices);
+			size_t nu = meshopt_generateVertexRemap(remap.data(), I.data(), I.size(), P.data(), c.numVertices, 12);
+			collPos[k].resize(nu * 3);
+			meshopt_remapVertexBuffer(collPos[k].data(), P.data(), c.numVertices, 12, remap.data());
+			meshopt_remapIndexBuffer(I.data(), I.data(), I.size(), remap.data());
+			// small loose pieces (pots, debris) only block nothing worth a brush outside the core; walls everywhere
+			simplifySlot(k, slotErr[k], kind == 1 || !nearCore[ci]);
+			collTotal += I.size() / 3;
+		}
+	}
+	{
+		size_t fl = 0, flNear = 0, wl = 0, wlNear = 0;
+		for (size_t k = 0; k < NS; k++) { size_t n = collTri[k].size() / 3; if (k & 1) { wl += n; if (slotNear[k]) wlNear += n; } else { fl += n; if (slotNear[k]) flNear += n; } }
+		printf("  collision: %zu triangles: floors %zu (%zu in the core) at %.0f units, walls %zu (%zu in the core) at %.0f units\n",
+			collTotal, fl, flNear, COLL_ERROR, wl, wlNear, COLL_ERROR * COLL_WALL_MUL);
+	}
+	// phases: the surroundings, then walls in the core, then floors in the core too
+	static const char* phaseName[3] = { "surroundings", "core walls", "everything" };
+	for (int phase = 0; phase < 3 && collTotal > COLL_BUDGET; phase++) {
+		for (float m = 2; collTotal > COLL_BUDGET && m <= (phase == 1 ? 4.0f : 256.0f); m *= 2) {
+			collTotal = 0;
+			for (size_t k = 0; k < NS; k++) {
+				bool take = phase == 0 ? !slotNear[k] : phase == 1 ? (!slotNear[k] || (k & 1)) : true;
+				if (take) simplifySlot(k, slotErr[k] * (phase == 2 && (k & 1) ? std::max(m, 4.0f) : m), !slotNear[k] || (k & 1));
+				collTotal += collTri[k].size() / 3;
+			}
+			printf("  collision: %zu triangles (%s x%.0f)\n", collTotal, phaseName[phase], m);
+		}
+	}
+	if (collTotal > COLL_BUDGET) {   // still too many: sloppy (vertex clustering) simplification to the budget
+		double keep = (double)COLL_BUDGET / collTotal;
+		collTotal = 0;
+		for (size_t k = 0; k < NS; k++) {
+			std::vector<uint32_t>& I = collTri[k];
+			if (I.size() < 3) continue;
+			std::vector<uint32_t> d(I.size());
+			size_t n = meshopt_simplifySloppy(d.data(), I.data(), I.size(), collPos[k].data(), collPos[k].size() / 3, 12, (size_t)(I.size() / 3 * keep) * 3, 1.0f, nullptr);
+			d.resize(n);
+			I.swap(d);
+			collTotal += I.size() / 3;
+		}
+		printf("  collision: %zu triangles after clustering\n", collTotal);
+	}
+	std::string mpath = outDir + "/" + mapName + ".map";
+	FILE* mf = fopen(mpath.c_str(), "w");
+	if (!mf) { printf("cannot write %s\n", mpath.c_str()); fflush(stdout); _exit(1); }
+	fprintf(mf, "// %s - collision and entities for the KatarnEngine HD world %s.kworld (the visible world is not in the BSP)\n", mapName.c_str(), mapName.c_str());
+	fprintf(mf, "{\n\"classname\" \"worldspawn\"\n\"message\" \"%s (KatarnEngine HD world)\"\n\"_katarn\" \"1\"\n", mapName.c_str());
+	auto box = [&](float x0, float y0, float z0, float x1, float y1, float z1, const char* sh) {
+		fprintf(mf, "{\n");
+		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x0, y0, z1, x0, y1, z1, x1, y1, z1, sh);
+		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x0, y1, z0, x0, y0, z0, x1, y0, z0, sh);
+		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x0, y0, z0, x0, y1, z0, x0, y1, z1, sh);
+		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x1, y1, z0, x1, y0, z0, x1, y0, z1, sh);
+		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x1, y0, z0, x0, y0, z0, x0, y0, z1, sh);
+		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x0, y1, z0, x1, y1, z0, x1, y1, z1, sh);
+		fprintf(mf, "}\n");
+	};
+	const char* sky = "katarn/sky";
+	box(lo[0] - T, lo[1] - T, lo[2] - T, hi[0] + T, hi[1] + T, lo[2], sky);
+	box(lo[0] - T, lo[1] - T, hi[2], hi[0] + T, hi[1] + T, hi[2] + T, sky);
+	box(lo[0] - T, lo[1] - T, lo[2], lo[0], hi[1] + T, hi[2], sky);
+	box(hi[0], lo[1] - T, lo[2], hi[0] + T, hi[1] + T, hi[2], sky);
+	box(lo[0], lo[1] - T, lo[2], hi[0], lo[1], hi[2], sky);
+	box(lo[0], hi[1], lo[2], hi[0], hi[1] + T, hi[2], sky);
+	size_t brushes = 0;
+	std::vector<float> groundTris;
+	const float thick = 8.0f;
+	const unsigned DETAIL = 0x8000000;
+	for (size_t ci = 0; ci < collTri.size(); ci++) {
+		const std::vector<uint32_t>& I = collTri[ci];
+		const std::vector<float>& P = collPos[ci];
+		for (size_t t = 0; t + 2 < I.size(); t += 3) {
+			const float* a = &P[I[t] * 3];
+			const float* b = &P[I[t + 1] * 3];
+			const float* cc = &P[I[t + 2] * 3];
+			float ctr[3] = { (a[0] + b[0] + cc[0]) / 3, (a[1] + b[1] + cc[1]) / 3, (a[2] + b[2] + cc[2]) / 3 };
+			if (!inCore(ctr)) continue;
+			float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, e2[3] = { cc[0] - a[0], cc[1] - a[1], cc[2] - a[2] };
+			float n[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
+			float area2 = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+			auto len = [](const float* p, const float* q) { return sqrtf((p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]) + (p[2] - q[2]) * (p[2] - q[2])); };
+			float lmax = std::max(len(a, b), std::max(len(b, cc), len(cc, a)));
+			if (area2 < 4.0f || lmax < 2.0f || area2 / lmax < 1.0f) continue;
+			for (int q = 0; q < 3; q++) n[q] /= area2;
+			if (n[2] > 0.5f) { groundTris.insert(groundTris.end(), a, a + 3); groundTris.insert(groundTris.end(), b, b + 3); groundTris.insert(groundTris.end(), cc, cc + 3); }
+			float a2[3], b2[3], c2[3], an[3], bn[3], cn[3];
+			for (int q = 0; q < 3; q++) { a2[q] = a[q] - n[q] * thick; b2[q] = b[q] - n[q] * thick; c2[q] = cc[q] - n[q] * thick; an[q] = a[q] + n[q] * 16; bn[q] = b[q] + n[q] * 16; cn[q] = cc[q] + n[q] * 16; }
+			const char* cs = "katarn/collision";
+			fprintf(mf, "{\n");
+			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", a[0], a[1], a[2], cc[0], cc[1], cc[2], b[0], b[1], b[2], cs, DETAIL);
+			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", a2[0], a2[1], a2[2], b2[0], b2[1], b2[2], c2[0], c2[1], c2[2], cs, DETAIL);
+			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", a[0], a[1], a[2], an[0], an[1], an[2], b[0], b[1], b[2], cs, DETAIL);
+			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", b[0], b[1], b[2], bn[0], bn[1], bn[2], cc[0], cc[1], cc[2], cs, DETAIL);
+			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", cc[0], cc[1], cc[2], cn[0], cn[1], cn[2], a[0], a[1], a[2], cs, DETAIL);
+			fprintf(mf, "}\n");
+			brushes++;
+		}
+	}
+	fprintf(mf, "}\n");
+	// spawn: the Blender camera, or the middle of the core, dropped onto the ground
+	float sp[3] = { (cmin[0] + cmax[0]) * 0.5f, (cmin[1] + cmax[1]) * 0.5f, cmax[2] };
+	float yaw = 0;
+	const Json& cam = scene["camera"];
+	if (cam.t == Json::OBJ) {
+		const Json& M = cam["matrix"];
+		sp[0] = (float)M[(size_t)3].num() * UNITS; sp[1] = (float)M[(size_t)7].num() * UNITS; sp[2] = (float)M[(size_t)11].num() * UNITS;
+		yaw = atan2f(-(float)M[(size_t)6].num(), -(float)M[(size_t)2].num()) * 57.2958f;
+	}
+	float best = -1e30f;
+	for (size_t i = 0; i + 8 < groundTris.size(); i += 9) {
+		const float* a = &groundTris[i], * b = &groundTris[i + 3], * c = &groundTris[i + 6];
+		float d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+		if (fabsf(d) < 1e-6f) continue;
+		float l1 = ((b[1] - c[1]) * (sp[0] - c[0]) + (c[0] - b[0]) * (sp[1] - c[1])) / d;
+		float l2 = ((c[1] - a[1]) * (sp[0] - c[0]) + (a[0] - c[0]) * (sp[1] - c[1])) / d;
+		float l3 = 1 - l1 - l2;
+		if (l1 < 0 || l2 < 0 || l3 < 0) continue;
+		float z = l1 * a[2] + l2 * b[2] + l3 * c[2];
+		if (z <= sp[2] + 8 && z > best) best = z;
+	}
+	if (best <= -1e29f && !groundTris.empty()) {
+		// nothing under the camera / centre: the nearest walkable triangle
+		float bd = 1e30f;
+		for (size_t i = 0; i + 8 < groundTris.size(); i += 9) {
+			float cx = (groundTris[i] + groundTris[i + 3] + groundTris[i + 6]) / 3, cy = (groundTris[i + 1] + groundTris[i + 4] + groundTris[i + 7]) / 3;
+			float cz = (groundTris[i + 2] + groundTris[i + 5] + groundTris[i + 8]) / 3;
+			float d = (cx - sp[0]) * (cx - sp[0]) + (cy - sp[1]) * (cy - sp[1]);
+			if (d < bd) { bd = d; sp[0] = cx; sp[1] = cy; best = cz; }
+		}
+	}
+	if (best > -1e29f) sp[2] = best + 40;
+	fprintf(mf, "{\n\"classname\" \"info_player_start\"\n\"origin\" \"%.0f %.0f %.0f\"\n\"angle\" \"%.0f\"\n}\n", sp[0], sp[1], sp[2], yaw);
+	fclose(mf);
+	printf("  wrote %s: %zu collision brushes, sky shell %.0f x %.0f x %.0f, spawn %.0f %.0f %.0f\n", mpath.c_str(), brushes,
+		hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], sp[0], sp[1], sp[2]);
+	std::string spath = outDir + "/katarn_hd.shader";
+	FILE* sf = fopen(spath.c_str(), "w");
+	if (sf) {
+		fprintf(sf, "// KatarnEngine HD worlds: the BSP is collision only, the visible world is the .kworld\n"
+			"textures/katarn/collision\n{\n\tqer_editorimage textures/common/clip\n\tsurfaceparm nodraw\n\tsurfaceparm nolightmap\n\tsurfaceparm nomarks\n\tsurfaceparm trans\n}\n\n"
+			"textures/katarn/sky\n{\n\tqer_editorimage textures/common/sky\n\tsurfaceparm sky\n\tsurfaceparm noimpact\n\tsurfaceparm nolightmap\n\tsurfaceparm nomarks\n\tskyparms - - -\n}\n");
+		fclose(sf);
+	}
+}
+
+// --collision-only: the clusters come from the .kworld already cooked, so only the .map is rebuilt (minutes, not hours)
+static int CollisionOnly(const Json& scene, const std::string& outDir, const std::string& mapName, double t0)
+{
+	std::string kpath = outDir + "/" + mapName + ".kworld";
+	FILE* kf = fopen(kpath.c_str(), "rb");
+	if (!kf) { printf("cannot open %s (cook the world first)\n", kpath.c_str()); return 1; }
+	KwHeader h = {};
+	if (fread(&h, sizeof(h), 1, kf) != 1 || memcmp(h.magic, KW_MAGIC, 8)) { printf("%s is not a KWORLD02 file\n", kpath.c_str()); return 1; }
+	std::vector<KwSection> secs(h.numSections);
+	fread(secs.data(), sizeof(KwSection), secs.size(), kf);
+	auto find = [&](uint32_t t) -> const KwSection* { for (auto& x : secs) if (x.type == t) return &x; return nullptr; };
+	const KwSection* sv = find(KW_VERT), * si = find(KW_INDX), * sc = find(KW_CLUS), * sl = find(KW_LODS), * se = find(KW_ENVT);
+	if (!sv || !si || !sc || !sl) { printf("%s: sections missing\n", kpath.c_str()); return 1; }
+	std::vector<KwCluster> clusters(sc->size / sizeof(KwCluster));
+	std::vector<KwLod> lods(sl->size / sizeof(KwLod));
+	kt_fseek(kf, (int64_t)sc->offset, SEEK_SET); fread(clusters.data(), sizeof(KwCluster), clusters.size(), kf);
+	kt_fseek(kf, (int64_t)sl->offset, SEEK_SET); fread(lods.data(), sizeof(KwLod), lods.size(), kf);
+	std::vector<uint64_t> vAt(clusters.size()), iBase(clusters.size(), si->offset);
+	for (size_t ci = 0; ci < clusters.size(); ci++) vAt[ci] = sv->offset + (uint64_t)clusters[ci].baseVertex * sizeof(KwVertex);
+	// the playable core: stored by newer cooks, else worked out from the export's object bounds
+	float cmin[3] = { 1e30f, 1e30f, 1e30f }, cmax[3] = { -1e30f, -1e30f, -1e30f };
+	bool haveCore = false;
+	if (se && se->size) {
+		std::string env(se->size, '\0');
+		kt_fseek(kf, (int64_t)se->offset, SEEK_SET); fread(&env[0], 1, env.size(), kf);
+		const char* a = strstr(env.c_str(), "coreMin "), * b = strstr(env.c_str(), "coreMax ");
+		if (a && b && sscanf(a, "coreMin %f %f %f", &cmin[0], &cmin[1], &cmin[2]) == 3 && sscanf(b, "coreMax %f %f %f", &cmax[0], &cmax[1], &cmax[2]) == 3) haveCore = true;
+	}
+	if (!haveCore) {
+		const Json& meshes = scene["meshes"];
+		const Json& insts = scene["instances"];
+		std::vector<std::array<float, 4>> samples;
+		for (size_t ii = 0; ii < insts.size(); ii++) {
+			const Json& in = insts[ii];
+			if (Skip(in["object"].str())) continue;
+			size_t mi = (size_t)in["mesh"].num();
+			if (mi >= meshes.size()) continue;
+			const Json& m = meshes[mi];
+			const Json& bd = m["bounds"];
+			if (bd.t != Json::ARR || bd.size() < 2) continue;
+			float M[12];
+			const Json& J = in["matrix"];
+			for (int r = 0; r < 3; r++) for (int c = 0; c < 4; c++) M[r * 4 + c] = (float)J[(size_t)(r * 4 + c)].num() * UNITS;
+			float omin[3] = { 1e30f, 1e30f, 1e30f }, omax[3] = { -1e30f, -1e30f, -1e30f };
+			for (int k = 0; k < 8; k++) {
+				float p[3] = { (float)bd[(size_t)(k & 1)][(size_t)0].num(), (float)bd[(size_t)((k >> 1) & 1)][(size_t)1].num(), (float)bd[(size_t)((k >> 2) & 1)][(size_t)2].num() }, w[3];
+				Xform(M, p, w);
+				for (int q = 0; q < 3; q++) { omin[q] = std::min(omin[q], w[q]); omax[q] = std::max(omax[q], w[q]); }
+			}
+			float ext = std::max(omax[0] - omin[0], std::max(omax[1] - omin[1], omax[2] - omin[2]));
+			if (ext < 100 * UNITS) samples.push_back({ (omin[0] + omax[0]) * 0.5f, (omin[1] + omax[1]) * 0.5f, (omin[2] + omax[2]) * 0.5f, (float)(m["indexCount"].num() / 3) });
+		}
+		double total = 0;
+		for (auto& x : samples) total += x[3];
+		for (int q = 0; q < 3 && !samples.empty(); q++) {
+			std::sort(samples.begin(), samples.end(), [q](const std::array<float, 4>& a, const std::array<float, 4>& b) { return a[q] < b[q]; });
+			double acc = 0; bool lo = false;
+			for (auto& x : samples) {
+				acc += x[3];
+				if (!lo && acc >= total * 0.02) { cmin[q] = x[q]; lo = true; }
+				if (acc >= total * 0.98) { cmax[q] = x[q]; break; }
+			}
+		}
+		if (cmin[0] > cmax[0]) { memcpy(cmin, h.boundsMin, 12); memcpy(cmax, h.boundsMax, 12); }
+	}
+	printf("  collision only, from %s: %zu clusters, playable core %.0f x %.0f x %.0f units\n", kpath.c_str(), clusters.size(),
+		cmax[0] - cmin[0], cmax[1] - cmin[1], cmax[2] - cmin[2]);
+	fclose(g_spill);
+	remove((outDir + "/" + mapName + ".kworld.tmp").c_str());
+	g_spill = kf;
+	WriteCollision(clusters, lods, vAt, iBase, cmin, cmax, scene, outDir, mapName);
+	printf("done in %.0fs\n", Now() - t0);
+	fflush(stdout);
+	_exit(0);   // (the watchdog thread is still running)
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 4) {
 		printf("usage: katarn_cook <export folder> <output folder> <map name> [--units 40] [--maxtex 2048] [--texbudget 2500]\n"
-			"       [--quality 0-2] [--cell 2048] [--lod0-error 0.25] [--collision-error 8] [--collision-budget 150000]\n"
+			"       [--quality 0-2] [--cell 2048] [--lod0-error 0.25] [--collision-error 8] [--collision-budget 250000] [--collision-walls 4] [--collision-pad 8192] [--collision-only]\n"
 			"       [--skip \"HeightFog,Sky_Cottonball\"] [--threads N] [--maxmem MB] [--bands N]\n");
 		return 1;
 	}
 	double t0 = Now();
 	exportDir = argv[1];
 	std::string outDir = argv[2], mapName = argv[3];
+	for (int i = 4; i < argc; i++) if (!strcmp(argv[i], "--collision-only")) { COLL_ONLY = true; for (int j = i; j + 1 < argc; j++) argv[j] = argv[j + 1]; argc--; break; }
 	for (int i = 4; i + 1 < argc; i += 2) {
 		std::string a = argv[i], v = argv[i + 1];
 		if (a == "--units") UNITS = (float)atof(v.c_str());
@@ -815,6 +1122,8 @@ int main(int argc, char** argv)
 		else if (a == "--cell") CELL = (float)atof(v.c_str());
 		else if (a == "--lod0-error") LOD0_ERROR = (float)atof(v.c_str());
 		else if (a == "--collision-error") COLL_ERROR = (float)atof(v.c_str());
+		else if (a == "--collision-walls") COLL_WALL_MUL = (float)atof(v.c_str());
+		else if (a == "--collision-pad") COLL_PAD = (float)atof(v.c_str());
 		else if (a == "--collision-budget") COLL_BUDGET = (size_t)atoll(v.c_str());
 		else if (a == "--skip") { SKIP.clear(); size_t s = 0; while (s <= v.size()) { size_t e = v.find(',', s); if (e == std::string::npos) e = v.size(); SKIP.push_back(v.substr(s, e - s)); s = e + 1; } }
 	}
@@ -839,6 +1148,7 @@ int main(int argc, char** argv)
 	if (!g_spill) { printf("cannot create %s\n", spillPath.c_str()); return 1; }
 	std::thread watchdog(MemoryWatchdog);
 	const Json* groups = scene.has("groups") ? &scene["groups"] : nullptr;
+	if (COLL_ONLY) return CollisionOnly(scene, outDir, mapName, t0);
 
 	// ---- materials (flags now, baked after we know how much surface each covers)
 	const Json& jm = scene["materials"];
@@ -1128,6 +1438,11 @@ int main(int argc, char** argv)
 		sunDir[0], sunDir[1], sunDir[2], sunColor[0], sunColor[1], sunColor[2], std::max(0.5f, sunStrength), std::max(0.0047f, sunAngle),
 		1.0f / (UNITS * 2500.0f), 1.0f / (UNITS * 120.0f), cmin[2], UNITS * 20.0f);
 	std::string envText = std::string(env) + envLines;
+	{
+		char cb[160];
+		snprintf(cb, sizeof(cb), "coreMin %f %f %f\ncoreMax %f %f %f\n", cmin[0], cmin[1], cmin[2], cmax[0], cmax[1], cmax[2]);
+		envText += cb;
+	}
 
 	// ---- write .kworld
 	// clusters reference the buckets' own arrays (no second copy of the geometry in memory)
@@ -1205,184 +1520,14 @@ int main(int argc, char** argv)
 	printf("  wrote %s (%.0f MB: geometry %.0f MB, textures %.0f MB), %zu clusters\n", kpath.c_str(), pos / 1048576.0,
 		(vCount * sizeof(KwVertex) + iCount * 4) / 1048576.0, tdatSize / 1048576.0, clusters.size());
 
-	// ---- collision .map: opaque clusters inside the playable core, at the LOD that fits the budget
-	float pad = 1024.0f, T = 64.0f;
-	float lo[3] = { floorf(cmin[0] - pad), floorf(cmin[1] - pad), floorf(cmin[2] - pad) };
-	float hi[3] = { ceilf(cmax[0] + pad), ceilf(cmax[1] + pad), ceilf(cmax[2] + pad * 4) };
-	auto inCore = [&](const float* p) { return p[0] > lo[0] && p[0] < hi[0] && p[1] > lo[1] && p[1] < hi[1] && p[2] > lo[2] && p[2] < hi[2]; };
-	std::vector<int> collLod(clusters.size(), -1);
-	for (size_t ci = 0; ci < clusters.size(); ci++) {
-		const KwCluster& c = clusters[ci];
-		if (c.cls == KWC_MASKED) continue;
-		float ctr[3] = { (c.boundsMin[0] + c.boundsMax[0]) * 0.5f, (c.boundsMin[1] + c.boundsMax[1]) * 0.5f, (c.boundsMin[2] + c.boundsMax[2]) * 0.5f };
-		if (!inCore(ctr) && !(c.boundsMin[2] < hi[2] && c.boundsMax[2] > lo[2] && c.boundsMax[0] > lo[0] && c.boundsMin[0] < hi[0] && c.boundsMax[1] > lo[1] && c.boundsMin[1] < hi[1])) continue;
-		int pick = 0;
-		for (uint32_t l = 0; l < c.numLods; l++) { pick = (int)l; if (lods[c.firstLod + l].error >= COLL_ERROR) break; }
-		collLod[ci] = pick;
-	}
-	// per cluster collision triangles (world positions), then coarsened until the whole set fits the budget
-	std::vector<std::vector<float>> collPos(clusters.size());
-	std::vector<std::vector<uint32_t>> collTri(clusters.size());
-	size_t collTotal = 0;
-	for (size_t ci = 0; ci < clusters.size(); ci++) {
-		if (collLod[ci] < 0) continue;
-		const KwCluster& c = clusters[ci];
-		const KwLod& l = lods[c.firstLod + collLod[ci]];
-		std::vector<float>& P = collPos[ci];
-		P.resize((size_t)c.numVertices * 3);
-		const Bucket* B = cbucket[ci];
-		std::vector<KwVertex> BV(B->nv);
-		std::vector<uint32_t> BI(l.indexCount);
-		SpillRead(B->vAt, BV.data(), BV.size() * sizeof(KwVertex));
-		SpillRead(B->iAt + (uint64_t)(l.firstIndex - lods[c.firstLod].firstIndex + B->lods[0].firstIndex) * 4, BI.data(), BI.size() * 4);
-		const uint32_t* LI = BI.data();
-		for (uint32_t k = 0; k < c.numVertices; k++) memcpy(&P[k * 3], BV[k].pos, 12);
-		std::vector<uint32_t>& I = collTri[ci];
-		for (uint32_t t2 = 0; t2 + 2 < l.indexCount; t2 += 3) {
-			const float* a3 = &P[LI[t2] * 3], * b3 = &P[LI[t2 + 1] * 3], * c3 = &P[LI[t2 + 2] * 3];
-			float ctr[3] = { (a3[0] + b3[0] + c3[0]) / 3, (a3[1] + b3[1] + c3[1]) / 3, (a3[2] + b3[2] + c3[2]) / 3 };
-			if (!inCore(ctr)) continue;
-			I.push_back(LI[t2]); I.push_back(LI[t2 + 1]); I.push_back(LI[t2 + 2]);
-		}
-		// weld by position (UV / material seams would stop the simplifier)
-		if (!I.empty()) {
-			std::vector<unsigned int> remap(c.numVertices);
-			size_t nu = meshopt_generateVertexRemap(remap.data(), I.data(), I.size(), P.data(), c.numVertices, 12);
-			std::vector<float> P2(nu * 3);
-			meshopt_remapVertexBuffer(P2.data(), P.data(), c.numVertices, 12, remap.data());
-			meshopt_remapIndexBuffer(I.data(), I.data(), I.size(), remap.data());
-			P.swap(P2);
-		}
-		collTotal += I.size() / 3;
-	}
-	for (float err = COLL_ERROR * 2; collTotal > COLL_BUDGET && err < 4096; err *= 2) {
-		collTotal = 0;
+	{
+		std::vector<uint64_t> vAt(clusters.size()), iBase(clusters.size());
 		for (size_t ci = 0; ci < clusters.size(); ci++) {
-			std::vector<uint32_t>& I = collTri[ci];
-			if (I.size() < 3) continue;
-			float sc = meshopt_simplifyScale(collPos[ci].data(), collPos[ci].size() / 3, 12);
-			std::vector<uint32_t> d(I.size());
-			size_t n = meshopt_simplify(d.data(), I.data(), I.size(), collPos[ci].data(), collPos[ci].size() / 3, 12, 0, err / std::max(sc, 1.0f), meshopt_SimplifyPrune, nullptr);
-			d.resize(n);
-			I.swap(d);
-			collTotal += I.size() / 3;
+			const Bucket* B = cbucket[ci];
+			vAt[ci] = B->vAt;
+			iBase[ci] = B->iAt - (uint64_t)lods[clusters[ci].firstLod].firstIndex * 4;   // (wraps; only sums are used)
 		}
-		printf("  collision: %zu triangles at %.0f units error\n", collTotal, err);
-	}
-	if (collTotal > COLL_BUDGET) {   // still too many: sloppy (vertex clustering) simplification to the budget
-		double keep = (double)COLL_BUDGET / collTotal;
-		collTotal = 0;
-		for (size_t ci = 0; ci < clusters.size(); ci++) {
-			std::vector<uint32_t>& I = collTri[ci];
-			if (I.size() < 3) continue;
-			std::vector<uint32_t> d(I.size());
-			size_t n = meshopt_simplifySloppy(d.data(), I.data(), I.size(), collPos[ci].data(), collPos[ci].size() / 3, 12, (size_t)(I.size() / 3 * keep) * 3, 1.0f, nullptr);
-			d.resize(n);
-			I.swap(d);
-			collTotal += I.size() / 3;
-		}
-		printf("  collision: %zu triangles after clustering\n", collTotal);
-	}
-	std::string mpath = outDir + "/" + mapName + ".map";
-	FILE* mf = fopen(mpath.c_str(), "w");
-	if (!mf) { printf("cannot write %s\n", mpath.c_str()); fflush(stdout); _exit(1); }
-	fprintf(mf, "// %s - collision and entities for the KatarnEngine HD world %s.kworld (the visible world is not in the BSP)\n", mapName.c_str(), mapName.c_str());
-	fprintf(mf, "{\n\"classname\" \"worldspawn\"\n\"message\" \"%s (KatarnEngine HD world)\"\n\"_katarn\" \"1\"\n", mapName.c_str());
-	auto box = [&](float x0, float y0, float z0, float x1, float y1, float z1, const char* sh) {
-		fprintf(mf, "{\n");
-		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x0, y0, z1, x0, y1, z1, x1, y1, z1, sh);
-		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x0, y1, z0, x0, y0, z0, x1, y0, z0, sh);
-		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x0, y0, z0, x0, y1, z0, x0, y1, z1, sh);
-		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x1, y1, z0, x1, y0, z0, x1, y0, z1, sh);
-		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x1, y0, z0, x0, y0, z0, x0, y0, z1, sh);
-		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x0, y1, z0, x1, y1, z0, x1, y1, z1, sh);
-		fprintf(mf, "}\n");
-	};
-	const char* sky = "katarn/sky";
-	box(lo[0] - T, lo[1] - T, lo[2] - T, hi[0] + T, hi[1] + T, lo[2], sky);
-	box(lo[0] - T, lo[1] - T, hi[2], hi[0] + T, hi[1] + T, hi[2] + T, sky);
-	box(lo[0] - T, lo[1] - T, lo[2], lo[0], hi[1] + T, hi[2], sky);
-	box(hi[0], lo[1] - T, lo[2], hi[0] + T, hi[1] + T, hi[2], sky);
-	box(lo[0], lo[1] - T, lo[2], hi[0], lo[1], hi[2], sky);
-	box(lo[0], hi[1], lo[2], hi[0], hi[1] + T, hi[2], sky);
-	size_t brushes = 0;
-	std::vector<float> groundTris;
-	const float thick = 8.0f;
-	const unsigned DETAIL = 0x8000000;
-	for (size_t ci = 0; ci < clusters.size(); ci++) {
-		const std::vector<uint32_t>& I = collTri[ci];
-		const std::vector<float>& P = collPos[ci];
-		for (size_t t = 0; t + 2 < I.size(); t += 3) {
-			const float* a = &P[I[t] * 3];
-			const float* b = &P[I[t + 1] * 3];
-			const float* cc = &P[I[t + 2] * 3];
-			float ctr[3] = { (a[0] + b[0] + cc[0]) / 3, (a[1] + b[1] + cc[1]) / 3, (a[2] + b[2] + cc[2]) / 3 };
-			if (!inCore(ctr)) continue;
-			float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, e2[3] = { cc[0] - a[0], cc[1] - a[1], cc[2] - a[2] };
-			float n[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
-			float area2 = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-			auto len = [](const float* p, const float* q) { return sqrtf((p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]) + (p[2] - q[2]) * (p[2] - q[2])); };
-			float lmax = std::max(len(a, b), std::max(len(b, cc), len(cc, a)));
-			if (area2 < 4.0f || lmax < 2.0f || area2 / lmax < 1.0f) continue;
-			for (int q = 0; q < 3; q++) n[q] /= area2;
-			if (n[2] > 0.5f) { groundTris.insert(groundTris.end(), a, a + 3); groundTris.insert(groundTris.end(), b, b + 3); groundTris.insert(groundTris.end(), cc, cc + 3); }
-			float a2[3], b2[3], c2[3], an[3], bn[3], cn[3];
-			for (int q = 0; q < 3; q++) { a2[q] = a[q] - n[q] * thick; b2[q] = b[q] - n[q] * thick; c2[q] = cc[q] - n[q] * thick; an[q] = a[q] + n[q] * 16; bn[q] = b[q] + n[q] * 16; cn[q] = cc[q] + n[q] * 16; }
-			const char* cs = "katarn/collision";
-			fprintf(mf, "{\n");
-			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", a[0], a[1], a[2], cc[0], cc[1], cc[2], b[0], b[1], b[2], cs, DETAIL);
-			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", a2[0], a2[1], a2[2], b2[0], b2[1], b2[2], c2[0], c2[1], c2[2], cs, DETAIL);
-			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", a[0], a[1], a[2], an[0], an[1], an[2], b[0], b[1], b[2], cs, DETAIL);
-			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", b[0], b[1], b[2], bn[0], bn[1], bn[2], cc[0], cc[1], cc[2], cs, DETAIL);
-			fprintf(mf, "( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) ( %.3f %.3f %.3f ) %s 0 0 0 0.5 0.5 %u 0 0\n", cc[0], cc[1], cc[2], cn[0], cn[1], cn[2], a[0], a[1], a[2], cs, DETAIL);
-			fprintf(mf, "}\n");
-			brushes++;
-		}
-	}
-	fprintf(mf, "}\n");
-	// spawn: the Blender camera, or the middle of the core, dropped onto the ground
-	float sp[3] = { (cmin[0] + cmax[0]) * 0.5f, (cmin[1] + cmax[1]) * 0.5f, cmax[2] };
-	float yaw = 0;
-	const Json& cam = scene["camera"];
-	if (cam.t == Json::OBJ) {
-		const Json& M = cam["matrix"];
-		sp[0] = (float)M[(size_t)3].num() * UNITS; sp[1] = (float)M[(size_t)7].num() * UNITS; sp[2] = (float)M[(size_t)11].num() * UNITS;
-		yaw = atan2f(-(float)M[(size_t)6].num(), -(float)M[(size_t)2].num()) * 57.2958f;
-	}
-	float best = -1e30f;
-	for (size_t i = 0; i + 8 < groundTris.size(); i += 9) {
-		const float* a = &groundTris[i], * b = &groundTris[i + 3], * c = &groundTris[i + 6];
-		float d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
-		if (fabsf(d) < 1e-6f) continue;
-		float l1 = ((b[1] - c[1]) * (sp[0] - c[0]) + (c[0] - b[0]) * (sp[1] - c[1])) / d;
-		float l2 = ((c[1] - a[1]) * (sp[0] - c[0]) + (a[0] - c[0]) * (sp[1] - c[1])) / d;
-		float l3 = 1 - l1 - l2;
-		if (l1 < 0 || l2 < 0 || l3 < 0) continue;
-		float z = l1 * a[2] + l2 * b[2] + l3 * c[2];
-		if (z <= sp[2] + 8 && z > best) best = z;
-	}
-	if (best <= -1e29f && !groundTris.empty()) {
-		// nothing under the camera / centre: the nearest walkable triangle
-		float bd = 1e30f;
-		for (size_t i = 0; i + 8 < groundTris.size(); i += 9) {
-			float cx = (groundTris[i] + groundTris[i + 3] + groundTris[i + 6]) / 3, cy = (groundTris[i + 1] + groundTris[i + 4] + groundTris[i + 7]) / 3;
-			float cz = (groundTris[i + 2] + groundTris[i + 5] + groundTris[i + 8]) / 3;
-			float d = (cx - sp[0]) * (cx - sp[0]) + (cy - sp[1]) * (cy - sp[1]);
-			if (d < bd) { bd = d; sp[0] = cx; sp[1] = cy; best = cz; }
-		}
-	}
-	if (best > -1e29f) sp[2] = best + 40;
-	fprintf(mf, "{\n\"classname\" \"info_player_start\"\n\"origin\" \"%.0f %.0f %.0f\"\n\"angle\" \"%.0f\"\n}\n", sp[0], sp[1], sp[2], yaw);
-	fclose(mf);
-	printf("  wrote %s: %zu collision brushes, sky shell %.0f x %.0f x %.0f, spawn %.0f %.0f %.0f\n", mpath.c_str(), brushes,
-		hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], sp[0], sp[1], sp[2]);
-	std::string spath = outDir + "/katarn_hd.shader";
-	FILE* sf = fopen(spath.c_str(), "w");
-	if (sf) {
-		fprintf(sf, "// KatarnEngine HD worlds: the BSP is collision only, the visible world is the .kworld\n"
-			"textures/katarn/collision\n{\n\tqer_editorimage textures/common/clip\n\tsurfaceparm nodraw\n\tsurfaceparm nolightmap\n\tsurfaceparm nomarks\n\tsurfaceparm trans\n}\n\n"
-			"textures/katarn/sky\n{\n\tqer_editorimage textures/common/sky\n\tsurfaceparm sky\n\tsurfaceparm noimpact\n\tsurfaceparm nolightmap\n\tsurfaceparm nomarks\n\tskyparms - - -\n}\n");
-		fclose(sf);
+		WriteCollision(clusters, lods, vAt, iBase, cmin, cmax, scene, outDir, mapName);
 	}
 	printf("done in %.0fs\n", Now() - t0);
 	g_cookDone = true;
