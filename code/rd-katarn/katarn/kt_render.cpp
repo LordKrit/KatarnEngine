@@ -53,7 +53,7 @@ static void RegisterCvars()
 	kt_ssr = ri.Cvar_Get("kt_ssr", "1", CVAR_ARCHIVE);                 // screen-space reflections (HD worlds)
 	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
 	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
-	kt_saberGlow = ri.Cvar_Get("kt_saberGlow2", "2.5", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene
+	kt_saberGlow = ri.Cvar_Get("kt_saberGlowScale", "1", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene (1 = as authored, like rend2)
 	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
 }
 
@@ -1118,7 +1118,7 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 	if (mx < 0.01f) { c[0] = c[1] = c[2] = 1; mx = 1; }
 	for (int q = 0; q < 3; q++) l.color[q] = powf(c[q] / mx, 2.2f) * 1.0f;
 	l.type = 2;
-	l.invSquare = 700.0f;
+	l.invSquare = 220.0f;   // a soft fill, about what rend2's saber dynamic light gives
 	R.tubes.push_back(l);
 }
 float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }

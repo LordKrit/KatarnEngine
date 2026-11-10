@@ -733,6 +733,7 @@ R"KTSRC(
 	if (lflags & 1) ao *= Tex2D[aoTex].Load(int3(px, 0)).r;
 	float3 diff = albedo * (1 - metal);
 	float3 f0 = lerp(0.04, albedo, metal);
+	if (plainLegacy) f0 *= 0.3;                  // old models without PBR maps: barely any specular (rend2 gives them almost none)
 	float viewZ = ViewDepth(depth);
 
 	float3 Lo = 0;
