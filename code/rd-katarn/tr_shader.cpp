@@ -3509,6 +3509,17 @@ shader_t* R_FindShader(const char* name, const int* lightmap_index, const byte* 
 		stages[0].alphaGen = AGEN_SKIP;
 		stages[0].stateBits = GLS_DEFAULT;
 	}
+	else if (shader.lightmapIndex[0] == LIGHTMAP_2D && !Q_stricmpn(shader.name, "gfx/effects/sabers", 18)) {
+		// KatarnEngine: a saber texture with no shader of its own (e.g. sabers_maul): draw it like the other saber
+		// shaders (additive, two-sided, depth tested, glow) - not as an alpha-blended 2D picture
+		stages[0].bundle[0].image = image;
+		stages[0].active = true;
+		stages[0].rgbGen = CGEN_VERTEX;
+		stages[0].alphaGen = AGEN_VERTEX;
+		stages[0].stateBits = GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE;
+		stages[0].glow = strstr(shader.name, "glow") != nullptr;
+		shader.cullType = CT_TWO_SIDED;
+	}
 	else if (shader.lightmapIndex[0] == LIGHTMAP_2D) {
 		// GUI elements
 		stages[0].bundle[0].image = image;

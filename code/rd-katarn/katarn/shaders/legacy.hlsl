@@ -10,7 +10,7 @@ cbuffer Draw : register(b0)
 	float alphaRef;
 	uint drawTarget;        // 0 screen (display-referred, as GL drew it), 1 HDR scene (linear radiance)
 	float glowBoost;
-	uint drawPad0;
+	float drawScale;        // extra brightness in the HDR scene (saber glows)
 	uint drawPad1;
 	float4 drawExtra[2];
 };
@@ -67,6 +67,7 @@ float4 PS(VsOut i) : SV_Target0
 		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
 		float s = (skyParams.w > 0.5 ? Overbright() : 1.0) / max(Exposure(), 1e-6);   // HD: legacy colours are scaled by identityLight
 		if (flags & (1u << 11)) s *= glowBoost;
+		s *= drawScale > 0 ? drawScale : 1.0;
 		c.rgb = min(c.rgb * s, 1500.0);   // stacked additive sprites (saber glow) must not overflow the half-float scene
 	}
 	return c;

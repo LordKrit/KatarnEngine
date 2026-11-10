@@ -53,7 +53,7 @@ static void RegisterCvars()
 	kt_ssr = ri.Cvar_Get("kt_ssr", "1", CVAR_ARCHIVE);                 // screen-space reflections (HD worlds)
 	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
 	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
-	kt_saberGlow = ri.Cvar_Get("kt_saberGlow", "2", CVAR_ARCHIVE);     // blade brightness
+	kt_saberGlow = ri.Cvar_Get("kt_saberGlow2", "2.5", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene
 	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
 }
 
@@ -559,6 +559,7 @@ static void FlushStream(int target)
 		memcpy(&c[19], &d.alphaRef, 4);
 		c[20] = (uint32_t)target;
 		memcpy(&c[21], &glow, 4);
+		{ float sc = d.scale > 0 ? d.scale : 1.0f; memcpy(&c[22], &sc, 4); }
 		cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 24, c, 0);
 		D3D12_VERTEX_BUFFER_VIEW vbv = { d.vb, d.vbSize, 32 };
 		D3D12_INDEX_BUFFER_VIEW ibv = { d.ib, d.indexCount * 4, DXGI_FORMAT_R32_UINT };

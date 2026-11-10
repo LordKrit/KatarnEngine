@@ -128,6 +128,7 @@ static struct {
 	std::vector<IVert> imm;
 	const void* stage = nullptr;
 	bool glow = false;
+	float scale = 1.0f;
 } s;
 
 static inline void CurMat(float* out)
@@ -144,6 +145,7 @@ void GL_ResetState()
 	s.matrixMode = GL_MODELVIEW;
 }
 void GL_SetStage(const void* stage, bool glow) { s.stage = stage; s.glow = glow; }
+void GL_SetScale(float v) { s.scale = v; }
 
 // PSO bits (kt_render.cpp decodes these)
 enum : uint32_t {
@@ -234,6 +236,7 @@ static void Snapshot(LegacyDraw& d)
 	else { d.depthMin = s.depthNear; d.depthMax = s.depthFar; }
 	if (d.depthMin > d.depthMax) { float t = d.depthMin; d.depthMin = d.depthMax; d.depthMax = t; }
 	d.stage = s.stage;
+	d.scale = s.scale;
 }
 
 static bool Skip()
