@@ -42,6 +42,41 @@ log("blend", blend, "->", OUT, "| Blender", bpy.app.version_string)
 images = {}      # image name -> exported record
 
 
+def _readable(path):
+    """the cooker reads PNG, JPEG, TGA, BMP and Radiance HDR"""
+    try:
+        with open(path, "rb") as f:
+            h = f.read(4)
+    except OSError:
+        return False
+    ext = os.path.splitext(path)[1].lower()
+    if h[:4] == b"\x89PNG" or h[:2] == b"\xff\xd8" or h[:2] == b"BM" or h[:2] == b"#?":
+        return True
+    return ext == ".tga" and h[:4] != b"DDS "
+
+
+def _resave(img, name):
+    """re-encode through Blender (DDS / EXR / TIFF / BC6H ... -> PNG or HDR)"""
+    w, h = img.size
+    if w <= 0 or h <= 0:
+        return None
+    px = np.empty(w * h * 4, np.float32)
+    img.pixels.foreach_get(px)
+    is_float = bool(img.is_float)
+    out = os.path.splitext(name)[0] + (".hdr" if is_float else ".png")
+    tmp = bpy.data.images.new("__katarn_tmp", w, h, alpha=True, float_buffer=is_float)
+    try:
+        tmp.colorspace_settings.name = img.colorspace_settings.name
+    except Exception:
+        pass
+    tmp.pixels.foreach_set(px)
+    tmp.filepath_raw = os.path.join(TEX, out)
+    tmp.file_format = "HDR" if is_float else "PNG"
+    tmp.save()
+    bpy.data.images.remove(tmp)
+    return out
+
+
 def export_image(img):
     if img is None:
         return None
@@ -73,6 +108,15 @@ def export_image(img):
             c = img.copy(); c.filepath_raw = os.path.join(TEX, name); c.file_format = "PNG"; c.save()
             bpy.data.images.remove(c)
             rec["file"] = name
+        if rec["file"] and not _readable(os.path.join(TEX, rec["file"])):
+            conv = _resave(img, rec["file"])
+            log("  converted", rec["file"], "->", conv)
+            if conv:
+                try:
+                    os.remove(os.path.join(TEX, rec["file"]))
+                except OSError:
+                    pass
+            rec["file"] = conv
     except Exception as e:
         log("  image failed", img.name, e)
     images[img.name] = rec

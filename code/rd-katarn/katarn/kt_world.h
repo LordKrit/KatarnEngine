@@ -24,7 +24,8 @@ struct WorldEnv {
 	float fogMax = 0.85f;
 	float exposureEV = 0.0f;
 	uint32_t envSrv = 0;           // sky texture (equirectangular, sRGB view), 0 = Katarn's atmosphere
-	float envStrength = 1.0f;
+	float envStrength = 1.0f;      // sky as seen by the camera
+	float envLight = 1.0f;         // sky as light (reflections)
 	bool hasSH = false;
 	float sh[9][3] = {};           // diffuse sky radiance (SH, cosine-convolved, / pi)
 };

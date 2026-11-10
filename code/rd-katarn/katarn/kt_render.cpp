@@ -30,7 +30,7 @@ static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds;
 
 static void RegisterCvars()
 {
-	kt_debug = ri.Cvar_Get("kt_debug", "0", CVAR_ARCHIVE | CVAR_LATCH);
+	kt_debug = ri.Cvar_Get("kt_debug", "0", CVAR_LATCH);
 	kt_ssao = ri.Cvar_Get("kt_ssao", "1", CVAR_ARCHIVE);
 	kt_shadows = ri.Cvar_Get("kt_shadows", "1", CVAR_ARCHIVE);
 	kt_shadowRes = ri.Cvar_Get("kt_shadowRes", "2048", CVAR_ARCHIVE | CVAR_LATCH);
@@ -298,7 +298,18 @@ static bool CreatePipelines()
 	R.lgVS = R_Shader("legacy_gbuffer", "VS", "vs_5_1");
 	R.lgPS = R_Shader("legacy_gbuffer", "PS", "ps_5_1");
 	R.lgShadowPS = R_Shader("legacy_gbuffer", "ShadowPS", "ps_5_1");
-	if (!R.legacyVS.ok || !R.legacyPS.ok || !R.fsVS.ok || !R.presentPS.ok) return false;
+	{
+		// compile everything once up front so one run reports every shader error in katarn_log.txt
+		const char* all[][3] = { { "world", "VS", "vs_5_1" }, { "world", "PS", "ps_5_1" }, { "world", "ShadowPS", "ps_5_1" },
+			{ "sky", "LutCS", "cs_5_1" }, { "sky", "ShCS", "cs_5_1" }, { "lighting", "CS", "cs_5_1" }, { "ssao", "AoCS", "cs_5_1" },
+			{ "ssao", "BlurCS", "cs_5_1" }, { "post", "HistogramCS", "cs_5_1" }, { "post", "ExposureCS", "cs_5_1" },
+			{ "post", "BloomDownCS", "cs_5_1" }, { "post", "BloomUpCS", "cs_5_1" } };
+		int bad = 0;
+		for (auto& e : all) { Shader s = R_Shader(e[0], e[1], e[2]); if (!s.ok) bad++; if (s.blob) s.blob->Release(); }
+		Shader* mine[] = { &R.legacyVS, &R.legacyPS, &R.fsVS, &R.presentPS, &R.tonemapPS, &R.fxaaPS, &R.lgVS, &R.lgPS, &R.lgShadowPS };
+		for (auto* s : mine) if (!s->ok) bad++;
+		if (bad) { Log("^1KatarnEngine: %d shaders failed to compile\n", bad); return false; }
+	}
 	R.presentPSO = FullscreenPSO(R.presentPS, DXGI_FORMAT_R8G8B8A8_UNORM, "present");
 	R.tonemapPSO = FullscreenPSO(R.tonemapPS, DXGI_FORMAT_R8G8B8A8_UNORM, "tonemap");
 	R.fxaaPSO = FullscreenPSO(R.fxaaPS, DXGI_FORMAT_R8G8B8A8_UNORM, "fxaa");
@@ -627,7 +638,7 @@ void R_BeginView(const ViewDesc& v)
 	c.sunColor[0] = env.sunColor[0]; c.sunColor[1] = env.sunColor[1]; c.sunColor[2] = env.sunColor[2];
 	c.sunColor[3] = kt_sun->integer ? env.sunIntensity : 0.0f;
 	c.skyParams[0] = env.haze; c.skyParams[1] = env.skyIntensity; c.skyParams[2] = env.ambient; c.skyParams[3] = World_Active() ? 1.0f : 0.0f;
-	if (env.envSrv) { c.indices2[0] = env.envSrv; c.skyParams[1] = env.envStrength; }
+	if (env.envSrv) { c.indices2[0] = env.envSrv; c.skyParams[1] = env.envStrength; float rs = env.envLight / Q_max(1e-4f, env.envStrength); memcpy(&c.indices2[2], &rs, 4); }
 	if (env.hasSH) { c.indices2[1] = 1; for (int k = 0; k < 9; k++) for (int q = 0; q < 3; q++) c.ambientSH[k][q] = env.sh[k][q]; }
 	if (kt_fog->integer) {
 		c.fogParams[0] = env.fogDensity; c.fogParams[1] = env.fogFalloff; c.fogParams[2] = env.fogHeight; c.fogParams[3] = env.fogStart;

@@ -124,7 +124,7 @@ cbuffer Draw : register(b0)
 	uint tex1;
 	uint flags;
 	float alphaRef;
-	uint target;        // 0 screen (display-referred, as GL drew it), 1 HDR scene (linear radiance)
+	uint drawTarget;        // 0 screen (display-referred, as GL drew it), 1 HDR scene (linear radiance)
 	float glowBoost;
 	uint drawPad0;
 	uint drawPad1;
@@ -153,7 +153,7 @@ float4 SampleUnit(uint tex, float2 uv, bool clampMode, bool pointMode)
 float4 PS(VsOut i) : SV_Target0
 {
 	float4 c = i.color;
-	if (target == 1) c.rgb = SrgbToLinear(c.rgb);
+	if (drawTarget == 1) c.rgb = SrgbToLinear(c.rgb);
 	if (flags & 1) {
 		float4 t = SampleUnit(tex0, i.uv0, (flags & 4) != 0, (flags & 16) != 0);
 		uint env0 = (flags >> 12) & 3;
@@ -169,17 +169,17 @@ float4 PS(VsOut i) : SV_Target0
 	}
 	uint at = (flags >> 8) & 7;
 	if (at != 0) {
-		bool pass = true;
-		if (at == 1) pass = c.a > alphaRef;
-		else if (at == 2) pass = c.a < alphaRef;
-		else if (at == 3) pass = c.a >= alphaRef;
-		else if (at == 4) pass = c.a <= alphaRef;
-		else if (at == 5) pass = c.a == alphaRef;
-		else if (at == 6) pass = c.a != alphaRef;
-		else pass = false;
-		if (!pass) discard;
+		bool keep = true;
+		if (at == 1) keep = c.a > alphaRef;
+		else if (at == 2) keep = c.a < alphaRef;
+		else if (at == 3) keep = c.a >= alphaRef;
+		else if (at == 4) keep = c.a <= alphaRef;
+		else if (at == 5) keep = c.a == alphaRef;
+		else if (at == 6) keep = c.a != alphaRef;
+		else keep = false;
+		if (!keep) discard;
 	}
-	if (target == 1) {
+	if (drawTarget == 1) {
 		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
 		float s = 1.0 / max(Exposure(), 1e-6);
 		if (flags & (1u << 11)) s *= glowBoost;
@@ -695,13 +695,13 @@ void CS(uint3 id : SV_DispatchThreadID)
 		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
 		float3 b = cross(R, t);
 		float cone = rough * rough * 1.2;
-		if (indices2.x) spec = SkyRadianceLod(R, rough * (SkyMips() - 1) * 0.8);
+		if (indices2.x) spec = SkyRadianceLod(R, rough * (SkyMips() - 1) * 0.8) * asfloat(indices2.z);
 		else {
 			float3 acc = SkyRadiance(R);
 			[unroll] for (int k = 0; k < 6; k++) {
 				float a = k * (2 * PI / 6);
-				acc += SkyRadiance(normalize(R + (t * cos(a) + b * sin(a)) * cone)))KTSRC",
-R"KTSRC(;
+				acc += SkyRadiance(normalize(R + (t * cos(a) )KTSRC",
+R"KTSRC(+ b * sin(a)) * cone));
 			}
 			spec = acc / 7.0;
 		}

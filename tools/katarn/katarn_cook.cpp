@@ -228,7 +228,7 @@ static std::shared_ptr<BakeImage> LoadSource(const std::string& file, bool linea
 	std::lock_guard<std::mutex> lk(imgMutex);
 	imgLru.push_front({ key, img });
 	imgBytes += img->px.size() * 4;
-	while (imgBytes > (3ull << 30) && imgLru.size() > 1) { imgBytes -= imgLru.back().second->px.size() * 4; imgLru.pop_back(); }
+	while (imgBytes > (3ull << 29) && imgLru.size() > 1) { imgBytes -= imgLru.back().second->px.size() * 4; imgLru.pop_back(); }
 	return img;
 }
 
@@ -343,6 +343,7 @@ struct MatInfo {
 	std::string name;
 	const Json* json = nullptr;
 	uint32_t flags = 0;
+	bool invisible = false;     // volume-only / no surface: its geometry is left out
 	double area = 0;            // world area using it (units^2)
 	int srcRes = 0;             // largest source image side
 	int res = 0;                // bake resolution
@@ -702,7 +703,10 @@ int main(int argc, char** argv)
 	for (auto& kv : jm.o) {
 		MatInfo mi;
 		mi.name = kv.first; mi.json = &kv.second; mi.flags = MaterialFlags(kv.second);
-		if (kv.second["graph"].t == Json::OBJ) CollectImages(kv.second["graph"]["nodes"], groups, mi.images);
+		if (kv.second["graph"].t == Json::OBJ) {
+			CollectImages(kv.second["graph"]["nodes"], groups, mi.images);
+			mi.invisible = OutputShaderNode(kv.second["graph"]["nodes"]) == nullptr;
+		}
 		std::sort(mi.images.begin(), mi.images.end());
 		mi.images.erase(std::unique(mi.images.begin(), mi.images.end()), mi.images.end());
 		matIndex[mi.name] = (uint32_t)mats.size();
@@ -777,6 +781,7 @@ int main(int argc, char** argv)
 			if (mirror) std::swap(vi[1], vi[2]);
 			const float* p0 = &wp[vi[0] * 3], * p1 = &wp[vi[1] * 3], * p2 = &wp[vi[2] * 3];
 			uint16_t mat = triMat[t / 3];
+			if (mats[mat].invisible) continue;
 			int cls = (mats[mat].flags & KWM_MASK) ? KWC_MASKED : (mats[mat].flags & KWM_TWOSIDED) ? KWC_TWOSIDED : KWC_OPAQUE;
 			int cx = (int)floorf((p0[0] + p1[0] + p2[0]) / (3 * CELL)), cy = (int)floorf((p0[1] + p1[1] + p2[1]) / (3 * CELL)), cz = (int)floorf((p0[2] + p1[2] + p2[2]) / (3 * CELL));
 			std::array<int, 4> key = { cx, cy, cz, cls };
@@ -908,22 +913,40 @@ int main(int argc, char** argv)
 	// ---- sky: the world's environment texture (or Katarn's physical sky)
 	std::string envLines;
 	const Json& world = scene["world"];
-	std::string envFile = world["environment"].str();
-	float envStrength = (float)world["strength"].num(1.0);
-	if (!envFile.empty()) {
-		auto env = LoadSource(envFile, true);
-		if (env) {
-			BakeImage e = *env;
-			int ew = std::min(e.w, 4096) & ~3, eh = std::max(4, (ew / 2) & ~3);
-			if (ew != e.w || eh != e.h) e = Resample(e, ew, eh);
+	{
+		const Json& wg = world["graph"];
+		const char* bg = nullptr;
+		if (wg.t == Json::OBJ)
+			for (auto& kv : wg["nodes"].o)
+				if (kv.second["type"].str() == "OUTPUT_WORLD")
+					for (auto& in : kv.second["inputs"].a) if (in["id"].str() == "Surface" && in["link"].t == Json::ARR) bg = in["link"][(size_t)0].s.c_str();
+		const Json* bgn = bg ? &wg["nodes"][bg] : nullptr;
+		if (bgn && (*bgn)["type"].str() == "BACKGROUND") {
+			NodeCtx ctx;
+			ctx.groups = groups; ctx.worldMode = true; ctx.W = 2048; ctx.H = 1024;
+			ctx.loadImage = [](const std::string& f, bool lin) { return LoadSource(f, lin); };
+			NodeGraph g; g.nodes = &wg["nodes"]; g.ctx = &ctx;
+			Field col = g.in(*bgn, "Color", 3);
+			Field strCam = g.in(*bgn, "Strength", 1);
+			NodeGraph g2; g2.nodes = &wg["nodes"]; g2.ctx = &ctx;
+			ctx.cameraRay = 0;
+			Field strLight = g2.in(*bgn, "Strength", 1);
+			float sc = strCam.constant() ? strCam.d[0] : 1.0f, sl = strLight.constant() ? strLight.d[0] : sc;
+			BakeImage e; e.w = ctx.W; e.h = ctx.H; e.px.resize((size_t)e.w * e.h * 4);
+			for (int y = 0; y < e.h; y++) for (int x = 0; x < e.w; x++) {
+				size_t i = (size_t)y * e.w + x;
+				float* o = &e.px[((size_t)(e.h - 1 - y) * e.w + x) * 4];
+				o[0] = col.at(i, 0); o[1] = col.at(i, 1); o[2] = col.at(i, 2); o[3] = 1;
+			}
 			float sh[9][3];
-			ProjectSH(e, envStrength, sh);
+			ProjectSH(e, sl, sh);
 			int ti = AddTexture(e, TK_COLOR, true);
 			char buf[512];
-			snprintf(buf, sizeof(buf), "envTex %d\nenvStrength %f\n", ti, envStrength);
+			snprintf(buf, sizeof(buf), "envTex %d\nenvStrength %f\nenvLight %f\n", ti, sc, sl);
 			envLines += buf;
 			for (int k = 0; k < 9; k++) { snprintf(buf, sizeof(buf), "sh%d %f %f %f\n", k, sh[k][0], sh[k][1], sh[k][2]); envLines += buf; }
-			printf("  sky: %s x %.2f (%dx%d)\n", envFile.c_str(), envStrength, ew, eh);
+			printf("  sky: world graph baked (camera strength %.2f, lighting %.2f)\n", sc, sl);
+			for (auto& w : ctx.warnings) printf("    note: sky: %s\n", w.c_str());
 		}
 	}
 	char env[2048];
@@ -935,24 +958,24 @@ int main(int argc, char** argv)
 	std::string envText = std::string(env) + envLines;
 
 	// ---- write .kworld
-	std::vector<KwVertex> allV;
-	std::vector<uint32_t> allI;
+	// clusters reference the buckets' own arrays (no second copy of the geometry in memory)
 	std::vector<KwCluster> clusters;
 	std::vector<KwLod> lods;
-	allV.reserve(verts);
-	allI.reserve(lodAll * 3);
+	std::vector<Bucket*> cbucket;
+	uint64_t vCount = 0, iCount = 0;
 	for (Bucket* b : blist) {
 		if (b->lods.empty()) continue;
 		KwCluster c = {};
 		memcpy(c.boundsMin, b->bmin, 12); memcpy(c.boundsMax, b->bmax, 12);
-		c.baseVertex = (uint32_t)allV.size(); c.numVertices = (uint32_t)b->v.size();
+		c.baseVertex = (uint32_t)vCount; c.numVertices = (uint32_t)b->v.size();
 		c.firstLod = (uint32_t)lods.size(); c.numLods = (uint32_t)b->lods.size();
 		c.cls = (uint32_t)b->cls;
-		uint32_t ib = (uint32_t)allI.size();
+		uint32_t ib = (uint32_t)iCount;
 		for (KwLod l : b->lods) { l.firstIndex += ib; lods.push_back(l); }
-		allI.insert(allI.end(), b->lodIdx.begin(), b->lodIdx.end());
-		allV.insert(allV.end(), b->v.begin(), b->v.end());
+		iCount += b->lodIdx.size();
+		vCount += b->v.size();
 		clusters.push_back(c);
+		cbucket.push_back(b);
 	}
 	std::vector<KwTexture> ktex;
 	uint64_t tdatSize = 0;
@@ -962,7 +985,7 @@ int main(int argc, char** argv)
 	if (!f) { printf("cannot write %s\n", kpath.c_str()); return 1; }
 	struct Sec { uint32_t type; const void* data; uint64_t size; };
 	std::vector<Sec> secs = {
-		{ KW_VERT, allV.data(), allV.size() * sizeof(KwVertex) }, { KW_INDX, allI.data(), allI.size() * 4 },
+		{ KW_VERT, nullptr, vCount * sizeof(KwVertex) }, { KW_INDX, nullptr, iCount * 4 },
 		{ KW_CLUS, clusters.data(), clusters.size() * sizeof(KwCluster) }, { KW_LODS, lods.data(), lods.size() * sizeof(KwLod) },
 		{ KW_MATL, kmats.data(), kmats.size() * sizeof(KwMaterial) }, { KW_TEXT, ktex.data(), ktex.size() * sizeof(KwTexture) },
 		{ KW_LITE, lights.data(), lights.size() * sizeof(KwLight) }, { KW_ENVT, envText.data(), envText.size() }, { KW_TDAT, nullptr, tdatSize },
@@ -986,7 +1009,14 @@ int main(int argc, char** argv)
 	auto padTo = [&](uint64_t to) { while (pos < to) { size_t n = (size_t)std::min<uint64_t>(256, to - pos); fwrite(zeros, 1, n, f); pos += n; } };
 	for (size_t i = 0; i < secs.size(); i++) {
 		padTo(table[i].offset);
-		if (secs[i].type == KW_TDAT) {
+		if (secs[i].type == KW_VERT || secs[i].type == KW_INDX) {
+			for (Bucket* b : cbucket) {
+				if (secs[i].type == KW_VERT) fwrite(b->v.data(), sizeof(KwVertex), b->v.size(), f);
+				else fwrite(b->lodIdx.data(), 4, b->lodIdx.size(), f);
+			}
+			pos += secs[i].size;
+		}
+		else if (secs[i].type == KW_TDAT) {
 			for (auto& t : textures) {
 				fwrite(t.data.data(), 1, t.data.size(), f);
 				pos += t.data.size();
@@ -1001,7 +1031,7 @@ int main(int argc, char** argv)
 	}
 	fclose(f);
 	printf("  wrote %s (%.0f MB: geometry %.0f MB, textures %.0f MB), %zu clusters\n", kpath.c_str(), pos / 1048576.0,
-		(allV.size() * sizeof(KwVertex) + allI.size() * 4) / 1048576.0, tdatSize / 1048576.0, clusters.size());
+		(vCount * sizeof(KwVertex) + iCount * 4) / 1048576.0, tdatSize / 1048576.0, clusters.size());
 
 	// ---- collision .map: opaque clusters inside the playable core, at the LOD that fits the budget
 	float pad = 1024.0f, T = 64.0f;
@@ -1028,13 +1058,15 @@ int main(int argc, char** argv)
 		const KwLod& l = lods[c.firstLod + collLod[ci]];
 		std::vector<float>& P = collPos[ci];
 		P.resize((size_t)c.numVertices * 3);
-		for (uint32_t k = 0; k < c.numVertices; k++) memcpy(&P[k * 3], allV[c.baseVertex + k].pos, 12);
+		const Bucket* B = cbucket[ci];
+		const uint32_t* LI = B->lodIdx.data() + (l.firstIndex - (lods[c.firstLod].firstIndex - B->lods[0].firstIndex));
+		for (uint32_t k = 0; k < c.numVertices; k++) memcpy(&P[k * 3], B->v[k].pos, 12);
 		std::vector<uint32_t>& I = collTri[ci];
 		for (uint32_t t2 = 0; t2 + 2 < l.indexCount; t2 += 3) {
-			const float* a3 = &P[allI[l.firstIndex + t2] * 3], * b3 = &P[allI[l.firstIndex + t2 + 1] * 3], * c3 = &P[allI[l.firstIndex + t2 + 2] * 3];
+			const float* a3 = &P[LI[t2] * 3], * b3 = &P[LI[t2 + 1] * 3], * c3 = &P[LI[t2 + 2] * 3];
 			float ctr[3] = { (a3[0] + b3[0] + c3[0]) / 3, (a3[1] + b3[1] + c3[1]) / 3, (a3[2] + b3[2] + c3[2]) / 3 };
 			if (!inCore(ctr)) continue;
-			I.push_back(allI[l.firstIndex + t2]); I.push_back(allI[l.firstIndex + t2 + 1]); I.push_back(allI[l.firstIndex + t2 + 2]);
+			I.push_back(LI[t2]); I.push_back(LI[t2 + 1]); I.push_back(LI[t2 + 2]);
 		}
 		// weld by position (UV / material seams would stop the simplifier)
 		if (!I.empty()) {

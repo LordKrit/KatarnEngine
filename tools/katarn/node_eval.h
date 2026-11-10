@@ -30,6 +30,8 @@ struct NodeCtx {
 	std::function<std::shared_ptr<BakeImage>(const std::string& file, bool linearize)> loadImage;
 	std::vector<std::string> warnings;
 	const Json* groups = nullptr;
+	bool worldMode = false;          // baking a world (sky) graph: texture coordinates are view directions
+	float cameraRay = 1.0f;          // Light Path "Is Camera Ray"
 	void warn(const std::string& s) { for (auto& w : warnings) if (w == s) return; warnings.push_back(s); }
 };
 
@@ -189,8 +191,20 @@ struct NodeGraph {
 	}
 	bool linked(const Json& nd, const char* id) const { const Json* s = input(nd, id); return s && (*s)["link"].t == Json::ARR; }
 
+	Field dirs()
+	{
+		// equirectangular grid (row 0 = bottom = straight down), directions in Blender world space
+		Field f; f.n = 3; f.d.resize((size_t)ctx->W * ctx->H * 3);
+		for (int y = 0; y < ctx->H; y++) for (int x = 0; x < ctx->W; x++) {
+			size_t i = (size_t)y * ctx->W + x;
+			float el = ((y + 0.5f) / ctx->H - 0.5f) * 3.14159265f, phi = (0.5f - (x + 0.5f) / ctx->W) * 2 * 3.14159265f;
+			f.d[i * 3] = cosf(el) * cosf(phi); f.d[i * 3 + 1] = cosf(el) * sinf(phi); f.d[i * 3 + 2] = sinf(el);
+		}
+		return f;
+	}
 	Field uv()
 	{
+		if (ctx->worldMode) return dirs();
 		Field f; f.n = 3; f.d.resize((size_t)ctx->W * ctx->H * 3);
 		for (int y = 0; y < ctx->H; y++) for (int x = 0; x < ctx->W; x++) {
 			size_t i = (size_t)y * ctx->W + x;
@@ -270,7 +284,25 @@ Field NodeGraph::eval(const std::string& name, const std::string& sock)
 	}
 	if (type == "VALUE") { for (auto& o : n["outputs"].a) if (o["value"].t == Json::NUM) return Field::C1((float)o["value"].n); return Field::C1(0); }
 	if (type == "RGB") { for (auto& o : n["outputs"].a) if (o["value"].t == Json::ARR) return Field::C3((float)o["value"][(size_t)0].n, (float)o["value"][1].n, (float)o["value"][2].n); return Field::C3(1, 1, 1); }
+	if (type == "NEW_GEOMETRY") {
+		if (sock == "Backfacing") return Field::C1(0);
+		if (sock == "Pointiness" || sock == "Random Per Island") return Field::C1(0.5f);
+		if (sock == "Position") return uv();
+		return C.worldMode ? dirs() : Field::C3(0, 0, 1);
+	}
+	if (type == "TEX_ENVIRONMENT") {
+		std::string file = prop("image", "");
+		auto img = file.empty() ? nullptr : C.loadImage(file, prop("colorspace", "sRGB") == std::string("sRGB"));
+		if (!img) return Field::C3(0.5f, 0.5f, 0.5f);
+		Field d = linked(n, "Vector") ? in(n, "Vector", 3) : (C.worldMode ? dirs() : uv());
+		Field uvf = Map(C, 3, { &d }, [&](size_t i, float* o) {
+			float x = d.at(i, 0), y = d.at(i, 1), z = d.at(i, 2), l = sqrtf(x * x + y * y + z * z); if (l < 1e-8f) l = 1;
+			o[0] = -atan2f(y / l, x / l) / (2 * 3.14159265f) + 0.5f; o[1] = atan2f(z / l, hypotf(x / l, y / l)) / 3.14159265f + 0.5f; o[2] = 0;
+		});
+		return SampleImage(C, *img, uvf, "REPEAT", false, false);
+	}
 	if (type == "TEX_COORD" || type == "UVMAP") {
+		if (C.worldMode) return dirs();
 		if (sock == "UV" || sock == "Generated" || sock == "Object" || sock == "Window" || sock == "Reflection" || sock == "Camera") return uv();
 		if (sock == "Normal") return Field::C3(0, 0, 1);
 		return uv();
@@ -553,7 +585,7 @@ Field NodeGraph::eval(const std::string& name, const std::string& sock)
 	if (type == "AMBIENT_OCCLUSION") return sock == "AO" ? Field::C1(1) : in(n, "Color", 3);
 	if (type == "FRESNEL") return Field::C1(0.08f);
 	if (type == "LAYER_WEIGHT") return Field::C1(sock == "Fresnel" ? 0.08f : 0.1f);
-	if (type == "LIGHT_PATH") return Field::C1(sock == "Is Camera Ray" ? 1.0f : 0.0f);
+	if (type == "LIGHT_PATH") return Field::C1(sock == "Is Camera Ray" ? C.cameraRay : 0.0f);
 	if (type == "OBJECT_INFO") return sock == "Random" ? Field::C1(0.5f) : sock == "Color" ? Field::C3(1, 1, 1) : Field::C1(0);
 	if (type == "TEX_CHECKER") {
 		Field v = linked(n, "Vector") ? in(n, "Vector", 3) : uv(), a = in(n, "Color1", 3), b = in(n, "Color2", 3), sc = in(n, "Scale", 1);
@@ -607,7 +639,12 @@ static Surface EvalShader(NodeGraph& g, const std::string& name, int depth = 0)
 		if (g.linked(n, "Normal")) s.normal = g.in(n, "Normal", 3);
 		return s;
 	}
-	if (type == "BSDF_GLASS" || type == "BSDF_REFRACTION" || type == "BSDF_TRANSLUCENT") {
+	if (type == "BSDF_TRANSLUCENT") {   // foliage: light through leaves; shaded as a diffuse surface here
+		s.base = g.in(n, "Color", 3);
+		if (g.linked(n, "Normal")) s.normal = g.in(n, "Normal", 3);
+		return s;
+	}
+	if (type == "BSDF_GLASS" || type == "BSDF_REFRACTION") {
 		s.base = g.in(n, "Color", 3); s.rough = Field::C1(0.05f); s.alpha = Field::C1(0.3f); s.transparentBlend = true;
 		return s;
 	}

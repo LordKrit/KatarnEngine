@@ -167,7 +167,8 @@ static void ParseEnv(const std::string& text, WorldEnv& e, int& envTex)
 		else if (k == "fogColor" && n >= 4) { e.fogColor[0] = a; e.fogColor[1] = b; e.fogColor[2] = c; }
 		else if (k == "exposureEV") e.exposureEV = a;
 		else if (k == "envTex") envTex = (int)a;
-		else if (k == "envStrength") e.envStrength = a;
+		else if (k == "envStrength") { e.envStrength = a; e.envLight = a; }
+		else if (k == "envLight") e.envLight = a;
 		else if (k.size() == 3 && k[0] == 's' && k[1] == 'h' && k[2] >= '0' && k[2] <= '8' && n >= 4) {
 			int i = k[2] - '0';
 			e.sh[i][0] = a; e.sh[i][1] = b; e.sh[i][2] = c;

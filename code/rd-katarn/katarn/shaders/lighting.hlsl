@@ -197,7 +197,7 @@ void CS(uint3 id : SV_DispatchThreadID)
 		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
 		float3 b = cross(R, t);
 		float cone = rough * rough * 1.2;
-		if (indices2.x) spec = SkyRadianceLod(R, rough * (SkyMips() - 1) * 0.8);
+		if (indices2.x) spec = SkyRadianceLod(R, rough * (SkyMips() - 1) * 0.8) * asfloat(indices2.z);
 		else {
 			float3 acc = SkyRadiance(R);
 			[unroll] for (int k = 0; k < 6; k++) {
