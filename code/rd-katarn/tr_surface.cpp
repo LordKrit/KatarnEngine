@@ -1295,11 +1295,6 @@ static void RB_SurfaceSaberGlow()
 			for (auto& m : map) if (strstr(n, m.k)) { rgba[0] = m.c[0]; rgba[1] = m.c[1]; rgba[2] = m.c[2]; break; }
 		}
 		if (rgba[0] | rgba[1] | rgba[2]) kt::R_AddSaberLight(e->origin, e->axis[0], e->saberLength, rgba);
-		if (!kt::SaberDraw()) {
-			// the game's blade (glow + core line) stays; Katarn adds a solid white-hot core inside it, as rend2's glow
-			// pass makes the core read (the core line itself is thinner than a pixel at most distances)
-			kt::R_AddSaberBlade(e->origin, e->axis[0], e->saberLength + e->radius * 0.3f, e->radius, rgba, 0, e->shaderRGBA, true);
-		}
 		if (kt::SaberDraw()) {
 			// KatarnEngine draws the blade itself (core + glow, HDR); the glow sprites are skipped
 			const shaderStage_t* st = &tess.xstages[0];

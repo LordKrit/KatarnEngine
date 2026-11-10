@@ -1005,7 +1005,7 @@ static void RenderWorldView()
 	{
 		uint32_t k[8] = { R.hdr.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, R.ao.srv,
 			(ao ? 1u : 0u) | (shadows ? 2u : 0u) | (kt_volumetric->integer ? 4u : 0u), (uint32_t)Q_max(0, kt_debugView->integer),
-			(hd && kt_ssr->integer && R.hdrPrevValid) ? R.hdrPrev.srv : 0u };
+			(kt_ssr->integer && R.hdrPrevValid) ? R.hdrPrev.srv : 0u };
 		Dispatch(cl, R.csLighting, k, 8, gx, gy);
 	}
 
@@ -1058,7 +1058,7 @@ static void RenderWorldView()
 			}
 	}
 	// keep this frame's lit scene for next frame's screen-space reflections
-	if (hd && kt_ssr->integer) {
+	if (kt_ssr->integer) {
 		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_SOURCE);
 		Transition(cl, R.hdrPrev, D3D12_RESOURCE_STATE_COPY_DEST);
 		cl->CopyResource(R.hdrPrev.res, R.hdr.res);

@@ -1849,8 +1849,9 @@ static image_t* KT_StageImage(const textureBundle_t* b)
 static uint32_t KT_TryDeferred(shaderCommands_t* input)
 {
 	static cvar_t* kt_legacyDeferredVar = nullptr;
-	if (!kt_legacyDeferredVar) kt_legacyDeferredVar = ri.Cvar_Get("kt_legacyDeferred2", "2", CVAR_ARCHIVE);
-	// 1: HD worlds; 2 (default): also characters and models in old BSP maps, lit from the map's light grid like rend2
+	if (!kt_legacyDeferredVar) kt_legacyDeferredVar = ri.Cvar_Get("kt_legacyDeferred3", "3", CVAR_ARCHIVE);
+	// 1: HD worlds; 2: also characters and models in old BSP maps (light grid, like rend2); 3 (default): also the BSP
+	// map surfaces (lightmaps / vertex light as baked light: per-pixel dynamic lights, AO, normal maps, SSR)
 	if (!kt_legacyDeferredVar->integer || backEnd.projection2D || !kt::R_ViewIsWorld()) return 0;
 	const bool bspMode = !kt::World_Active();
 	if (bspMode && kt_legacyDeferredVar->integer < 2) return 0;
@@ -1858,13 +1859,27 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	if (sh->sort > SS_OPAQUE || sh->sky || sh->polygonOffset || sh == tr.distortionShader || g_bRenderGlowingObjects) return 0;
 	const trRefEntity_t* ent = backEnd.currentEntity;
 	bool world = !ent || ent == &tr.worldEntity;
-	if (bspMode && world) return 0;   // BSP surfaces keep their lightmaps in the forward path
+	if (bspMode && world && kt_legacyDeferredVar->integer < 3) return 0;
 	if (!world) {
 		const int rf = ent->e.renderfx;
 		if (rf & (RF_DISINTEGRATE1 | RF_DISINTEGRATE2 | RF_DISTORTION | RF_FORCE_ENT_ALPHA | RF_DEPTHHACK | RF_NODEPTH)) return 0;
 		if ((rf & RF_ALPHA_FADE) && ent->e.shaderRGBA[3] < 255) return 0;
 	}
 	shaderStage_t* st = &input->xstages[0];
+	const shaderStage_t* lmStage = nullptr;        // the lightmap stage taken with the base stage (BSP map surfaces)
+	uint32_t bits = st->stateBits;
+	uint32_t taken = 1;
+	if (st->active && st->bundle[0].isLightmap) {
+		// Quake 3 order: $lightmap first, then the texture as a filter over it
+		if (!(bspMode && world) || sh->numUnfoggedPasses < 2) return 0;
+		shaderStage_t* t = &input->xstages[1];
+		const uint32_t tb = t->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
+		if (!t->active || t->bundle[0].isLightmap || !(tb == (GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO) || tb == (GLS_SRCBLEND_ZERO | GLS_DSTBLEND_SRC_COLOR))) return 0;
+		lmStage = st;
+		bits = (st->stateBits & ~GLS_ATEST_BITS) | (t->stateBits & GLS_ATEST_BITS);
+		st = t;
+		taken = 3;
+	}
 	if (!st->active || st->bundle[0].isLightmap || (st->ss && st->ss->surfaceSpriteType)) return 0;
 	// self-lit content stays forward, as the old renderer drew it: glow stages (saber blades, lights) and models whose
 	// colour is not lit (rgbGen identity / const / entity / vertex on an entity = full bright)
@@ -1872,7 +1887,6 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	if (!world && st->rgbGen != CGEN_LIGHTING_DIFFUSE && st->rgbGen != CGEN_LIGHTING_DIFFUSE_ENTITY) return 0;
 	image_t* albedo = KT_StageImage(&st->bundle[0]);
 	if (!albedo) return 0;
-	const uint32_t bits = st->stateBits;
 	const uint32_t blend = bits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
 	if (blend && blend != (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ZERO)) return 0;
 	if (!(bits & GLS_DEPTHMASK_TRUE) || (bits & (GLS_DEPTHFUNC_EQUAL | GLS_DEPTHTEST_DISABLE))) return 0;
@@ -1909,27 +1923,33 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 
 	// stages taken over: the base stage and a lightmap filter stage after it; everything else (glows, environment
 	// shine, detail) is still drawn forward on top with the same matrix
-	uint32_t taken = 1;
-	for (int s = 1; s < sh->numUnfoggedPasses && s < 32; s++) {
+	for (int s = (taken == 3 ? 2 : 1); s < sh->numUnfoggedPasses && s < 32; s++) {
 		const shaderStage_t* x = &input->xstages[s];
 		if (!x->active) break;
 		const uint32_t xb = x->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
-		if (x->bundle[0].isLightmap && (xb == (GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO) || xb == (GLS_SRCBLEND_ZERO | GLS_DSTBLEND_SRC_COLOR)))
+		if (x->bundle[0].isLightmap && (xb == (GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO) || xb == (GLS_SRCBLEND_ZERO | GLS_DSTBLEND_SRC_COLOR))) {
 			taken |= 1u << s;
+			if (!lmStage) lmStage = x;
+		}
 		// environment-mapped shine (a fake reflection in the old lighting): Katarn's own specular replaces it
 		else if (x->bundle[0].tcGen == TCGEN_ENVIRONMENT_MAPPED && xb == (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE) || (x->bundle[0].tcGen == TCGEN_ENVIRONMENT_MAPPED && xb == (GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE)))
 			taken |= 1u << s;
 	}
 
+	if (bspMode && world) {
+		// BSP map surface: its lightmap, else its vertex light, else full bright, becomes the baked light
+		image_t* lm = lmStage ? KT_StageImage(const_cast<textureBundle_t*>(&lmStage->bundle[0])) : nullptr;
+		if (lm) { flags = (flags & ~2u) | 4; d.lightmapTex = lm->texnum; d.lmuv = input->texCoords[0][1]; d.lmuvStride = sizeof(input->texCoords[0]); }
+		else flags = (flags & ~2u) | 8;
+	}
 	ComputeTexCoords(st);
-	if (flags & 2) {
+	if (flags & (2 | 8)) {
 		ComputeColors(st, static_cast<alphaGen_t>(0), static_cast<colorGen_t>(0));
 		d.colors = reinterpret_cast<const uint8_t*>(input->svars.colors);
 	}
 	d.xyz = input->xyz[0]; d.xyzStride = sizeof(input->xyz[0]);
 	d.normal = input->normal[0]; d.normalStride = sizeof(input->normal[0]);
 	d.uv = input->svars.texcoords[0][0];
-	d.lmuv = nullptr;
 	d.indexes = reinterpret_cast<const uint32_t*>(input->indexes);
 	d.numVerts = input->numVertexes;
 	d.numIndexes = input->numIndexes;
@@ -1956,7 +1976,7 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	else if (sh->cullType == CT_BACK_SIDED) d.cull = backEnd.viewParms.isMirror ? 1 : 2;
 	else d.cull = backEnd.viewParms.isMirror ? 2 : 1;
 	d.castShadow = world || !(ent->e.renderfx & RF_NOSHADOW);
-	if (bspMode && ent) {
+	if (bspMode && !world) {
 		// light grid (as rend2 / the old renderer light models): ambient + one directed light, in world space
 		for (int k = 0; k < 3; k++) {
 			d.gridAmbient[k] = ent->ambientLight[k];

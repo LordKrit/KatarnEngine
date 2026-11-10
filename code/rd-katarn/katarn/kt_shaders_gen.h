@@ -832,6 +832,7 @@ R"KTSRC(
 	float3 env = EnvBRDFApprox(f0, rough, NoV);
 	float specOcc = saturate(pow(NoV + ao, exp2(-16 * rough - 1)) - 1 + ao);
 	float3 spec = 0;
+	float ssrHit = 0;
 	{
 		// rough reflections: a small cone of sky samples around R
 		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
@@ -849,7 +850,7 @@ R"KTSRC(
 		// below the horizon the "sky" is the ground: darken reflections that point down
 		spec *= saturate(R.z * 4 + 0.6);
 		// screen-space reflections from last frame's lit scene
-		if (ssrSrv && rough < 0.45 && !baked && !plainLegacy) {
+		if (ssrSrv && rough < 0.45 && !plainLegacy) {
 			float3 O = P + N * (2.0 + viewZ * 0.002);
 			float stepLen = 6.0 + viewZ * 0.01;
 			float jit = frac(52.9829189 * frac(dot(float2(px), float2(0.06711056, 0.00583715)) + indices2.w * 0.618));
@@ -878,12 +879,14 @@ R"KTSRC(
 				float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, (viewport.xy + huv * viewport.zw) * invTargetSize.xy, 0).rgb;
 				sc = min(sc, 64.0);                              // no fireflies from the sun disc
 				spec = lerp(spec, sc / max(skyParams.z, 1e-3), hit);
+				ssrHit = hit;
 			}
 		}
 	}
 	if (baked) {
 		Lo += g2 * ao;
-		Lo += spec * env * specOcc * 0.35 * skyParams.w;   // (old BSP maps: their light grid / lightmaps carry it)
+		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only what SSR finds on screen
+		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, ssrHit);
 	}
 	else {
 		Lo += SkyAmbient(N) * diff * ao * skyParams.z;
