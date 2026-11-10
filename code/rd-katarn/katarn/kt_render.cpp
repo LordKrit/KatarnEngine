@@ -16,6 +16,7 @@
 #include <math.h>
 #include <unordered_map>
 #include <vector>
+#include <algorithm>
 #include <string>
 
 namespace kt {
@@ -29,6 +30,7 @@ static cvar_t* kt_fxaa, * kt_glowBoost, * kt_debugView, * kt_shaderDir, * kt_leg
 static cvar_t* kt_tonemap = nullptr;
 static cvar_t* kt_fogScale = nullptr;
 static cvar_t* kt_dynGlow, * kt_contactShadows, * kt_lightShadows;
+static cvar_t* kt_probes = nullptr, * kt_probeScale = nullptr, * kt_parallax = nullptr;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
 static void RegisterCvars()
@@ -62,7 +64,10 @@ static void RegisterCvars()
 	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
 	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
 	kt_saberGlow = ri.Cvar_Get("kt_saberGlowScale", "1", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene (1 = as authored, like rend2)
-	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
+	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);
+	kt_probes = ri.Cvar_Get("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
+	kt_probeScale = ri.Cvar_Get("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
+	kt_parallax = ri.Cvar_Get("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)   // 1: Katarn draws its own procedural blades instead of the game's
 
 	// settings saved by older builds (tuning experiments) are put back to the current defaults once
 	cvar_t* ver = ri.Cvar_Get("kt_configVersion", "0", CVAR_ARCHIVE);
@@ -124,6 +129,7 @@ struct ViewConstants {
 	float ambientSH[9][4];
 	float extraParams[4];      // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 	float viewProjNoJitter[16];   // this frame's view-projection without the TAA jitter
+	uint32_t probeParams[4];      // x reflection probe buffer, y probe count, z strength (float)
 };
 
 struct LVert { float pos[3]; float normal[3]; float uv[2]; float lmuv[2]; uint32_t color; };
@@ -177,7 +183,16 @@ static struct RState {
 	bool firstFrame = true;
 	float cascadeTexel[4] = {};
 	int lastSpeeds = 0;
+	// reflection probes
+	struct Probe { float origin[3]; float radius; int cluster; Texture cube; uint32_t mipSrv[8]; uint8_t faces; bool valid; };
+	std::vector<Probe> probes;
+	uint32_t probeSrv[kFrames] = {};
+	ID3D12PipelineState* csProbe = nullptr;
+	bool capture = false;            // this view is a probe capture
+	int capProbe = 0, capFace = 0;
+	float capSavedVP[16] = {};
 } R;
+static constexpr uint32_t kProbeSize = 128, kProbeMips = 8, kMaxProbes = 64;
 
 static std::string ShaderSource(const char* file)
 {
@@ -204,6 +219,7 @@ static std::string ShaderSource(const char* file)
 		{ "legacy", kt_src_legacy_parts }, { "present", kt_src_present_parts }, { "world", kt_src_world_parts },
 		{ "legacy_gbuffer", kt_src_legacy_gbuffer_parts }, { "sky", kt_src_sky_parts }, { "lighting", kt_src_lighting_parts },
 		{ "ssao", kt_src_ssao_parts }, { "post", kt_src_post_parts }, { "saber", kt_src_saber_parts },
+		{ "probes", kt_src_probes_parts },
 	};
 	for (auto& e : table) if (!strcmp(e.name, file)) { std::string s; for (int i = 0; e.parts[i]; i++) s += e.parts[i]; return s; }
 	return std::string();
@@ -400,6 +416,11 @@ static bool CreatePipelines()
 	R.csExposure = CreateComputePSO(R_Shader("post", "ExposureCS", "cs_5_1"), "exposure");
 	R.csBloomDown = CreateComputePSO(R_Shader("post", "BloomDownCS", "cs_5_1"), "bloom down");
 	R.csBloomUp = CreateComputePSO(R_Shader("post", "BloomUpCS", "cs_5_1"), "bloom up");
+	{
+		Shader ps = R_Shader("probes", "FilterCS", "cs_5_1");   // optional: without it there are no probes
+		if (ps.ok) R.csProbe = CreateComputePSO(ps, "probe filter");
+		if (ps.blob) ps.blob->Release();
+	}
 	return R.presentPSO != nullptr;
 }
 
@@ -445,6 +466,9 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 	return ok;
 }
 
+static void ProbesDestroy();
+static uint32_t ProbeList(const float* org);
+
 // ------------------------------------------------------------------------------------------------ init
 void InstallCrashHandler();
 bool R_Init(void* hwnd, int width, int height)
@@ -474,6 +498,7 @@ bool R_Init(void* hwnd, int width, int height)
 	}
 	CreateBuffer(R.sh, 256, true, "sky sh");
 	for (int i = 0; i < kFrames; i++) R.lightSrv[i] = AllocDescriptor();
+	for (int i = 0; i < kFrames; i++) R.probeSrv[i] = AllocDescriptor();
 	R.ready = true;
 	R.firstFrame = true;
 	GL_ResetState();
@@ -489,12 +514,13 @@ void R_Shutdown()
 	World_Shutdown();
 	GL_ShutdownTextures();
 	DestroyTargets();
+	ProbesDestroy();
 	DestroyBuffer(R.exposure);
 	DestroyBuffer(R.sh);
 	for (auto& kv : R.psos) if (kv.second) kv.second->Release();
 	R.psos.clear();
 	ID3D12PipelineState* ps[] = { R.presentPSO, R.tonemapPSO, R.fxaaPSO, R.lgPSO[0], R.lgPSO[1], R.lgPSO[2], R.lgShadowPSO, R.lgShadowAlphaPSO,
-		R.csSkyLut, R.csSkySh, R.csLighting, R.csAo, R.csAoBlur, R.csHist, R.csExposure, R.csBloomDown, R.csBloomUp };
+		R.csSkyLut, R.csSkySh, R.csLighting, R.csAo, R.csAoBlur, R.csHist, R.csExposure, R.csBloomDown, R.csBloomUp, R.csProbe };
 	for (auto* p : ps) if (p) p->Release();
 	Shader* sh[] = { &R.legacyVS, &R.legacyPS, &R.fsVS, &R.presentPS, &R.tonemapPS, &R.fxaaPS, &R.lgVS, &R.lgPS, &R.lgShadowPS };
 	for (auto* s : sh) if (s->blob) s->blob->Release();
@@ -671,6 +697,11 @@ void R_BeginView(const ViewDesc& v)
 	FlushStream(0);
 	R.view = v;
 	R.inView = true;
+	R.capture = (v.rdflags & RDF_KT_PROBE) != 0 && v.world;
+	if (R.capture) {
+		R.capProbe = (v.rdflags >> 20) & 63; R.capFace = (v.rdflags >> 26) & 7;
+		memcpy(R.capSavedVP, R.viewProj, 64);        // a capture leaves the camera history (SSR reprojection) alone
+	}
 	R.viewWorld = v.world;
 	R.reversedZ = true;
 	// reversed-Z infinite perspective in GL eye space
@@ -721,7 +752,13 @@ void R_BeginView(const ViewDesc& v)
 	c.extraParams[1] = kt_tonemap->integer ? 1.0f : 0.0f;
 	// sky portal maps: the portal view is drawn first; the main view keeps it where it drew nothing (its sky)
 	if (v.skyPortal) R.portalThisFrame = true;
-	c.extraParams[2] = (!v.skyPortal && R.portalThisFrame) ? 1.0f : 0.0f;
+	c.extraParams[2] = (!v.skyPortal && R.portalThisFrame && !R.capture) ? 1.0f : 0.0f;
+	if (v.world && !R.capture && kt_probes->integer) {
+		c.probeParams[0] = R.probeSrv[g.frameIndex];
+		c.probeParams[1] = ProbeList(v.origin);
+		float ps = Q_max(0.0f, kt_probeScale->value);
+		memcpy(&c.probeParams[2], &ps, 4);
+	}
 	if (!World_Active()) c.postParams[2] = 1.0f;   // legacy maps: fixed exposure (their content is display-referred)
 
 	// sun cascades
@@ -838,6 +875,12 @@ void R_AppendDeferred(const DeferredDraw& d)
 		float grid[12] = { d.gridAmbient[0], d.gridAmbient[1], d.gridAmbient[2], 0, d.gridDirected[0], d.gridDirected[1], d.gridDirected[2], 0,
 			d.gridDir[0], d.gridDir[1], d.gridDir[2], 0 };
 		memcpy(c + 176, grid, 48);
+		GLTexture* tdx = d.deluxeTex ? R_GLTexture(d.deluxeTex, false) : nullptr;
+		R_ResolveTexture(tdx);
+		float px = (kt_parallax && kt_parallax->integer && d.normalTex) ? d.parallax : 0.0f;
+		uint32_t ex[4] = { R_TextureSrv(tdx, false), 0, 0, 0 };
+		memcpy(&ex[1], &px, 4);
+		memcpy(c + 224, ex, 16);
 	}
 	DeferredRec r;
 	r.vb = vb.gpu; r.ib = ib.gpu; r.cb = cb.gpu;
@@ -890,6 +933,7 @@ static void FullscreenPass(ID3D12GraphicsCommandList* cl, ID3D12PipelineState* p
 	cl->DrawInstanced(3, 1, 0, 0);
 }
 
+static void ProbeCaptureFace(ID3D12GraphicsCommandList* cl);
 static void RenderWorldView()
 {
 	ID3D12GraphicsCommandList* cl = R.cl;
@@ -1031,7 +1075,7 @@ static void RenderWorldView()
 	{
 		uint32_t k[8] = { R.hdr.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, R.ao.srv,
 			(ao ? 1u : 0u) | (shadows ? 2u : 0u) | (kt_volumetric->integer ? 4u : 0u) | (kt_contactShadows->integer ? 8u : 0u) | (kt_lightShadows->integer ? 16u : 0u), (uint32_t)Q_max(0, kt_debugView->integer),
-			(kt_ssr->integer && R.hdrPrevValid) ? R.hdrPrev.srv : 0u };
+			(kt_ssr->integer && R.hdrPrevValid && !R.capture) ? R.hdrPrev.srv : 0u };
 		Dispatch(cl, R.csLighting, k, 8, gx, gy);
 	}
 
@@ -1084,6 +1128,12 @@ static void RenderWorldView()
 			}
 	}
 	// keep this frame's lit scene for next frame's screen-space reflections
+	if (R.capture) {
+		// probe capture: the lit HDR view goes into the probe's cube face; no camera effects
+		ProbeCaptureFace(cl);
+		cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.defaultCB);
+		return;
+	}
 	if (kt_ssr->integer) {
 		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_SOURCE);
 		Transition(cl, R.hdrPrev, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1225,6 +1275,7 @@ void R_EndView()
 		cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
 		FlushStream(0);
 	}
+	if (R.capture) { memcpy(R.viewProj, R.capSavedVP, 64); R.capture = false; }
 	R.stream.clear();
 	R.deferred.clear();
 	R.inView = false;
@@ -1282,6 +1333,307 @@ void R_GfxInfo()
 	ri.Printf(PRINT_ALL, "KatarnEngine (Direct3D 12): %s, %u MB VRAM\n", g.adapterName.c_str(), (unsigned)(g.vram >> 20));
 	ri.Printf(PRINT_ALL, "  %ux%u, vsync %s, shadows %ux%u x4, HD world: %s\n", R.w, R.h, g.cfg.vsync ? "on" : "off", R.shadowRes, R.shadowRes,
 		World_Active() ? "loaded" : "none");
+}
+
+// ------------------------------------------------------------------------------------------------ reflection probes
+// rend2-style cubemaps for old maps and HD worlds. Positions come from the map's entities (misc_cubemap when the map
+// has them, else where players and NPCs go: spawn points, waypoints, items). The renderer captures them itself once
+// the game draws the world: 128x128 views queued at the start of a frame (all six faces per frame on BSP maps, two
+// on HD worlds), each lit like the game view, copied into the probe's cube and filtered into a mip chain whose
+// levels are rougher reflections.
+
+// the BSP leaf cluster of a point (-1 = in solid / outside the map)
+static int PointCluster(const float* p)
+{
+	if (!tr.world || !tr.world->nodes) return -1;
+	mnode_t* n = tr.world->nodes;
+	while (n->contents == -1) {
+		const cplane_t* pl = n->plane;
+		n = (DotProduct(p, pl->normal) - pl->dist > 0) ? n->children[0] : n->children[1];
+	}
+	return n->cluster;
+}
+
+static struct ProbeFront {
+	std::vector<RState::Probe> list;   // positions (textures live in R.probes)
+	std::vector<uint8_t> done;
+	int scenes = 0, lastSceneFrame = -100, time = 0;
+	float viewOrg[3] = {};
+	int current = -1, face = 0;
+	bool logged = false;
+} PF;
+
+static void ProbesDestroy()
+{
+	for (auto& p : R.probes) {
+		if (p.cube.res) DestroyTexture(p.cube);
+		for (uint32_t& s : p.mipSrv) if (s) { FreeDescriptor(s); s = 0; }
+	}
+	R.probes.clear();
+}
+
+// the back end's probes follow the front end's list (a new map, or the renderer restarted)
+static void ProbesSync()
+{
+	ProbesDestroy();
+	R.probes = PF.list;
+	for (auto& p : R.probes) { p.cube = Texture(); memset(p.mipSrv, 0, sizeof(p.mipSrv)); p.faces = 0; p.valid = false; }
+	PF.done.assign(PF.list.size(), 0);
+	PF.current = -1; PF.face = 0;
+}
+
+void Probes_SetEntities(const char* text)
+{
+	PF.list.clear();
+	PF.scenes = 0; PF.lastSceneFrame = -100; PF.logged = false;
+	struct Cand { float o[3]; int pri; };
+	std::vector<Cand> cands;
+	const char* p = text ? text : "";
+	auto token = [&](std::string& out) -> bool {
+		while (*p && (unsigned char)*p <= ' ') p++;
+		if (!*p) return false;
+		if (*p == '{' || *p == '}') { out.assign(p, 1); p++; return true; }
+		if (*p == '"') {
+			const char* s0 = ++p;
+			while (*p && *p != '"') p++;
+			out.assign(s0, p - s0);
+			if (*p) p++;
+			return true;
+		}
+		const char* s0 = p;
+		while (*p && (unsigned char)*p > ' ') p++;
+		out.assign(s0, p - s0);
+		return true;
+	};
+	std::string t, key, val;
+	while (token(t)) {
+		if (t != "{") continue;
+		std::string cls, origin;
+		bool brush = false;
+		while (token(key) && key != "}") {
+			if (!token(val)) break;
+			if (!Q_stricmp(key.c_str(), "classname")) cls = val;
+			else if (!Q_stricmp(key.c_str(), "origin")) origin = val;
+			else if (!Q_stricmp(key.c_str(), "model") && val[0] == '*') brush = true;
+		}
+		if (origin.empty() || brush || cls.empty()) continue;
+		Cand c;
+		if (sscanf(origin.c_str(), "%f %f %f", &c.o[0], &c.o[1], &c.o[2]) != 3) continue;
+		const char* n = cls.c_str();
+		if (!Q_stricmp(n, "misc_cubemap")) c.pri = 0;
+		else if (!Q_stricmpn(n, "info_player", 11)) c.pri = 1;
+		else if (!Q_stricmpn(n, "NPC_", 4) || !Q_stricmp(n, "waypoint") || !Q_stricmpn(n, "waypoint_", 9) || !Q_stricmpn(n, "item_", 5)
+			|| !Q_stricmpn(n, "weapon_", 7) || !Q_stricmpn(n, "ammo_", 5)) c.pri = 2;
+		else if (!Q_stricmp(n, "light") || !Q_stricmpn(n, "misc_", 5) || !Q_stricmpn(n, "fx_", 3)) c.pri = 3;
+		else continue;   // targets, triggers, path corners, info_null...: often outside the playable space
+		cands.push_back(c);
+	}
+	bool authored = false;
+	for (auto& c : cands) if (c.pri == 0) authored = true;
+	std::stable_sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.pri < b.pri; });
+	// usable spots: in the open (a valid cluster), about eye height above what stands on the ground
+	struct Spot { float o[3]; int pri, cluster; };
+	std::vector<Spot> pool;
+	for (auto& c : cands) {
+		if (authored && c.pri != 0) continue;
+		Spot s = { { c.o[0], c.o[1], c.o[2] }, c.pri, -1 };
+		if (c.pri) s.o[2] += 40;
+		s.cluster = PointCluster(s.o);
+		if (s.cluster < 0 && c.pri) { s.o[2] -= 40; s.cluster = PointCluster(s.o); }
+		if (s.cluster < 0 && c.pri) continue;
+		float minSpace = c.pri ? 384.0f : 64.0f;
+		bool close = false;
+		for (auto& q : pool) {
+			float d[3] = { q.o[0] - s.o[0], q.o[1] - s.o[1], q.o[2] - s.o[2] };
+			if (Dot3(d, d) < minSpace * minSpace) { close = true; break; }
+		}
+		if (!close) pool.push_back(s);
+	}
+	// at most kMaxProbes: player starts first, then the spot farthest from those already chosen (even coverage)
+	std::vector<Spot> chosen;
+	std::vector<float> dmin(pool.size(), 1e30f);
+	std::vector<uint8_t> used(pool.size(), 0);
+	auto take = [&](size_t i) {
+		used[i] = 1; chosen.push_back(pool[i]);
+		for (size_t k = 0; k < pool.size(); k++) {
+			float d[3] = { pool[k].o[0] - pool[i].o[0], pool[k].o[1] - pool[i].o[1], pool[k].o[2] - pool[i].o[2] };
+			dmin[k] = Q_min(dmin[k], Dot3(d, d));
+		}
+	};
+	for (size_t i = 0; i < pool.size() && chosen.size() < kMaxProbes; i++) if (pool[i].pri <= 1) take(i);
+	while (chosen.size() < kMaxProbes) {
+		size_t best = (size_t)-1; float bd = -1;
+		for (size_t i = 0; i < pool.size(); i++) if (!used[i] && dmin[i] > bd) { bd = dmin[i]; best = i; }
+		if (best == (size_t)-1) break;
+		take(best);
+	}
+	for (size_t i = 0; i < chosen.size(); i++) {
+		RState::Probe pr = {};
+		pr.origin[0] = chosen[i].o[0]; pr.origin[1] = chosen[i].o[1]; pr.origin[2] = chosen[i].o[2];
+		pr.cluster = chosen[i].cluster;
+		// parallax sphere: about the distance to the next probe (the size of the space it stands in)
+		float nd = 1e30f;
+		for (size_t k = 0; k < chosen.size(); k++) if (k != i) {
+			float d[3] = { chosen[k].o[0] - pr.origin[0], chosen[k].o[1] - pr.origin[1], chosen[k].o[2] - pr.origin[2] };
+			nd = Q_min(nd, sqrtf(Dot3(d, d)));
+		}
+		pr.radius = nd > 1e29f ? 1024.0f : Q_max(512.0f, Q_min(1536.0f, nd));
+		PF.list.push_back(pr);
+	}
+	ProbesSync();
+	ri.Printf(PRINT_DEVELOPER, "KatarnEngine: %d reflection probes (%s)\n", (int)PF.list.size(), authored ? "misc_cubemap" : "from entities");
+}
+
+void Probes_NoteScene(const void* refdef)
+{
+	const refdef_t* fd = (const refdef_t*)refdef;
+	if (!fd || (fd->rdflags & (RDF_NOWORLDMODEL | RDF_SKYBOXPORTAL | RDF_KT_PROBE))) return;
+	PF.scenes++;
+	PF.lastSceneFrame = tr.frameCount;
+	PF.time = fd->time;
+	VectorCopy(fd->vieworg, PF.viewOrg);
+}
+
+void Probes_BeginFrame()
+{
+	if (!R.ready || !tr.world || PF.list.empty() || !kt_probes || !kt_probes->integer || !R.csProbe) return;
+	if (R.probes.size() != PF.list.size()) ProbesSync();
+	// only once the game is drawing the world (its textures and shaders are in), and only while it keeps doing so
+	if (PF.scenes < 30 || tr.frameCount - PF.lastSceneFrame > 3) return;
+	if ((uint32_t)glConfig.vidWidth < kProbeSize || (uint32_t)glConfig.vidHeight < kProbeSize) return;
+	// cube faces as seen from Quake space: forward, right, up (D3D cube convention with the sample direction
+	// (x, z, y), see lighting.hlsl)
+	static const float face[6][3][3] = {
+		{ { 1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } }, { { -1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } },
+		{ { 0, 0, 1 }, { 1, 0, 0 }, { 0, -1, 0 } }, { { 0, 0, -1 }, { 1, 0, 0 }, { 0, 1, 0 } },
+		{ { 0, 1, 0 }, { 1, 0, 0 }, { 0, 0, 1 } }, { { 0, -1, 0 }, { -1, 0, 0 }, { 0, 0, 1 } } };
+	int faces = World_Active() ? 2 : 6;
+	while (faces-- > 0) {
+		if (PF.current < 0) {
+			// next: the probe nearest the camera
+			float best = 1e30f;
+			for (size_t i = 0; i < PF.list.size(); i++) if (!PF.done[i]) {
+				float d[3] = { PF.list[i].origin[0] - PF.viewOrg[0], PF.list[i].origin[1] - PF.viewOrg[1], PF.list[i].origin[2] - PF.viewOrg[2] };
+				float d2 = Dot3(d, d);
+				if (d2 < best) { best = d2; PF.current = (int)i; }
+			}
+			if (PF.current < 0) {
+				if (!PF.logged) { PF.logged = true; ri.Printf(PRINT_DEVELOPER, "KatarnEngine: reflection probes captured\n"); }
+				return;
+			}
+			PF.face = 0;
+		}
+		refdef_t rd;
+		memset(&rd, 0, sizeof(rd));
+		rd.x = 0; rd.y = 0; rd.width = (int)kProbeSize; rd.height = (int)kProbeSize;
+		rd.fov_x = rd.fov_y = 90.0f;
+		VectorCopy(PF.list[PF.current].origin, rd.vieworg);
+		for (int a = 0; a < 3; a++) {
+			rd.viewaxis[0][a] = face[PF.face][0][a];
+			rd.viewaxis[1][a] = -face[PF.face][1][a];   // Quake axis 1 is left
+			rd.viewaxis[2][a] = face[PF.face][2][a];
+		}
+		rd.time = PF.time;
+		rd.rdflags = RDF_KT_PROBE | (PF.current << 20) | (PF.face << 26);
+		RE_ClearScene();
+		RE_RenderScene(&rd);
+		RE_ClearScene();
+		if (++PF.face == 6) { PF.done[PF.current] = 1; PF.current = -1; }
+	}
+}
+
+// probes for a view: the ones in clusters the camera can see (less light leaking through walls), else all
+static uint32_t ProbeList(const float* org)
+{
+	std::vector<uint32_t> pick;
+	const byte* vis = nullptr;
+	if (tr.world && tr.world->vis) {
+		int cl = PointCluster(org);
+		if (cl >= 0 && cl < tr.world->numClusters) vis = tr.world->vis + cl * tr.world->clusterBytes;
+	}
+	for (int pass = 0; pass < 2 && pick.empty(); pass++)
+		for (uint32_t i = 0; i < R.probes.size(); i++) {
+			const RState::Probe& p = R.probes[i];
+			if (!p.valid) continue;
+			if (!pass && vis && p.cluster >= 0 && !(vis[p.cluster >> 3] & (1 << (p.cluster & 7)))) continue;
+			pick.push_back(i);
+		}
+	if (pick.empty()) return 0;
+	struct G { float pos[3], radius; uint32_t srv, mips, pad[2]; };
+	UploadAlloc a = Upload(pick.size() * sizeof(G), 256);
+	G* gp = (G*)a.cpu;
+	for (size_t k = 0; k < pick.size(); k++) {
+		const RState::Probe& p = R.probes[pick[k]];
+		G e = { { p.origin[0], p.origin[1], p.origin[2] }, p.radius, p.cube.srv, p.cube.mips, { 0, 0 } };
+		gp[k] = e;
+	}
+	D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+	sd.Format = DXGI_FORMAT_R32_TYPELESS;
+	sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	sd.Buffer.FirstElement = a.offset / 4;
+	sd.Buffer.NumElements = (UINT)(pick.size() * sizeof(G) / 4);
+	sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+	g.dev->CreateShaderResourceView(a.res, &sd, CpuHandle(R.probeSrv[g.frameIndex]));
+	return (uint32_t)pick.size();
+}
+
+static void SubresourceBarrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* r, uint32_t mip, uint32_t mips, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b)
+{
+	D3D12_RESOURCE_BARRIER br[6] = {};
+	for (uint32_t f = 0; f < 6; f++) {
+		br[f].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		br[f].Transition.pResource = r;
+		br[f].Transition.Subresource = mip + f * mips;
+		br[f].Transition.StateBefore = a;
+		br[f].Transition.StateAfter = b;
+	}
+	cl->ResourceBarrier(6, br);
+}
+
+static void ProbeCaptureFace(ID3D12GraphicsCommandList* cl)
+{
+	if (R.capProbe < 0 || R.capProbe >= (int)R.probes.size() || R.capFace > 5) return;
+	RState::Probe& p = R.probes[R.capProbe];
+	if (!p.cube.res) {
+		if (!CreateTexture(p.cube, kProbeSize, kProbeSize, kProbeMips, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_CUBE | TEX_UAV, 1, nullptr, "reflection probe"))
+			return;
+		for (uint32_t m = 0; m < kProbeMips; m++) {
+			D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+			sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+			sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+			sd.Texture2DArray.MostDetailedMip = m; sd.Texture2DArray.MipLevels = 1;
+			sd.Texture2DArray.FirstArraySlice = 0; sd.Texture2DArray.ArraySize = 6;
+			p.mipSrv[m] = AllocDescriptor();
+			g.dev->CreateShaderResourceView(p.cube.res, &sd, CpuHandle(p.mipSrv[m]));
+		}
+	}
+	const ViewConstants& c = R.vc;
+	Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	Transition(cl, p.cube, D3D12_RESOURCE_STATE_COPY_DEST);
+	D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+	dst.pResource = p.cube.res; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = (UINT)R.capFace * p.cube.mips;
+	src.pResource = R.hdr.res; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+	D3D12_BOX box = { (UINT)c.viewport[0], (UINT)c.viewport[1], 0, (UINT)c.viewport[0] + kProbeSize, (UINT)c.viewport[1] + kProbeSize, 1 };
+	cl->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+	p.faces |= (uint8_t)(1u << R.capFace);
+	if (p.faces != 63) return;
+
+	// all six faces: filter the mip chain, each level a wider cone of the one above it
+	const D3D12_RESOURCE_STATES rd = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	Transition(cl, p.cube, rd);
+	cl->SetPipelineState(R.csProbe);
+	for (uint32_t m = 1; m < p.cube.mips; m++) {
+		uint32_t size = Q_max(1u, kProbeSize >> m);
+		SubresourceBarrier(cl, p.cube.res, m, p.cube.mips, rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t k[4] = { p.mipSrv[m - 1], p.cube.uav[m], size, m };
+		cl->SetComputeRoot32BitConstants(RP_CONSTANTS, 4, k, 0);
+		cl->Dispatch((size + 7) / 8, (size + 7) / 8, 6);
+		SubresourceBarrier(cl, p.cube.res, m, p.cube.mips, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, rd);
+	}
+	Transition(cl, p.cube, rd | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	p.valid = true;
 }
 
 } // namespace kt

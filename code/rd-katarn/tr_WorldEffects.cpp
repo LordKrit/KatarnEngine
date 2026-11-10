@@ -45,6 +45,7 @@ extern	cvar_t* g_Weather;
 #include "../Ravl/CVec.h"
 #include "../Ratl/vector_vs.h"
 #include "../Ratl/bits_vs.h"
+#include "katarn/kt_render.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Defines
@@ -1547,6 +1548,7 @@ void RB_RenderWorldEffects()
 	if (!tr.world ||
 		tr.refdef.rdflags & RDF_NOWORLDMODEL ||
 		backEnd.refdef.rdflags & RDF_SKYBOXPORTAL ||
+		backEnd.refdef.rdflags & kt::RDF_KT_PROBE ||
 		!mParticleClouds.size() ||
 		ri.CL_IsRunningInGameCinematic())
 	{	//  no world rendering or no world or no particle clouds

@@ -62,6 +62,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -266,6 +267,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -354,7 +356,24 @@ cbuffer DrawG : register(b2)
 	float4 gridAmbient;  // gflags 16: light grid (old BSP maps), 0-255 scale
 	float4 gridDirected;
 	float4 gridDir;      // world space, towards the light
+	uint deluxeTex;      // q3map2 deluxemap of the lightmap (world-space light direction), 0 = none
+	float parallaxDepth; // parallax from the normal map's alpha (height), uv units, 0 = none
+	uint2 pad2;
 };
+
+// GGX highlight (times N.L) for one light direction
+float3 SpecGGX(float3 n, float3 V, float3 L, float rough, float3 f0)
+{
+	float nl = saturate(dot(n, L));
+	float3 H = normalize(L + V);
+	float r2 = max(rough * rough, 0.002);
+	float nh = saturate(dot(n, H)), nv = max(dot(n, V), 1e-3);
+	float D = r2 * r2 / (PI * pow(nh * nh * (r2 * r2 - 1) + 1, 2));
+	float k = r2 * 0.5;
+	float G = (nl / (nl * (1 - k) + k)) * (nv / (nv * (1 - k) + k));
+	float3 F = f0 + (1 - f0) * pow(1 - saturate(dot(H, V)), 5);
+	return D * G * F / max(4 * nl * nv, 1e-3) * nl;
+}
 
 struct VsIn { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float2 lmuv : TEXCOORD1; float4 color : COLOR; };
 struct VsOut { float4 pos : SV_Position; float3 normal : NORMAL; float2 uv : TEXCOORD0; float2 lmuv : TEXCOORD1; float4 color : COLOR; float3 wpos : TEXCOORD2; };
@@ -377,36 +396,64 @@ struct GBufferOut { float4 albedo : SV_Target0; float4 normal : SV_Target1; floa
 
 GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 {
-	float4 a = tint;
-	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].Sample(sWrap, i.uv);
-	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
-	if (gflags & 1) clip(a.a - alphaRef);
 	float3 n = normalize(i.normal);
 	// Quake's front faces are clockwise (it culls GL_FRONT with the CCW default), so a "front" face here is the back
 	// of the surface: flip the normal towards the viewer only then
 	if (front) n = -n;
+	float3 n0 = n;
+	float3 V = normalize(camPos.xyz - i.wpos);
+	float2 uv = i.uv;
+	float2 uvdx = ddx(i.uv), uvdy = ddy(i.uv);
+	float3 T = 0, B = 0;
+	float invmax = 0;
 	if (normalTex) {
 		// no vertex tangents in the old formats: a cotangent frame from the screen-space derivatives
 		float3 dp1 = ddx(i.wpos), dp2 = ddy(i.wpos);
-		float2 duv1 = ddx(i.uv), duv2 = ddy(i.uv);
 		float3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
-		float3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-		float3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-		float invmax = rsqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
-		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].Sample(sWrap, i.uv).xyz * 2 - 1;
+		T = dp2perp * uvdx.x + dp1perp * uvdy.x;
+		B = dp2perp * uvdx.y + dp1perp * uvdy.y;
+		invmax = rsqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
+		if (parallaxDepth > 0) {
+			// rend2 parallax: the normal map's alpha is the height (1 = top); march the view ray down through it
+			float3 Tn = T * invmax, Bn = B * invmax;
+			float3 vt = float3(dot(V, Tn), dot(V, Bn), dot(V, n));
+			if (vt.z > 0.05 && all(isfinite(vt))) {
+				float2 p = vt.xy / max(vt.z, 0.25) * parallaxDepth;
+				int steps = (int)lerp(16.0, 6.0, saturate(vt.z));
+				float stepD = 1.0 / steps;
+				float layer = 0, prevLayer = 0;
+				float depthHere = 1.0 - Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).a, prevDepth = depthHere;
+				[loop] for (int k = 0; k < 16 && k < steps && layer < depthHere; k++) {
+					prevLayer = layer; prevDepth = depthHere;
+					layer += stepD;
+					depthHere = 1.0 - Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, i.uv - p * layer, uvdx, uvdy).a;
+				}
+				// linear refinement between the last two layers
+				float after = depthHere - layer, before = prevDepth - prevLayer;
+				float w = saturate(after / min(after - before, -1e-4));
+				uv = i.uv - p * lerp(layer, prevLayer, w);
+			}
+		}
+	}
+	float4 a = tint;
+	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
+	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
+	if (gflags & 1) clip(a.a - alphaRef);
+	if (normalTex) {
+		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).xyz * 2 - 1;
 		tn.z = sqrt(saturate(1 - dot(tn.xy, tn.xy)));
 		float3 nm = normalize(T * invmax * tn.x - B * invmax * tn.y + n * tn.z);   // uv v runs down: flip the bitangent
 		if (all(isfinite(nm))) n = nm;
 	}
 	float rough = roughness, metal = metallic, matAO = 1;
 	if (rmoTex) {
-		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].Sample(sWrap, i.uv).rgb;
+		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;
 		if (rmoOrder == 1) r = r.gbr;     // orm -> rmo
 		rough = r.x; metal = r.y; matAO = r.z;
 	}
 	if (specTex) {
 		// rend2 specularMap: rgb = specular colour, a = gloss
-		float4 sp = Tex2D[NonUniformResourceIndex(specTex)].Sample(sWrap, i.uv);
+		float4 sp = Tex2D[NonUniformResourceIndex(specTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
 		rough = sp.a < 0.999 ? 1.0 - sp.a : saturate(1.0 - Luminance(sp.rgb) * 0.9);
 	}
 	// models without PBR maps are flagged (metal + 2) so the lighting keeps their reflections soft, like rend2
@@ -414,7 +461,28 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	bool authored = rmoTex != 0 || specTex != 0;
 	float3 baked = 0;
 	bool hasBaked = false;
-	if ((gflags & 4) && lightmapTex) { baked = Tex2D[NonUniformResourceIndex(lightmapTex)].Sample(sClamp, i.lmuv).rgb * bakedScale; hasBaked = true; }
+	float3 bakedSpec = 0;
+	if ((gflags & 4) && lightmapTex) {
+		baked = Tex2D[NonUniformResourceIndex(lightmapTex)].Sample(sClamp, i.lmuv).rgb * bakedScale;
+		hasBaked = true;
+		if (deluxeTex) {
+			// deluxemap: the lightmap's light arrives from this direction - the normal map shades it, and it gets a
+			// highlight (rend2 deluxe mapping). A short vector = light from all around (less directional).
+			float3 L = Tex2D[NonUniformResourceIndex(deluxeTex)].Sample(sClamp, i.lmuv).xyz * 2 - 1;
+			float ll = length(L);
+			if (ll > 1e-3) {
+				L /= ll;
+				float dirAmt = saturate(ll * 1.2);
+				float n0l = max(saturate(dot(n0, L)), 0.2);
+				float shade = clamp(saturate(dot(n, L)) / n0l, 0.0, 2.0);
+				baked *= lerp(1.0, shade, dirAmt);
+				float3 f0s = lerp((rmoTex != 0 || specTex != 0) ? 0.04 : 0.012, a.rgb, saturate(metal));
+				bakedSpec = min(SpecGGX(n, V, L, clamp(rou)KTSRC",
+R"KTSRC(gh, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
+			}
+		}
+		else if (normalTex) baked *= saturate(dot(n, n0));   // no direction known: the bumps shade against the surface
+	}
 	else if (gflags & 8) { baked = SrgbToLinear(i.color.rgb) * bakedScale; hasBaked = true; }
 	float3 gridLit = 0;
 	if (gflags & 16) {
@@ -426,7 +494,6 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 		float3 amb = gridAmbient.rgb / 255.0, dirc = gridDirected.rgb / 255.0;
 		float3 lightDisp = saturate(amb + dirc * ndl);
 		float3 lit = a.rgb * (1 - saturate(metal)) * SrgbToLinear(lightDisp);
-		float3 V = normalize(camPos.xyz - i.wpos);
 		float3 H = normalize(L + V);
 		float r2 = max(rough * rough, 0.002);
 		float nh = saturate(dot(n, H)), nv = max(dot(n, V), 1e-3);
@@ -444,7 +511,7 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	o.albedo = float4(a.rgb, matAO);
 	rough = clamp(rough, 0.045, 1.0);
 	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (skinAmount > 0 ? 4.0 : (authored ? 0.0 : 2.0)));
-	o.emissive = float4((gflags & 16) ? gridLit : (hasBaked ? baked * a.rgb : 0), 0);
+	o.emissive = float4((gflags & 16) ? gridLit : (hasBaked ? baked * a.rgb + bakedSpec : 0), 0);
 	return o;
 }
 
@@ -519,6 +586,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -642,6 +710,43 @@ float3 SkyAmbient(float3 n)
 	return max(r, 0);
 }
 
+// reflection probes (captured cubes): the nearest two, sphere-parallax corrected, blended by distance
+float3 ProbeOne(uint i, float3 P, float3 R, float rough, out float dist)
+{
+	float4 a = asfloat(BUF(probeParams.x).Load4(i * 32));
+	uint2 b = BUF(probeParams.x).Load2(i * 32 + 16);
+	float3 L = P - a.xyz;
+	dist = length(L);
+	float bq = dot(L, R), cq = dot(L, L) - a.w * a.w;
+	float3 dir = R;
+	if (cq < 0) dir = L + R * (-bq + sqrt(max(bq * bq - cq, 0)));
+	return TexCube[NonUniformResourceIndex(b.x)].SampleLevel(sClamp, float3(dir.x, dir.z, dir.y), rough * (b.y - 1)).rgb;
+}
+
+float3 SampleProbes(float3 P, float3 R, float rough, out float weight)
+{
+	weight = 0;
+	uint n = min(probeParams.y, 64u);
+	if (!n) return 0;
+	float d0 = 1e30, d1 = 1e30, r0 = 1;
+	uint i0 = 0, i1 = 0;
+	[loop] for (uint i = 0; i < n; i++) {
+		float4 a = asfloat(BUF(probeParams.x).Load4(i * 32));
+		float3 dd = a.xyz - P;
+		float q = dot(dd, dd);
+		if (q < d0) { d1 = d0; i1 = i0; d0 = q; i0 = i; r0 = a.w; }
+		else if (q < d1) { d1 = q; i1 = i; }
+	}
+	float e0, e1;
+	float3 c = ProbeOne(i0, P, R, rough, e0);
+	if (n > 1) {
+		float3 c1 = ProbeOne(i1, P, R, rough, e1);
+		c = lerp(c, c1, e0 / max(e0 + e1, 1e-3));
+	}
+	weight = saturate(2.0 - e0 / max(r0, 1.0));    // full inside the nearest probe's space, gone at twice its size
+	return min(c, 64.0);
+}
+
 float D_GGX(float NoH, float a) { float a2 = a * a; float f = (NoH * a2 - NoH) * NoH + 1.0; return a2 / (PI * f * f); }
 float V_Smith(float NoV, float NoL, float a)
 {
@@ -726,7 +831,8 @@ float ShadowFast(float3 P, float viewZ)
 
 float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 {
-	if (fogParams.x <= 0) return col;
+	)KTSRC",
+R"KTSRC(if (fogParams.x <= 0) return col;
 	float rayLen = max(dist - fogParams.w, 0);
 	float dz = P.z - camPos.z;
 	float f = fogParams.y;
@@ -755,8 +861,7 @@ float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 		sunVis = lit / STEPS;
 		sunVis = lerp(1, sunVis, saturate(maxD / max(dist, 1)));
 	}
-	float p)KTSRC",
-R"KTSRC(hase = pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 + 0.04;   // forward scattering + a little everywhere
+	float phase = pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 + 0.04;   // forward scattering + a little everywhere
 	inscatter += sunColor.rgb * sunColor.w * phase * fogColor.rgb * (sunVis * 1.6 - 0.15 * (1 - sunVis));
 	return lerp(col, max(inscatter, 0), opacity);
 }
@@ -881,6 +986,7 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float specOcc = saturate(pow(NoV + ao, exp2(-16 * rough - 1)) - 1 + ao);
 	float3 spec = 0;
 	float ssrHit = 0;
+	float probeW = 0;
 	{
 		// rough reflections: a small cone of sky samples around R
 		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
@@ -897,6 +1003,11 @@ void CS(uint3 id : SV_DispatchThreadID)
 		}
 		// below the horizon the "sky" is the ground: darken reflections that point down
 		spec *= saturate(R.z * 4 + 0.6);
+		// reflection probes: what is really around (rooms, walls, the ground) instead of the open sky
+		if (probeParams.y) {
+			float3 pc = SampleProbes(P, R, rough, probeW);
+			spec = lerp(spec, pc * asfloat(probeParams.z) / max(skyParams.z, 1e-3), probeW);
+		}
 		// screen-space reflections from last frame's lit scene
 		if (ssrSrv && rough < 0.45 && !plainLegacy) {
 			float3 O = P + N * (2.0 + viewZ * 0.002);
@@ -933,8 +1044,8 @@ void CS(uint3 id : SV_DispatchThreadID)
 	}
 	if (baked) {
 		Lo += g2 * ao;
-		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only what SSR finds on screen
-		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, ssrHit);
+		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
+		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 	}
 	else {
 		Lo += SkyAmbient(N) * diff * ao * skyParams.z;
@@ -1012,6 +1123,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -1226,11 +1338,11 @@ float3 AgX(float3 c)
 	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
 }
 
-float4 TonemapPS(FsOut i) : SV_Target0
+float4 TonemapPS(FsOut i) )KTSRC",
+R"KTSRC(: SV_Target0
 {
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
-	// sky por)KTSRC",
-R"KTSRC(tal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
+	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
 	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
@@ -1334,6 +1446,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -1409,6 +1522,180 @@ float4 PS(FsOut i) : SV_Target0
 }
 )KTSRC",
 nullptr };
+static const char* const kt_src_probes_parts[] = {
+R"KTSRC(// KatarnEngine - reflection probe filtering: each mip of a captured cube is a wider cone of the level above it, so
+// rougher surfaces read blurrier reflections (sampled across face edges, no seams)
+// KatarnEngine - shared HLSL (shader model 5.1, bindless descriptor tables)
+#ifndef KT_COMMON
+#define KT_COMMON
+
+Texture2D Tex2D[] : register(t0, space1);
+TextureCube TexCube[] : register(t0, space2);
+Texture2DArray Tex2DArray[] : register(t0, space3);
+ByteAddressBuffer Buf[] : register(t0, space4);
+Texture3D Tex3D[] : register(t0, space5);
+RWTexture2D<float4> UavTex[] : register(u0, space1);
+RWByteAddressBuffer UavBuf[] : register(u0, space2);
+RWTexture2DArray<float4> UavTexArray[] : register(u0, space3);
+
+#ifdef KT_GLSLANG   // offline syntax check with glslang, which lacks arrays of byte-address buffers
+#define NonUniformResourceIndex(x) (x)
+ByteAddressBuffer BufOne : register(t1, space0);
+RWByteAddressBuffer UavBufOne : register(u1, space0);
+#define BUF(i) BufOne
+#define UAVBUF(i) UavBufOne
+#else
+#define BUF(i) Buf[NonUniformResourceIndex(i)]
+#define UAVBUF(i) UavBuf[NonUniformResourceIndex(i)]
+#endif
+
+SamplerState sWrap : register(s0);
+SamplerState sClamp : register(s1);
+SamplerState sWrapPoint : register(s2);
+SamplerState sClampPoint : register(s3);
+SamplerComparisonState sShadow : register(s4);
+SamplerState sClampAniso : register(s5);
+
+static const float PI = 3.14159265359;
+
+// per-view constants (root CBV b1) - must match kt::ViewConstants
+cbuffer View : register(b1)
+{
+	float4x4 viewProj;         // world -> clip (reversed-Z, infinite)
+	float4x4 invViewProj;
+	float4x4 worldToEye;       // GL eye space (-Z forward)
+	float4x4 prevViewProj;
+	float4 camPos;             // xyz, w = near plane
+	float4 viewport;           // x, y (top-left, pixels), w, h
+	float4 invTargetSize;      // 1/w, 1/h of the full-size scene targets, w,h
+	float4 projParams;         // sx, sy (1/tan half fov), near, time
+	float4 sunDir;             // towards the sun, w = sun angular radius
+	float4 sunColor;           // linear radiance (rgb), w = intensity scale
+	float4 skyParams;          // x turbidity / haze, y sky intensity, z ambient scale, w world mode (1 = HD world)
+	float4 fogParams;          // x density, y height falloff, z base height, w start distance
+	float4 fogColor;           // rgb inscatter colour, w max opacity
+	float4x4 cascadeViewProj[4];
+	float4 cascadeSplits;      // view depth of each cascade's far end
+	float4 shadowParams;       // x texel size, y bias, z normal bias, w enabled
+	uint4 indices0;            // x gbuffer0, y gbuffer1, z gbuffer2, w depth (SRV)
+	uint4 indices1;            // x shadow array, y ao, z sky LUT, w exposure buffer
+	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
+	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
+	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
+	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+};
+float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
+float Overbright() { return max(extraParams.x, 1.0); }
+
+float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
+float Luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+float2 OctWrap(float2 v) { return (1.0 - abs(v.yx)) * (v.xy >= 0.0 ? 1.0 : -1.0); }
+float2 EncodeNormal(float3 n)
+{
+	n /= (abs(n.x) + abs(n.y) + abs(n.z));
+	n.xy = n.z >= 0.0 ? n.xy : OctWrap(n.xy);
+	return n.xy;
+}
+float3 DecodeNormal(float2 f)
+{
+	float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+	float t = saturate(-n.z);
+	n.xy += n.xy >= 0.0 ? -t : t;
+	return normalize(n);
+}
+
+float3 WorldFromDepth(float2 uv, float depth)
+{
+	float4 clip = float4(uv * float2(2, -2) + float2(-1, 1), depth, 1);
+	float4 w = mul(invViewProj, clip);
+	return w.xyz / w.w;
+}
+float ViewDepth(float depth) { return projParams.z / max(depth, 1e-7); }   // reversed-Z infinite: near / depth
+
+float Exposure()
+{
+	return asfloat(BUF(indices1.w).Load(0));
+}
+
+float3 EvalSH(float3 n)
+{
+	float3 r = ambientSH[0].rgb * 0.282095;
+	r += ambientSH[1].rgb * 0.488603 * n.y + ambientSH[2].rgb * 0.488603 * n.z + ambientSH[3].rgb * 0.488603 * n.x;
+	r += ambientSH[4].rgb * 1.092548 * n.x * n.y + ambientSH[5].rgb * 1.092548 * n.y * n.z;
+	r += ambientSH[6].rgb * 0.315392 * (3.0 * n.z * n.z - 1.0);
+	r += ambientSH[7].rgb * 1.092548 * n.x * n.z + ambientSH[8].rgb * 0.546274 * (n.x * n.x - n.y * n.y);
+	return max(r, 0);
+}
+
+// fullscreen triangle
+struct FsOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+FsOut FullscreenVS(uint id : SV_VertexID)
+{
+	FsOut o;
+	o.uv = float2((id << 1) & 2, id & 2);
+	o.pos = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
+	return o;
+}
+
+#endif
+
+
+cbuffer Draw : register(b0)
+{
+	uint srcSrv;     // the level above, Texture2DArray of the six faces
+	uint dstUav;     // this level, RWTexture2DArray
+	uint dstSize;
+	uint mip;
+};
+
+// D3D cube face conventions (face, s, t in -1..1) <-> direction
+float3 FaceDir(uint face, float2 st)
+{
+	float s = st.x, t = st.y;
+	if (face == 0) return float3(1, -t, -s);
+	if (face == 1) return float3(-1, -t, s);
+	if (face == 2) return float3(s, 1, t);
+	if (face == 3) return float3(s, -1, -t);
+	if (face == 4) return float3(s, -t, 1);
+	return float3(-s, -t, -1);
+}
+
+float3 Fetch(float3 d)
+{
+	float3 a = abs(d);
+	uint face; float ma, sc, tc;
+	if (a.x >= a.y && a.x >= a.z) { face = d.x > 0 ? 0 : 1; ma = a.x; sc = d.x > 0 ? -d.z : d.z; tc = -d.y; }
+	else if (a.y >= a.z) { face = d.y > 0 ? 2 : 3; ma = a.y; sc = d.x; tc = d.y > 0 ? d.z : -d.z; }
+	else { face = d.z > 0 ? 4 : 5; ma = a.z; sc = d.z > 0 ? d.x : -d.x; tc = -d.y; }
+	float2 uv = float2(sc, tc) / ma * 0.5 + 0.5;
+	return Tex2DArray[srcSrv].SampleLevel(sClamp, float3(uv, face), 0).rgb;
+}
+
+[numthreads(8, 8, 1)]
+void FilterCS(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= dstSize || id.y >= dstSize) return;
+	float3 d = normalize(FaceDir(id.z, (id.xy + 0.5) / dstSize * 2.0 - 1.0));
+	float3 t = normalize(cross(abs(d.z) < 0.99 ? float3(0, 0, 1) : float3(1, 0, 0), d));
+	float3 b = cross(d, t);
+	float r = 2.0 / dstSize * (0.6 + 0.12 * mip);   // a bit more than this texel's footprint
+	float3 acc = 0;
+	float wsum = 0;
+	[loop] for (int j = 0; j < 5; j++)
+		[loop] for (int i = 0; i < 5; i++) {
+			float2 o = float2(i, j) * 0.5 - 1.0;
+			float w = exp(-2.0 * dot(o, o));
+			acc += min(Fetch(normalize(d + (t * o.x + b * o.y) * r)), 512.0) * w;
+			wsum += w;
+		}
+	UavTexArray[dstUav][id] = float4(acc / wsum, 1);
+}
+)KTSRC",
+nullptr };
 static const char* const kt_src_saber_parts[] = {
 R"KTSRC(// KatarnEngine - lightsaber blades in the style of Star Wars Battlefront II (2017): a thin, white-hot core with a
 // saturated coloured edge, a tight bright inner glow and a wide soft outer glow, rounded ends, a slight hum
@@ -1473,6 +1760,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -1673,6 +1961,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -1922,6 +2211,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -2123,6 +2413,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -2368,10 +2659,10 @@ float4 FxFog(float3 P, float3 V, float dist)
 	float rayLen = max(dist - fogParams.w, 0);
 	float dz = P.z - camPos.z;
 	float f = fogParams.y;
-	float camDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
+	float ca)KTSRC",
+R"KTSRC(mDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
 	float fz = f * dz;
-	float lineInt =)KTSRC",
-R"KTSRC( abs(fz) > 1e-4 ? (1 - exp(-fz)) / fz : 1 - 0.5 * fz;
+	float lineInt = abs(fz) > 1e-4 ? (1 - exp(-fz)) / fz : 1 - 0.5 * fz;
 	float opacity = min(1 - exp(-camDens * lineInt * rayLen), fogColor.w);
 	float3 hd = normalize(float3(-V.xy, 0.05));
 	float3 inscatter = FxSky(hd, 8) * fogColor.rgb;

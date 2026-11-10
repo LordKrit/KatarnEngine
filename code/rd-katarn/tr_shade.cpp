@@ -30,6 +30,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include <set>
 #include <string>
 #include "katarn/kt_render.h"
+extern int kt_worldDeluxe;   // tr_bsp.cpp
 
 /*
 
@@ -1943,7 +1944,12 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 		image_t* lm = lmStage ? KT_StageImage(const_cast<textureBundle_t*>(&lmStage->bundle[0])) : nullptr;
 		// texture + $lightmap collapsed into one multitexture stage (the usual case): the lightmap is bundle 1
 		if (!lm && st->bundle[1].isLightmap && sh->multitextureEnv == GL_MODULATE) lm = KT_StageImage(&st->bundle[1]);
-		if (lm) { flags = (flags & ~2u) | 4; d.lightmapTex = lm->texnum; d.lmuv = input->texCoords[0][1]; d.lmuvStride = sizeof(input->texCoords[0]); }
+		if (lm) {
+			flags = (flags & ~2u) | 4; d.lightmapTex = lm->texnum; d.lmuv = input->texCoords[0][1]; d.lmuvStride = sizeof(input->texCoords[0]);
+			if (kt_worldDeluxe)   // deluxe-mapped map: the lightmap after this one holds its light directions
+				for (int li = 0; li + 1 < tr.numLightmaps; li += 2)
+					if (tr.lightmaps[li] == lm) { if (tr.lightmaps[li + 1]) d.deluxeTex = tr.lightmaps[li + 1]->texnum; break; }
+		}
 		else flags = (flags & ~2u) | 8;
 	}
 	ComputeTexCoords(st);
@@ -1977,6 +1983,7 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	d.rmoOrder = st->ktRmoOrder;
 	d.skin = st->ktSkin;
 	d.specTex = st->ktSpec ? st->ktSpec->texnum : 0;
+	d.parallax = st->ktParallax;
 	d.flags = flags;
 	d.roughness = world ? 0.7f : 0.78f;   // characters: cloth / skin (0.55 read as plastic)
 	d.metallic = 0.0f;

@@ -105,6 +105,8 @@ struct DeferredDraw {
 	uint32_t flags;                            // see legacy_gbuffer.hlsl gflags
 	float alphaRef, roughness, metallic, bakedScale;
 	float tint[4];
+	uint32_t deluxeTex;                        // GL name of the lightmap's deluxemap (light direction), 0 = none
+	float parallax;                            // parallax depth from the normal map's alpha, 0 = none
 	int cull;                                  // 0 none, 1 cull GL front faces, 2 cull GL back faces
 	bool castShadow;
 };
@@ -118,6 +120,13 @@ Shader R_Shader(const char* file, const char* entry, const char* target);
 bool World_Load(const char* mapName);              // loads maps/<name>.kworld if present
 void World_Unload();
 bool World_Active();
+
+// reflection probes (rend2 cubemaps): placed from the map's entities, captured by the renderer itself in the first
+// seconds of play (a few 128x128 views per frame), sampled by the deferred lighting with sphere parallax
+constexpr int RDF_KT_PROBE = 0x40000000;           // rdflags of a capture view: | probe << 20 | face << 26
+void Probes_SetEntities(const char* entityText);   // tr_bsp: the BSP entity string, after the world loaded
+void Probes_BeginFrame();                           // RE_BeginFrame: queues this frame's capture views
+void Probes_NoteScene(const void* refdef);          // RE_RenderScene: the game drew a world view (refdef_t*)
 
 void R_GfxInfo();
 extern void (*g_logCallback)(const char* msg);

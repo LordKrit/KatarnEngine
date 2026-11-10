@@ -1663,7 +1663,10 @@ static qboolean ParseStage(shaderStage_t* stage, const char** text)
 			token = COM_ParseExt(text, qfalse);
 			if (token[0]) {
 				image_t* im = R_FindImageFile(token, static_cast<qboolean>(!shader.noMipMaps), static_cast<qboolean>(!shader.noPicMip), qfalse, GL_REPEAT);
-				if (!Q_stricmpn(kw, "normal", 6)) stage->ktNormal = im;
+				if (!Q_stricmpn(kw, "normal", 6)) {
+					stage->ktNormal = im;
+					if (!Q_stricmp(kw, "normalHeightMap") && !stage->ktParallax) stage->ktParallax = 0.05f;
+				}
 				else if (!Q_stricmp(kw, "specularMap")) stage->ktSpec = im;
 				else { stage->ktRmo = im; stage->ktRmoOrder = !Q_stricmpn(kw, "orm", 3) ? 1 : 0; }
 			}
@@ -1677,7 +1680,13 @@ static qboolean ParseStage(shaderStage_t* stage, const char** text)
 			stage->ktSkin = v[3] > 0 ? v[3] : 0.5f;
 			SkipRestOfLine(text);
 		}
-		else if (!Q_stricmp(token, "normalScale") || !Q_stricmp(token, "specularScale") || !Q_stricmp(token, "parallaxDepth")
+		else if (!Q_stricmp(token, "parallaxDepth"))
+		{
+			token = COM_ParseExt(text, qfalse);
+			if (token[0]) stage->ktParallax = Q_max(0.0f, Q_min(0.25f, (float)atof(token)));
+			SkipRestOfLine(text);
+		}
+		else if (!Q_stricmp(token, "normalScale") || !Q_stricmp(token, "specularScale")
 			|| !Q_stricmp(token, "gloss") || !Q_stricmp(token, "roughness") || !Q_stricmp(token, "specularReflectance") || !Q_stricmp(token, "specularExponent")
 			|| !Q_stricmp(token, "cubeMapScale") || !Q_stricmp(token, "parallaxBias") || !Q_stricmp(token, "metallic") || !Q_stricmp(token, "emissiveScale"))
 		{
@@ -2964,10 +2973,21 @@ from the current global working shader
 static void KT_AutoMaterialMaps()
 {
 	if (shader.sky) return;
+	// lightmapped map surfaces too (like rend2's r_normalMapping): their first texture stage
+	bool lightmapped = false;
+	for (int i = 0; i < MAX_SHADER_STAGES && stages[i].active; i++) if (stages[i].bundle[0].isLightmap || stages[i].bundle[1].isLightmap) lightmapped = true;
+	bool worldDone = false;
 	for (int i = 0; i < MAX_SHADER_STAGES; i++) {
 		shaderStage_t* st = &stages[i];
 		if (!st->active) break;
-		if (st->rgbGen != CGEN_LIGHTING_DIFFUSE || st->bundle[0].isLightmap || st->bundle[0].numImageAnimations > 1) continue;
+		if (st->bundle[0].isLightmap || st->bundle[0].numImageAnimations > 1) continue;
+		if (st->rgbGen != CGEN_LIGHTING_DIFFUSE) {
+			if (!lightmapped || worldDone) continue;
+			const uint32_t bl = st->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
+			if (bl && bl != (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ZERO) && bl != (GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO)
+				&& bl != (GLS_SRCBLEND_ZERO | GLS_DSTBLEND_SRC_COLOR)) continue;
+			worldDone = true;
+		}
 		const image_t* diffuse = st->bundle[0].image;
 		if (!diffuse || !diffuse->imgName[0] || diffuse->imgName[0] == '*') continue;
 		char base[MAX_QPATH], name[MAX_QPATH];
@@ -2976,6 +2996,7 @@ static void KT_AutoMaterialMaps()
 		if (!st->ktNormal) {
 			Com_sprintf(name, sizeof(name), "%s_nh", base);
 			st->ktNormal = R_FindImageFile(name, mip, pic, qfalse, GL_REPEAT);
+			if (st->ktNormal && !st->ktParallax) st->ktParallax = 0.05f;   // normal + height
 			if (!st->ktNormal) { Com_sprintf(name, sizeof(name), "%s_n", base); st->ktNormal = R_FindImageFile(name, mip, pic, qfalse, GL_REPEAT); }
 		}
 		if (!st->ktRmo && !st->ktSpec) {

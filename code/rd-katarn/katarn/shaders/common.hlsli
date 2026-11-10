@@ -57,6 +57,7 @@ cbuffer View : register(b1)
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
+	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }

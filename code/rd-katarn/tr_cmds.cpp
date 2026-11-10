@@ -25,6 +25,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "tr_local.h"
+#include "katarn/kt_render.h"
 
 /*
 =====================
@@ -482,6 +483,9 @@ void RE_BeginFrame(const stereoFrame_t stereoFrame)
 			cmd->buffer = GL_BACK;
 		}
 	}
+
+	// KatarnEngine: reflection probe captures (views drawn before the game's own)
+	kt::Probes_BeginFrame();
 }
 
 /*

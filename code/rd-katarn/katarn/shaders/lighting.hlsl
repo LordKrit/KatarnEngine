@@ -65,6 +65,43 @@ float3 SkyAmbient(float3 n)
 	return max(r, 0);
 }
 
+// reflection probes (captured cubes): the nearest two, sphere-parallax corrected, blended by distance
+float3 ProbeOne(uint i, float3 P, float3 R, float rough, out float dist)
+{
+	float4 a = asfloat(BUF(probeParams.x).Load4(i * 32));
+	uint2 b = BUF(probeParams.x).Load2(i * 32 + 16);
+	float3 L = P - a.xyz;
+	dist = length(L);
+	float bq = dot(L, R), cq = dot(L, L) - a.w * a.w;
+	float3 dir = R;
+	if (cq < 0) dir = L + R * (-bq + sqrt(max(bq * bq - cq, 0)));
+	return TexCube[NonUniformResourceIndex(b.x)].SampleLevel(sClamp, float3(dir.x, dir.z, dir.y), rough * (b.y - 1)).rgb;
+}
+
+float3 SampleProbes(float3 P, float3 R, float rough, out float weight)
+{
+	weight = 0;
+	uint n = min(probeParams.y, 64u);
+	if (!n) return 0;
+	float d0 = 1e30, d1 = 1e30, r0 = 1;
+	uint i0 = 0, i1 = 0;
+	[loop] for (uint i = 0; i < n; i++) {
+		float4 a = asfloat(BUF(probeParams.x).Load4(i * 32));
+		float3 dd = a.xyz - P;
+		float q = dot(dd, dd);
+		if (q < d0) { d1 = d0; i1 = i0; d0 = q; i0 = i; r0 = a.w; }
+		else if (q < d1) { d1 = q; i1 = i; }
+	}
+	float e0, e1;
+	float3 c = ProbeOne(i0, P, R, rough, e0);
+	if (n > 1) {
+		float3 c1 = ProbeOne(i1, P, R, rough, e1);
+		c = lerp(c, c1, e0 / max(e0 + e1, 1e-3));
+	}
+	weight = saturate(2.0 - e0 / max(r0, 1.0));    // full inside the nearest probe's space, gone at twice its size
+	return min(c, 64.0);
+}
+
 float D_GGX(float NoH, float a) { float a2 = a * a; float f = (NoH * a2 - NoH) * NoH + 1.0; return a2 / (PI * f * f); }
 float V_Smith(float NoV, float NoL, float a)
 {
@@ -303,6 +340,7 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float specOcc = saturate(pow(NoV + ao, exp2(-16 * rough - 1)) - 1 + ao);
 	float3 spec = 0;
 	float ssrHit = 0;
+	float probeW = 0;
 	{
 		// rough reflections: a small cone of sky samples around R
 		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
@@ -319,6 +357,11 @@ void CS(uint3 id : SV_DispatchThreadID)
 		}
 		// below the horizon the "sky" is the ground: darken reflections that point down
 		spec *= saturate(R.z * 4 + 0.6);
+		// reflection probes: what is really around (rooms, walls, the ground) instead of the open sky
+		if (probeParams.y) {
+			float3 pc = SampleProbes(P, R, rough, probeW);
+			spec = lerp(spec, pc * asfloat(probeParams.z) / max(skyParams.z, 1e-3), probeW);
+		}
 		// screen-space reflections from last frame's lit scene
 		if (ssrSrv && rough < 0.45 && !plainLegacy) {
 			float3 O = P + N * (2.0 + viewZ * 0.002);
@@ -355,8 +398,8 @@ void CS(uint3 id : SV_DispatchThreadID)
 	}
 	if (baked) {
 		Lo += g2 * ao;
-		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only what SSR finds on screen
-		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, ssrHit);
+		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
+		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 	}
 	else {
 		Lo += SkyAmbient(N) * diff * ao * skyParams.z;

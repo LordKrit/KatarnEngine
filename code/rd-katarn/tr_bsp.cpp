@@ -161,6 +161,19 @@ R_LoadLightmaps
 ===============
 */
 #define	LIGHTMAP_SIZE	128
+// KatarnEngine: q3map2 -deluxe maps (worldspawn "deluxeMapping" "1"): every odd lightmap is the light direction of
+// the one before it (world space, rgb = dir * 0.5 + 0.5)
+int kt_worldDeluxe = 0;
+static bool KT_DeluxeMapped(const lump_t* l)
+{
+	if (l->filelen <= 0) return false;
+	std::string ents(reinterpret_cast<const char*>(fileBase + l->fileofs), l->filelen);
+	size_t at = ents.find("\"deluxeMapping\"");
+	if (at == std::string::npos) return false;
+	at = ents.find('"', at + 15);
+	return at != std::string::npos && at + 1 < ents.size() && ents[at + 1] == '1';
+}
+
 static	void R_LoadLightmaps(const lump_t* l, const char* ps_map_name, world_t& worldData)
 {
 	static byte		image[LIGHTMAP_SIZE * LIGHTMAP_SIZE * 4]{};
@@ -226,6 +239,13 @@ static	void R_LoadLightmaps(const lump_t* l, const char* ps_map_name, world_t& w
 				image[j * 4 + 3] = 255;
 
 				sum_intensity += intensity;
+			}
+		}
+		else if (kt_worldDeluxe && (i & 1)) {
+			// a direction, not a colour: as stored
+			for (j = 0; j < LIGHTMAP_SIZE * LIGHTMAP_SIZE; j++) {
+				image[j * 4 + 0] = buf_p[j * 3 + 0]; image[j * 4 + 1] = buf_p[j * 3 + 1]; image[j * 4 + 2] = buf_p[j * 3 + 2];
+				image[j * 4 + 3] = 255;
 			}
 		}
 		else {
@@ -1390,6 +1410,7 @@ void RE_LoadWorldMap_Actual(const char* name, world_t& worldData, const int inde
 
 	// load into heap
 	R_LoadShaders(&header->lumps[LUMP_SHADERS], worldData);
+	if (!index) kt_worldDeluxe = KT_DeluxeMapped(&header->lumps[LUMP_ENTITIES]) ? 1 : 0;
 	R_LoadLightmaps(&header->lumps[LUMP_LIGHTMAPS], name, worldData);
 	R_LoadPlanes(&header->lumps[LUMP_PLANES], worldData);
 	R_LoadFogs(&header->lumps[LUMP_FOGS], &header->lumps[LUMP_BRUSHES], &header->lumps[LUMP_BRUSHSIDES], worldData, index);
@@ -1407,6 +1428,13 @@ void RE_LoadWorldMap_Actual(const char* name, world_t& worldData, const int inde
 
 		// only set tr.world now that we know the entire level has loaded properly
 		tr.world = &worldData;
+
+		// KatarnEngine: reflection probe positions from the entities (needs tr.world for the clusters)
+		{
+			const lump_t& el = header->lumps[LUMP_ENTITIES];
+			std::string ents(reinterpret_cast<const char*>(fileBase + el.fileofs), el.filelen > 0 ? el.filelen : 0);
+			kt::Probes_SetEntities(ents.c_str());
+		}
 	}
 
 	if (ri.gpvCachedMapDiskImage() && !loaded_sub_bsp)

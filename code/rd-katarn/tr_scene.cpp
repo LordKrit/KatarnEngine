@@ -25,6 +25,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "tr_local.h"
+#include "katarn/kt_render.h"
 
 int			r_firstSceneDrawSurf;
 
@@ -280,6 +281,7 @@ void RE_RenderScene(const refdef_t* fd) {
 	if (!tr.world && !(fd->rdflags & RDF_NOWORLDMODEL)) {
 		Com_Error(ERR_DROP, "R_RenderScene: NULL worldmodel");
 	}
+	kt::Probes_NoteScene(fd);
 
 	//	memcpy( tr.refdef.text, fd->text, sizeof( tr.refdef.text ) );
 
