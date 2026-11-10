@@ -996,6 +996,7 @@ static void RenderWorldView()
 	cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
 	bool fxaa = kt_fxaa->integer && R.fxaaPSO;
 	Texture& tmTarget = fxaa ? R.ldr : R.screen;
+	Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
 	Transition(cl, tmTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	{
 		uint32_t k[8] = { R.hdr.srv, 0, 0, bloomSrv, R.w, R.h, 0, 0 };

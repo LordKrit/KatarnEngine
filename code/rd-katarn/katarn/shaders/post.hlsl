@@ -130,6 +130,8 @@ float3 ACESFitted(float3 c)
 float4 TonemapPS(FsOut i) : SV_Target0
 {
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
+	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
+	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float3 c = Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb * Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 	if (skyParams.w > 0.5) {
@@ -149,6 +151,8 @@ float4 FxaaPS(FsOut i) : SV_Target0
 {
 	float2 rcp = 1.0 / float2(dstSize);
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * rcp;
+	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
+	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float4 m = Tex2D[srcSrv].SampleLevel(sClamp, uv, 0);
 	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * rcp, 0).a;
 	float ne = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, -0.5) * rcp, 0).a;

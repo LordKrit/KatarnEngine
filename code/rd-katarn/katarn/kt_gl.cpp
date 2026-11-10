@@ -226,7 +226,11 @@ static void Snapshot(LegacyDraw& d)
 	memcpy(d.vp, s.vp, sizeof(d.vp));
 	if (s.scissor) memcpy(d.sc, s.sc, sizeof(d.sc));
 	else memcpy(d.sc, s.vp, sizeof(d.sc));
-	if (rev) { d.depthMin = 1.0f - s.depthFar; d.depthMax = 1.0f - s.depthNear; }
+	if (rev) {
+		d.depthMin = 1.0f - s.depthFar; d.depthMax = 1.0f - s.depthNear;
+		// sky (depthRange 1,1): just in front of the cleared far plane, so the sky counts as drawn
+		if (d.depthMax < 1e-7f) { d.depthMin = 1e-7f; d.depthMax = 1e-7f; }
+	}
 	else { d.depthMin = s.depthNear; d.depthMax = s.depthFar; }
 	if (d.depthMin > d.depthMax) { float t = d.depthMin; d.depthMin = d.depthMax; d.depthMax = t; }
 	d.stage = s.stage;
