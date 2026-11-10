@@ -24,7 +24,7 @@ VsOut VS(uint vid : SV_VertexID)
 	float3 toCam = normalize(camPos.xyz - mid);
 	float3 side = cross(d, toCam);
 	side = dot(side, side) > 1e-6 ? normalize(side) : normalize(cross(d, float3(0, 0, 1)));
-	float w = glowR * 2.2;
+	float w = bladeAlpha == 2 ? coreR * 2.0 : glowR * 2.2;
 	static const float2 c[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1) };
 	float2 q = c[vid];
 	float3 p = (q.y < 0 ? bladeA - d * w : bladeB + d * w) + side * q.x * w + toCam * w;
@@ -63,6 +63,12 @@ float4 PS(VsOut i) : SV_Target0
 	float outer = exp(-pow(dist / (glowR * 0.95), 2)) * window;
 	float scale = bladeIntensity / max(Exposure(), 1e-6) * vis * hum;
 
+	if (bladeAlpha == 2) {
+		// core only (over the game's own glow): solid white-hot, the blade colour only at its very edge
+		float cc = 1 - smoothstep(coreR * 0.45, coreR, dist);
+		float3 col = lerp(bladeColor, 1.0, saturate(1.4 - dist / coreR)) * 6.0 / max(Exposure(), 1e-6) * vis;
+		return float4(Sane(col * cc), saturate(cc * vis));
+	}
 	if (bladeAlpha) {
 		// darksaber: black core, white crackling rim
 		float rim = (edge * 3.0 + inner * 0.6 + outer * 0.2);

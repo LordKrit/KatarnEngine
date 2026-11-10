@@ -1143,7 +1143,7 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 }
 float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }
 bool SaberDraw() { return kt_saberDraw && kt_saberDraw->integer != 0; }
-void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba, uint32_t glowTex, const uint8_t* vertexRgba)
+void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba, uint32_t glowTex, const uint8_t* vertexRgba, bool coreOnly)
 {
 	if (!R.inView || length < 0.5f || R.blades.size() >= 128) return;
 	RState::Blade b = {};
@@ -1155,6 +1155,7 @@ void R_AddSaberBlade(const float* start, const float* dir, float length, float r
 	b.coreR = Q_max(0.6f, radius * 0.22f);
 	b.intensity = kt_saberGlow ? kt_saberGlow->value * 0.5f : 1.0f;
 	b.tex = 0; b.mode = 0; b.alpha = dark ? 1 : 0;   // procedural (BF2-style) blade
+	if (coreOnly) { if (dark) return; b.alpha = 2; b.coreR = Q_max(0.9f, radius * 0.3f); }
 	// the glow texture is tinted by the entity colour (rgbGen vertex): use that, linearised
 	for (int q = 0; q < 3; q++) b.vcol[q] = powf(vertexRgba[q] / 255.0f, 2.2f);
 	R.blades.push_back(b);
