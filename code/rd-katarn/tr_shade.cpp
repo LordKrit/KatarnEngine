@@ -1906,6 +1906,9 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 		const uint32_t xb = x->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
 		if (x->bundle[0].isLightmap && (xb == (GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO) || xb == (GLS_SRCBLEND_ZERO | GLS_DSTBLEND_SRC_COLOR)))
 			taken |= 1u << s;
+		// environment-mapped shine (a fake reflection in the old lighting): Katarn's own specular replaces it
+		else if (x->bundle[0].tcGen == TCGEN_ENVIRONMENT_MAPPED && xb == (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE) || (x->bundle[0].tcGen == TCGEN_ENVIRONMENT_MAPPED && xb == (GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE)))
+			taken |= 1u << s;
 	}
 
 	ComputeTexCoords(st);

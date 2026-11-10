@@ -139,7 +139,7 @@ float4 TonemapPS(FsOut i) : SV_Target0
 		float2 v = i.uv - 0.5;
 		c *= 1 - dot(v, v) * 0.35;
 	}
-	else c = saturate(c);      // legacy BSP maps: their content is already display-referred
+	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 	c = LinearToSrgb(c);
 	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 	c += (n - 0.5) / 255.0;

@@ -99,6 +99,7 @@ struct ViewConstants {
 	uint32_t indices0[4], indices1[4], indices2[4];
 	float postParams[4];
 	float ambientSH[9][4];
+	float extraParams[4];      // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
 
 struct LVert { float pos[3]; float normal[3]; float uv[2]; float lmuv[2]; uint32_t color; };
@@ -651,6 +652,7 @@ void R_BeginView(const ViewDesc& v)
 	c.postParams[1] = kt_bloom->value;
 	c.postParams[2] = kt_manualExposure->value;
 	c.postParams[3] = kt_glowBoost->value;
+	c.extraParams[0] = (float)(1 << tr.overbrightBits);
 	if (!World_Active()) c.postParams[2] = 1.0f;   // legacy maps: fixed exposure (their content is display-referred)
 
 	// sun cascades

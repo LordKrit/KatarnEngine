@@ -55,7 +55,9 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }

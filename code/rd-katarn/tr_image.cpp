@@ -335,7 +335,7 @@ static void R_LightScaleTexture(unsigned* in, const int inwidth, const int inhei
 {
 	if (only_gamma)
 	{
-		if (!glConfig.deviceSupportsGamma && !glConfigExt.doGammaCorrectionWithShaders)
+		if (false)   // KatarnEngine: r_gamma is applied when presenting, not baked into textures
 		{
 			byte* p = reinterpret_cast<byte*>(in);
 
@@ -356,7 +356,7 @@ static void R_LightScaleTexture(unsigned* in, const int inwidth, const int inhei
 
 		const int c = inwidth * inheight;
 
-		if (glConfig.deviceSupportsGamma || glConfigExt.doGammaCorrectionWithShaders)
+		if (true)   // KatarnEngine: gamma is applied when presenting
 		{
 			for (i = 0; i < c; i++, p += 4)
 			{
@@ -1435,16 +1435,8 @@ void R_SetColorMappings() {
 	int		inf = 0;
 
 	// setup the overbright lighting
+	// KatarnEngine applies gamma and the overbright shift itself when the frame is presented (windowed too)
 	tr.overbrightBits = r_overBrightBits->integer;
-	if (!glConfig.deviceSupportsGamma && !glConfigExt.doGammaCorrectionWithShaders) {
-		tr.overbrightBits = 0;		// need hardware gamma for overbright
-	}
-
-	// never overbright in windowed mode (SJE: unless gamma is done with shaders, which does not touch the desktop)
-	if (!glConfig.isFullscreen && !glConfigExt.doGammaCorrectionWithShaders)
-	{
-		tr.overbrightBits = 0;
-	}
 
 	if (tr.overbrightBits > 1) {
 		tr.overbrightBits = 1;

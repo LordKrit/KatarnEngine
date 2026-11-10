@@ -60,7 +60,9 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
@@ -181,7 +183,7 @@ float4 PS(VsOut i) : SV_Target0
 	}
 	if (drawTarget == 1) {
 		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
-		float s = 1.0 / max(Exposure(), 1e-6);
+		float s = (skyParams.w > 0.5 ? Overbright() : 1.0) / max(Exposure(), 1e-6);   // HD: legacy colours are scaled by identityLight
 		if (flags & (1u << 11)) s *= glowBoost;
 		c.rgb *= s;
 	}
@@ -249,7 +251,9 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
@@ -355,7 +359,9 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
 	if (gflags & 1) clip(a.a - alphaRef);
 	float3 n = normalize(i.normal);
-	if (!front) n = -n;
+	// Quake's front faces are clockwise (it culls GL_FRONT with the CCW default), so a "front" face here is the back
+	// of the surface: flip the normal towards the viewer only then
+	if (front) n = -n;
 	float rough = roughness, metal = metallic;
 	if (specTex) {
 		float3 sp = Tex2D[NonUniformResourceIndex(specTex)].Sample(sWrap, i.uv).rgb;
@@ -442,7 +448,9 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
@@ -694,11 +702,11 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 spec = 0;
 	{
 		// rough reflections: a small cone of sky samples around R
-		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
+		float3 t = normalize(abs(R.z) <)KTSRC",
+R"KTSRC( 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
 		float3 b = cross(R, t);
 		float cone = rough * rough * 1.2;
-		if (indices2.x) spec = SkyRadianceL)KTSRC",
-R"KTSRC(od(R, rough * (SkyMips() - 1) * 0.8) * asfloat(indices2.z);
+		if (indices2.x) spec = SkyRadianceLod(R, rough * (SkyMips() - 1) * 0.8) * asfloat(indices2.z);
 		else {
 			float3 acc = SkyRadiance(R);
 			[unroll] for (int k = 0; k < 6; k++) {
@@ -788,7 +796,9 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
@@ -983,7 +993,7 @@ float4 TonemapPS(FsOut i) : SV_Target0
 		float2 v = i.uv - 0.5;
 		c *= 1 - dot(v, v) * 0.35;
 	}
-	else c = saturate(c);      // legacy BSP maps: their content is already display-referred
+	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 	c = LinearToSrgb(c);
 	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 	c += (n - 0.5) / 255.0;
@@ -1004,12 +1014,12 @@ float4 FxaaPS(FsOut i) : SV_Target0
 	float se = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, 0.5) * rcp, 0).a;
 	float lmax = max(max(nw, ne), max(sw, se)), lmin = min(min(nw, ne), min(sw, se));
 	if (max(lmax, m.a) - min(lmin, m.a) < max(0.05, lmax * 0.125)) return float4(m.rgb, 1);
-	float2 dir = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
+	float2 dir = float2(-((nw + ne) - (sw + se)), (nw )KTSRC",
+R"KTSRC(+ sw) - (ne + se));
 	float red = max((nw + ne + sw + se) * 0.03125, 1.0 / 128.0);
 	float rmin = 1.0 / (min(abs(dir.x), abs(dir.y)) + red);
 	dir = clamp(dir * rmin, -8.0, 8.0) * rcp;
-	float3 a = 0.5 * (Tex2D[src)KTSRC",
-R"KTSRC(Srv].SampleLevel(sClamp, uv - dir / 6, 0).rgb + Tex2D[srcSrv].SampleLevel(sClamp, uv + dir / 6, 0).rgb);
+	float3 a = 0.5 * (Tex2D[srcSrv].SampleLevel(sClamp, uv - dir / 6, 0).rgb + Tex2D[srcSrv].SampleLevel(sClamp, uv + dir / 6, 0).rgb);
 	float3 b = a * 0.5 + 0.25 * (Tex2D[srcSrv].SampleLevel(sClamp, uv - dir * 0.5, 0).rgb + Tex2D[srcSrv].SampleLevel(sClamp, uv + dir * 0.5, 0).rgb);
 	float lb = dot(b, float3(0.299, 0.587, 0.114));
 	return float4((lb < min(lmin, m.a) || lb > max(lmax, m.a)) ? a : b, 1);
@@ -1075,7 +1085,9 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
@@ -1207,7 +1219,9 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
@@ -1452,7 +1466,9 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
@@ -1649,7 +1665,9 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 };
+float Overbright() { return max(extraParams.x, 1.0); }
 
 float3 SrgbToLinear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
 float3 LinearToSrgb(float3 c) { c = max(c, 0); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
@@ -1900,12 +1918,12 @@ float4 FxFog(float3 P, float3 V, float dist)
 	inscatter += sunColor.rgb * sunColor.w * pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 * fogColor.rgb;
 	return float4(inscatter, opacity);
 }
-float WaveHeight(float2 p, float t, out float2 grad)
+float WaveHeight(float2)KTSRC",
+R"KTSRC( p, float t, out float2 grad)
 {
 	// a few directional waves + two scrolling octaves of ripples (metres, seconds)
 	static const float4 W[6] = {
-		float4(0.80, 0.60,)KTSRC",
-R"KTSRC( 0.55, 1.10), float4(-0.45, 0.89, 0.90, 1.50), float4(0.20, -0.98, 1.70, 2.10),
+		float4(0.80, 0.60, 0.55, 1.10), float4(-0.45, 0.89, 0.90, 1.50), float4(0.20, -0.98, 1.70, 2.10),
 		float4(-0.92, -0.38, 2.60, 2.90), float4(0.60, -0.80, 4.30, 3.70), float4(0.98, 0.20, 6.10, 4.30) };
 	float h = 0; grad = 0;
 	[unroll] for (int k = 0; k < 6; k++) {

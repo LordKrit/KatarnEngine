@@ -65,7 +65,7 @@ float4 PS(VsOut i) : SV_Target0
 	}
 	if (drawTarget == 1) {
 		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
-		float s = 1.0 / max(Exposure(), 1e-6);
+		float s = (skyParams.w > 0.5 ? Overbright() : 1.0) / max(Exposure(), 1e-6);   // HD: legacy colours are scaled by identityLight
 		if (flags & (1u << 11)) s *= glowBoost;
 		c.rgb *= s;
 	}

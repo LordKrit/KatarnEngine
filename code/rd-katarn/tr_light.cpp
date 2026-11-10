@@ -27,6 +27,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "tr_local.h"
+#include "katarn/kt_world.h"
 
 #define	DLIGHT_AT_RADIUS		16
 // at the edge of a dlight's influence, this amount of light will be added
@@ -393,7 +394,21 @@ void R_SetupEntityLighting(const trRefdef_t* refdef, trRefEntity_t* ent) {
 	}
 
 	// if NOWORLDMODEL, only use dynamic lights (menu system, etc)
-	if (!(refdef->rdflags & RDF_NOWORLDMODEL)
+	if (!(refdef->rdflags & RDF_NOWORLDMODEL) && kt::World_Active()) {
+		// KatarnEngine HD world: its BSP is collision only (no light grid), so legacy-lit models get the world's sky
+		// and sun instead (display-referred, the scale the old vertex lighting works in)
+		const kt::WorldEnv& env = kt::World_Env();
+		float amb[3];
+		for (int c = 0; c < 3; c++) amb[c] = env.hasSH ? env.sh[0][c] * 0.282095f * 3.14159f : 0.35f;
+		float al = 0.2126f * amb[0] + 0.7152f * amb[1] + 0.0722f * amb[2];
+		float sl = 0.2126f * env.sunColor[0] + 0.7152f * env.sunColor[1] + 0.0722f * env.sunColor[2];
+		for (int c = 0; c < 3; c++) {
+			ent->ambientLight[c] = 95.0f * (al > 1e-4f ? amb[c] / al : 1.0f);
+			ent->directedLight[c] = 150.0f * (sl > 1e-4f ? env.sunColor[c] / sl : 1.0f);
+		}
+		VectorCopy(env.sunDir, ent->lightDir);
+	}
+	else if (!(refdef->rdflags & RDF_NOWORLDMODEL)
 		&& tr.world->lightGridData) {
 		R_SetupEntityLightingGrid(ent);
 	}

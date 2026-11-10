@@ -51,7 +51,9 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
 	if (gflags & 1) clip(a.a - alphaRef);
 	float3 n = normalize(i.normal);
-	if (!front) n = -n;
+	// Quake's front faces are clockwise (it culls GL_FRONT with the CCW default), so a "front" face here is the back
+	// of the surface: flip the normal towards the viewer only then
+	if (front) n = -n;
 	float rough = roughness, metal = metallic;
 	if (specTex) {
 		float3 sp = Tex2D[NonUniformResourceIndex(specTex)].Sample(sWrap, i.uv).rgb;
