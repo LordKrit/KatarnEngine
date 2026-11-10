@@ -389,9 +389,13 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 		rough = r.x; metal = r.y; matAO = r.z;
 	}
 	if (specTex) {
-		float3 sp = Tex2D[NonUniformResourceIndex(specTex)].Sample(sWrap, i.uv).rgb;
-		rough = saturate(1.0 - Luminance(sp) * 0.9);
+		// rend2 specularMap: rgb = specular colour, a = gloss
+		float4 sp = Tex2D[NonUniformResourceIndex(specTex)].Sample(sWrap, i.uv);
+		rough = sp.a < 0.999 ? 1.0 - sp.a : saturate(1.0 - Luminance(sp.rgb) * 0.9);
 	}
+	// models without PBR maps are flagged (metal + 2) so the lighting keeps their reflections soft, like rend2
+	// (no specular / gloss data: a dull dielectric, not a coated one)
+	bool authored = rmoTex != 0 || specTex != 0;
 	float3 baked = 0;
 	bool hasBaked = false;
 	if ((gflags & 4) && lightmapTex) { baked = Tex2D[NonUniformResourceIndex(lightmapTex)].Sample(sClamp, i.lmuv).rgb * bakedScale; hasBaked = true; }
@@ -399,7 +403,7 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	GBufferOut o;
 	o.albedo = float4(a.rgb, matAO);
 	rough = clamp(rough, 0.045, 1.0);
-	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, metal);
+	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (authored ? 0.0 : 2.0));
 	o.emissive = float4(hasBaked ? baked * a.rgb : 0, 0);
 	return o;
 }
@@ -720,7 +724,8 @@ R"KTSRC(
 	float3 g2 = Tex2D[indices0.z].Load(int3(px, 0)).rgb;
 	float3 N = DecodeNormal(g1.xy);
 	bool baked = g1.z < 0;
-	float rough = abs(g1.z), metal = g1.w;
+	bool plainLegacy = g1.w > 1.5;               // old model without PBR maps
+	float rough = abs(g1.z), metal = plainLegacy ? g1.w - 2.0 : g1.w;
 	float3 albedo = g0.rgb;
 	float ao = g0.a;
 	if (lflags & 1) ao *= Tex2D[aoTex].Load(int3(px, 0)).r;
@@ -795,7 +800,7 @@ R"KTSRC(
 		// below the horizon the "sky" is the ground: darken reflections that point down
 		spec *= saturate(R.z * 4 + 0.6);
 		// screen-space reflections from last frame's lit scene
-		if (ssrSrv && rough < 0.45 && !baked) {
+		if (ssrSrv && rough < 0.45 && !baked && !plainLegacy) {
 			float3 O = P + N * (2.0 + viewZ * 0.002);
 			float stepLen = 6.0 + viewZ * 0.01;
 			float jit = frac(52.9829189 * frac(dot(float2(px), float2(0.06711056, 0.00583715)) + indices2.w * 0.618));
@@ -833,7 +838,7 @@ R"KTSRC(
 	}
 	else {
 		Lo += SkyAmbient(N) * diff * ao * skyParams.z;
-		Lo += spec * env * specOcc * skyParams.z;
+		Lo += spec * env * specOcc * skyParams.z * (plainLegacy ? 0.25 : 1.0);
 		Lo += g2;
 	}
 	Lo = ApplyFog(Lo, P, V, dist);

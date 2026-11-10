@@ -79,9 +79,13 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 		rough = r.x; metal = r.y; matAO = r.z;
 	}
 	if (specTex) {
-		float3 sp = Tex2D[NonUniformResourceIndex(specTex)].Sample(sWrap, i.uv).rgb;
-		rough = saturate(1.0 - Luminance(sp) * 0.9);
+		// rend2 specularMap: rgb = specular colour, a = gloss
+		float4 sp = Tex2D[NonUniformResourceIndex(specTex)].Sample(sWrap, i.uv);
+		rough = sp.a < 0.999 ? 1.0 - sp.a : saturate(1.0 - Luminance(sp.rgb) * 0.9);
 	}
+	// models without PBR maps are flagged (metal + 2) so the lighting keeps their reflections soft, like rend2
+	// (no specular / gloss data: a dull dielectric, not a coated one)
+	bool authored = rmoTex != 0 || specTex != 0;
 	float3 baked = 0;
 	bool hasBaked = false;
 	if ((gflags & 4) && lightmapTex) { baked = Tex2D[NonUniformResourceIndex(lightmapTex)].Sample(sClamp, i.lmuv).rgb * bakedScale; hasBaked = true; }
@@ -89,7 +93,7 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	GBufferOut o;
 	o.albedo = float4(a.rgb, matAO);
 	rough = clamp(rough, 0.045, 1.0);
-	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, metal);
+	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (authored ? 0.0 : 2.0));
 	o.emissive = float4(hasBaked ? baked * a.rgb : 0, 0);
 	return o;
 }
