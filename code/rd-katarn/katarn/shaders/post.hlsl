@@ -97,6 +97,12 @@ void BloomDownCS(uint3 id : SV_DispatchThreadID)
 		float soft = clamp(br - thr + knee, 0, 2 * knee);
 		soft = soft * soft / (4 * knee + 1e-4);
 		r *= max(soft, br - thr) / max(br, 1e-4);
+		if (histBuf) {
+			// rend2 dynamic glow: the glow stages, blurred with the bloom (no threshold)
+			float3 gl = 0;
+			[unroll] for (int gy = -1; gy <= 1; gy++) [unroll] for (int gx = -1; gx <= 1; gx++) gl += Fetch(histBuf, uv + float2(gx, gy) * h);
+			r += gl / 9.0 * ex * dt;
+		}
 	}
 	else r = (d + e + i + j) * 0.125 + (a + c + k + m) * 0.03125 + (b + f + hh + l) * 0.0625 + g0 * 0.125;
 	UavTex[dstUav][id.xy] = float4(r, 1);

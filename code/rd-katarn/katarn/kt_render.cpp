@@ -26,6 +26,7 @@ void GL_ResetState();
 // ------------------------------------------------------------------------------------------------ cvars
 static cvar_t* kt_debug, * kt_ssao, * kt_shadows, * kt_shadowRes, * kt_shadowDist, * kt_bloom, * kt_exposure, * kt_manualExposure;
 static cvar_t* kt_fxaa, * kt_glowBoost, * kt_debugView, * kt_shaderDir, * kt_legacyDeferred, * kt_sun, * kt_fog, * kt_aoRadius, * kt_aoIntensity;
+static cvar_t* kt_dynGlow;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
 static void RegisterCvars()
@@ -50,6 +51,7 @@ static void RegisterCvars()
 	kt_lights = ri.Cvar_Get("kt_lights", "1", CVAR_ARCHIVE);
 	kt_dlightScale = ri.Cvar_Get("kt_dlightScale", "1.0", CVAR_ARCHIVE);
 	kt_speeds = ri.Cvar_Get("kt_speeds", "0", 0);
+	kt_dynGlow = ri.Cvar_Get("kt_dynamicGlow", "1", CVAR_ARCHIVE);   // rend2-style dynamic glow strength (glow stages blurred into the bloom)
 	kt_ssr = ri.Cvar_Get("kt_ssr", "1", CVAR_ARCHIVE);                 // screen-space reflections (HD worlds)
 	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
 	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
@@ -124,6 +126,7 @@ static struct RState {
 	// targets
 	Texture screen, screenDepth, ldr;
 	Texture hdr, depth, gb0, gb1, gb2, ao, aoTmp, shadow, skyLut;
+	Texture glow;                    // glow stages (saber blades, lights) drawn again here; blurred into the bloom (rend2 dynamic glow)
 	Texture hdrPrev;                 // last frame's lit scene (screen-space reflections)
 	bool hdrPrevValid = false;
 	std::vector<GpuLight> tubes;     // lightsaber blades this view (line lights)
@@ -282,8 +285,9 @@ static ID3D12PipelineState* LegacyPSO(uint32_t bits, int target)   // target 0 s
 	}
 	if (bits & PSO_WIRE) d.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
 	d.PrimitiveTopologyType = (bits & PSO_LINES) ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d.NumRenderTargets = 1;
+	d.NumRenderTargets = target == 1 ? 2 : 1;   // HDR: + the glow target (same blend)
 	d.RTVFormats[0] = target == 1 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+	if (target == 1) d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	ID3D12PipelineState* p = CreateGraphicsPSO(d, "legacy");
 	R.psos[key] = p;
@@ -383,7 +387,7 @@ static bool CreatePipelines()
 // ------------------------------------------------------------------------------------------------ targets
 static void DestroyTargets()
 {
-	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
+	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
 	for (Texture* t : all) DestroyTexture(*t);
 	for (auto& t : R.bloomDown) DestroyTexture(t);
 	for (auto& t : R.bloomUp) DestroyTexture(t);
@@ -399,6 +403,7 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 	ok &= CreateTexture(R.screenDepth, w, h, 1, DXGI_FORMAT_D32_FLOAT, TEX_DEPTH, 1, zero, "screen depth");
 	ok &= CreateTexture(R.ldr, w, h, 1, DXGI_FORMAT_R8G8B8A8_UNORM, TEX_RT, 1, black, "ldr");
 	ok &= CreateTexture(R.hdr, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT | TEX_UAV, 1, black, "hdr");
+	ok &= CreateTexture(R.glow, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "glow");
 	ok &= CreateTexture(R.hdrPrev, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, nullptr, "hdr previous");
 	R.hdrPrevValid = false;
 	ok &= CreateTexture(R.depth, w, h, 1, DXGI_FORMAT_D32_FLOAT, TEX_DEPTH, 1, zero, "depth");
@@ -525,7 +530,12 @@ static void FlushStream(int target)
 	Texture& ds = target == 1 ? R.depth : R.screenDepth;
 	Transition(cl, rt, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	Transition(cl, ds, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-	cl->OMSetRenderTargets(1, &rt.rtv[0], FALSE, &ds.dsv[0]);
+	if (target == 1) {
+		Transition(cl, R.glow, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		D3D12_CPU_DESCRIPTOR_HANDLE two[2] = { rt.rtv[0], R.glow.rtv[0] };
+		cl->OMSetRenderTargets(2, two, FALSE, &ds.dsv[0]);
+	}
+	else cl->OMSetRenderTargets(1, &rt.rtv[0], FALSE, &ds.dsv[0]);
 	if (target == 1) cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
 	else cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.defaultCB);
 	ID3D12PipelineState* last = nullptr;
@@ -1016,7 +1026,13 @@ static void RenderWorldView()
 
 	// ---- forward legacy content into the HDR scene
 	Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+	{
+		const float zero4g[4] = { 0, 0, 0, 0 };
+		Transition(cl, R.glow, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		cl->ClearRenderTargetView(R.glow.rtv[0], zero4g, 0, nullptr);
+	}
 	FlushStream(1);
+	Transition(cl, R.glow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
 	// ---- camera: exposure
 	D3D12_RESOURCE_STATES srvAll = srv;
@@ -1071,6 +1087,7 @@ static void RenderWorldView()
 			if (i > 0) { dw = Q_max(1u, (uint32_t)(R.bloomDown[i - 1].width / 2)); dh = Q_max(1u, (uint32_t)(R.bloomDown[i - 1].height / 2)); }
 			dw = Q_min(dw, d.width); dh = Q_min(dh, d.height);
 			uint32_t k[8] = { src, d.uav[0], 0, 0, d.width, d.height, 0, i == 0 ? 0u : 1u };
+			if (i == 0) { k[2] = R.glow.srv; float gs = kt_dynGlow->value / Q_max(1e-3f, kt_bloom->value); memcpy(&k[6], &gs, 4); }
 			Dispatch(cl, R.csBloomDown, k, 8, (d.width + 7) / 8, (d.height + 7) / 8);
 			Transition(cl, d, srvAll);
 			src = d.srv;

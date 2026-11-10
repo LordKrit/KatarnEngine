@@ -34,7 +34,17 @@ float4 SampleUnit(uint tex, float2 uv, bool clampMode, bool pointMode)
 	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 }
 
-float4 PS(VsOut i) : SV_Target0
+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; };
+float4 Shade(VsOut i);
+PsOut PS(VsOut i)
+{
+	PsOut o;
+	o.c = Shade(i);
+	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
+	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
+	return o;
+}
+float4 Shade(VsOut i)
 {
 	float4 c = i.color;
 	if (drawTarget == 1) c.rgb = SrgbToLinear(c.rgb);

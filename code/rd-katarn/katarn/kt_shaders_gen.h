@@ -153,7 +153,17 @@ float4 SampleUnit(uint tex, float2 uv, bool clampMode, bool pointMode)
 	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 }
 
-float4 PS(VsOut i) : SV_Target0
+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; };
+float4 Shade(VsOut i);
+PsOut PS(VsOut i)
+{
+	PsOut o;
+	o.c = Shade(i);
+	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
+	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
+	return o;
+}
+float4 Shade(VsOut i)
 {
 	float4 c = i.color;
 	if (drawTarget == 1) c.rgb = SrgbToLinear(c.rgb);
@@ -1105,6 +1115,12 @@ void BloomDownCS(uint3 id : SV_DispatchThreadID)
 		float soft = clamp(br - thr + knee, 0, 2 * knee);
 		soft = soft * soft / (4 * knee + 1e-4);
 		r *= max(soft, br - thr) / max(br, 1e-4);
+		if (histBuf) {
+			// rend2 dynamic glow: the glow stages, blurred with the bloom (no threshold)
+			float3 gl = 0;
+			[unroll] for (int gy = -1; gy <= 1; gy++) [unroll] for (int gx = -1; gx <= 1; gx++) gl += Fetch(histBuf, uv + float2(gx, gy) * h);
+			r += gl / 9.0 * ex * dt;
+		}
 	}
 	else r = (d + e + i + j) * 0.125 + (a + c + k + m) * 0.03125 + (b + f + hh + l) * 0.0625 + g0 * 0.125;
 	UavTex[dstUav][id.xy] = float4(r, 1);
@@ -1163,11 +1179,11 @@ float4 FxaaPS(FsOut i) : SV_Target0
 	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float4 m = Tex2D[srcSrv].SampleLevel(sClamp, uv, 0);
 	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * rcp, 0).a;
-	float ne = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, -0.5) * rcp, 0).a;
+	float ne = Tex2D[srcSrv].SampleLevel(sClamp)KTSRC",
+R"KTSRC(, uv + float2(0.5, -0.5) * rcp, 0).a;
 	float sw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, 0.5) * rcp, 0).a;
 	float se = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, 0.5) * rcp, 0).a;
-	float lmax = max(max(nw, ne), max(sw, se)), lmin = min(min(nw, ne), min(sw, se)))KTSRC",
-R"KTSRC(;
+	float lmax = max(max(nw, ne), max(sw, se)), lmin = min(min(nw, ne), min(sw, se));
 	if (max(lmax, m.a) - min(lmin, m.a) < max(0.05, lmax * 0.125)) return float4(m.rgb, 1);
 	float2 dir = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
 	float red = max((nw + ne + sw + se) * 0.03125, 1.0 / 128.0);
