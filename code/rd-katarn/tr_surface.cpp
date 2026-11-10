@@ -26,6 +26,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "tr_local.h"
+#include "katarn/kt_render.h"
 
 /*
 
@@ -1269,6 +1270,7 @@ static void DoSprite(vec3_t origin, const float radius, const float rotation)
 static void RB_SurfaceSaberGlow()
 {
 	refEntity_t* e = &backEnd.currentEntity->e;
+	kt::R_AddSaberLight(e->origin, e->axis[0], e->saberLength, e->shaderRGBA);
 
 	// Render the glow part of the blade
 	for (float i = e->saberLength; i > 0; i -= e->radius * 0.65f)

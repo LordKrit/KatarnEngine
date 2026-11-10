@@ -514,9 +514,9 @@ cbuffer Draw : register(b0)
 	uint lightBuf;
 	uint lightCount;
 	uint aoTex;
-	uint lflags;     // 1 = AO on, 2 = shadows on
+	uint lflags;     // 1 = AO on, 2 = shadows on, 4 = volumetric sun
 	uint debugMode;
-	uint lpad0;
+	uint ssrSrv;     // last frame's lit scene (0 = no screen-space reflections)
 };
 
 struct Light { float3 pos; float radius; float3 color; float type; float3 dir; float spotCos; float spotInner; float invSquare; float2 lp; };
@@ -620,6 +620,18 @@ float Shadow(float3 P, float3 N, float viewZ)
 	return lerp(1, s, c == 3 ? fade : 1);
 }
 
+// one shadow tap (volumetric fog marching)
+float ShadowFast(float3 P, float viewZ)
+{
+	int c = 0;
+	[unroll] for (int i = 0; i < 4; i++) if (viewZ > cascadeSplits[i]) c = i + 1;
+	if (c >= 4) return 1;
+	float4 sc = mul(cascadeViewProj[c], float4(P, 1));
+	float2 suv = sc.xy * float2(0.5, -0.5) + 0.5;
+	if (any(suv < 0) || any(suv > 1) || sc.z > 1) return 1;
+	return Tex2DArray[indices1.x].SampleCmpLevelZero(sShadow, float3(suv, c), sc.z - shadowParams.y * 2);
+}
+
 float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 {
 	if (fogParams.x <= 0) return col;
@@ -635,8 +647,25 @@ float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 	// a blurred sky (top mips): the raw horizon row of a sky texture has sharp vertical detail, which the fog would
 	// smear into streaks running up the whole screen
 	float3 inscatter = (indices2.x ? SkyRadianceLod(hd, max(SkyMips() - 4, 0)) : SkyRadiance(hd)) * fogColor.rgb;
-	inscatter += sunColor.rgb * sunColor.w * pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 * fogColor.rgb;
-	return lerp(col, inscatter, opacity);
+	float sunVis = 1;
+	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0) {
+		// volumetric: how much of the view ray inside the shadow range sees the sun (shafts through the fog)
+		float maxD = min(dist, cascadeSplits[3]);
+		float jitter = frac(52.9829189 * frac(dot(P.xy * 0.37 + indices2.w * 0.618, float2(0.06711056, 0.00583715))));
+		float lit = 0;
+		const int STEPS = 16;
+		[loop] for (int k = 0; k < STEPS; k++) {
+			float t = (k + jitter) / STEPS;
+			t *= t;                                          // more samples near the camera
+			float3 Q = camPos.xyz - V * (maxD * t);
+			lit += ShadowFast(Q, maxD * t);
+		}
+		sunVis = lit / STEPS;
+		sunVis = lerp(1, sunVis, saturate(maxD / max(dist, 1)));
+	}
+	float phase = pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 + 0.04;   // forward scattering + a little everywhere
+	inscatter += sunColor.rgb * sunColor.w * phase * fogColor.rgb * (sunVis * 1.6 - 0.15 * (1 - sunVis));
+	return lerp(col, max(inscatter, 0), opacity);
 }
 
 [numthreads(8, 8, 1)]
@@ -661,7 +690,8 @@ void CS(uint3 id : SV_DispatchThreadID)
 	}
 	float4 g0 = Tex2D[indices0.x].Load(int3(px, 0));
 	float4 g1 = Tex2D[indices0.y].Load(int3(px, 0));
-	float3 g2 = Tex2D[indices0.z].Load(int3(px, 0)).rgb;
+	float3 g2 = Tex2D[indices)KTSRC",
+R"KTSRC(0.z].Load(int3(px, 0)).rgb;
 	float3 N = DecodeNormal(g1.xy);
 	bool baked = g1.z < 0;
 	float rough = abs(g1.z), metal = g1.w;
@@ -682,6 +712,28 @@ void CS(uint3 id : SV_DispatchThreadID)
 	// local lights
 	for (uint i = 0; i < lightCount; i++) {
 		Light l = LoadLight(i);
+		if (l.type == 2) {
+			// line light (lightsaber): nearest point on the segment for diffuse, the point nearest the reflection
+			// ray for the highlight
+			float3 A = l.pos, Bv = l.dir;
+			float len2 = max(dot(Bv, Bv), 1e-4);
+			float tP = saturate(dot(P - A, Bv) / len2);
+			float3 Cd = A + Bv * tP - P;
+			float dd2 = dot(Cd, Cd);
+			if (dd2 > l.radius * l.radius) continue;
+			float wnd = saturate(1 - pow(dd2 / (l.radius * l.radius), 2)); wnd *= wnd;
+			float att = wnd * l.invSquare / max(dd2, 16.0);
+			float3 Rr = reflect(-V, N);
+			float3 A0 = A - P;
+			float rb = dot(Rr, Bv), ra = dot(Rr, A0);
+			float tR = saturate((dot(A0, Bv) * 0 + ra * rb - dot(A0, Bv)) / max(len2 - rb * rb, 1e-3));
+			float3 Cs = A + Bv * tR - P;
+			float3 Ldiff = Cd * rsqrt(max(dd2, 1e-4)), Lspec = normalize(Cs);
+			float NoLd = saturate(dot(N, Ldiff));
+			Lo += diff / PI * NoLd * l.color * att;
+			Lo += (Brdf(N, V, Lspec, 0, f0, max(rough, 0.12)) ) * l.color * att;
+			continue;
+		}
 		float3 d = l.pos - P;
 		float d2 = dot(d, d);
 		if (d2 > l.radius * l.radius) continue;
@@ -702,8 +754,7 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 spec = 0;
 	{
 		// rough reflections: a small cone of sky samples around R
-		float3 t = normalize(abs(R.z) <)KTSRC",
-R"KTSRC( 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
+		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
 		float3 b = cross(R, t);
 		float cone = rough * rough * 1.2;
 		if (indices2.x) spec = SkyRadianceLod(R, rough * (SkyMips() - 1) * 0.8) * asfloat(indices2.z);
@@ -717,6 +768,38 @@ R"KTSRC( 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
 		}
 		// below the horizon the "sky" is the ground: darken reflections that point down
 		spec *= saturate(R.z * 4 + 0.6);
+		// screen-space reflections from last frame's lit scene
+		if (ssrSrv && rough < 0.45 && !baked) {
+			float3 O = P + N * (2.0 + viewZ * 0.002);
+			float stepLen = 6.0 + viewZ * 0.01;
+			float jit = frac(52.9829189 * frac(dot(float2(px), float2(0.06711056, 0.00583715)) + indices2.w * 0.618));
+			float3 Q = O + R * stepLen * jit;
+			float hit = 0; float2 huv = 0;
+			[loop] for (int sI = 0; sI < 40; sI++) {
+				Q += R * stepLen;
+				stepLen *= 1.08;
+				float4 cp = mul(viewProj, float4(Q, 1));
+				if (cp.w <= 0) break;
+				float2 suv = cp.xy / cp.w * float2(0.5, -0.5) + 0.5;
+				if (any(suv < 0) || any(suv > 1)) break;
+				float2 spx = viewport.xy + suv * viewport.zw;
+				float sd = Tex2D[indices0.w].Load(int3(spx, 0)).r;
+				float rayZ = ViewDepth(cp.z / cp.w), sceneZ = ViewDepth(sd);
+				float diffZ = rayZ - sceneZ;
+				if (sd > 0 && diffZ > 0 && diffZ < stepLen * 2.5) {
+					float4 pp = mul(prevViewProj, float4(Q, 1));
+					huv = pp.xy / pp.w * float2(0.5, -0.5) + 0.5;
+					float2 e = saturate(min(huv, 1 - huv) * 10);
+					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0.2);
+					break;
+				}
+			}
+			if (hit > 0) {
+				float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, (viewport.xy + huv * viewport.zw) * invTargetSize.xy, 0).rgb;
+				sc = min(sc, 64.0);                              // no fireflies from the sun disc
+				spec = lerp(spec, sc / max(skyParams.z, 1e-3), hit);
+			}
+		}
 	}
 	if (baked) {
 		Lo += g2 * ao;

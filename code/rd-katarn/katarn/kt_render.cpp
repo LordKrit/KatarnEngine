@@ -26,7 +26,7 @@ void GL_ResetState();
 // ------------------------------------------------------------------------------------------------ cvars
 static cvar_t* kt_debug, * kt_ssao, * kt_shadows, * kt_shadowRes, * kt_shadowDist, * kt_bloom, * kt_exposure, * kt_manualExposure;
 static cvar_t* kt_fxaa, * kt_glowBoost, * kt_debugView, * kt_shaderDir, * kt_legacyDeferred, * kt_sun, * kt_fog, * kt_aoRadius, * kt_aoIntensity;
-static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds;
+static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow;
 
 static void RegisterCvars()
 {
@@ -50,6 +50,10 @@ static void RegisterCvars()
 	kt_lights = ri.Cvar_Get("kt_lights", "1", CVAR_ARCHIVE);
 	kt_dlightScale = ri.Cvar_Get("kt_dlightScale", "1.0", CVAR_ARCHIVE);
 	kt_speeds = ri.Cvar_Get("kt_speeds", "0", 0);
+	kt_ssr = ri.Cvar_Get("kt_ssr", "1", CVAR_ARCHIVE);                 // screen-space reflections (HD worlds)
+	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
+	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
+	kt_saberGlow = ri.Cvar_Get("kt_saberGlow", "2", CVAR_ARCHIVE);     // brightness of the blade glow sprites in the HDR scene
 }
 
 // ------------------------------------------------------------------------------------------------ math
@@ -119,6 +123,9 @@ static struct RState {
 	// targets
 	Texture screen, screenDepth, ldr;
 	Texture hdr, depth, gb0, gb1, gb2, ao, aoTmp, shadow, skyLut;
+	Texture hdrPrev;                 // last frame's lit scene (screen-space reflections)
+	bool hdrPrevValid = false;
+	std::vector<GpuLight> tubes;     // lightsaber blades this view (line lights)
 	Texture bloomDown[6], bloomUp[6];
 	int bloomLevels = 0;
 	Buffer exposure, sh;
@@ -357,7 +364,7 @@ static bool CreatePipelines()
 // ------------------------------------------------------------------------------------------------ targets
 static void DestroyTargets()
 {
-	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
+	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
 	for (Texture* t : all) DestroyTexture(*t);
 	for (auto& t : R.bloomDown) DestroyTexture(t);
 	for (auto& t : R.bloomUp) DestroyTexture(t);
@@ -373,6 +380,8 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 	ok &= CreateTexture(R.screenDepth, w, h, 1, DXGI_FORMAT_D32_FLOAT, TEX_DEPTH, 1, zero, "screen depth");
 	ok &= CreateTexture(R.ldr, w, h, 1, DXGI_FORMAT_R8G8B8A8_UNORM, TEX_RT, 1, black, "ldr");
 	ok &= CreateTexture(R.hdr, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT | TEX_UAV, 1, black, "hdr");
+	ok &= CreateTexture(R.hdrPrev, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, nullptr, "hdr previous");
+	R.hdrPrevValid = false;
 	ok &= CreateTexture(R.depth, w, h, 1, DXGI_FORMAT_D32_FLOAT, TEX_DEPTH, 1, zero, "depth");
 	ok &= CreateTexture(R.gb0, w, h, 1, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, TEX_RT, 1, black, "gbuffer albedo");
 	ok &= CreateTexture(R.gb1, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "gbuffer normal");
@@ -620,6 +629,7 @@ void R_BeginView(const ViewDesc& v)
 	memcpy(R.prevViewProj, R.viewProj, 64);
 	MatMul(R.viewProj, R.proj, v.worldToEye);
 	R.deferred.clear();
+	R.tubes.clear();
 
 	// view constants
 	ViewConstants& c = R.vc;
@@ -923,6 +933,12 @@ static void RenderWorldView()
 			lights.push_back(l);
 		}
 	}
+	if (kt_lights->integer && kt_saberLight->value > 0)
+		for (const GpuLight& t : R.tubes) if (lights.size() < 1024) {
+			GpuLight l = t;
+			for (int q = 0; q < 3; q++) l.color[q] *= kt_saberLight->value;
+			lights.push_back(l);
+		}
 	uint32_t nl = (uint32_t)lights.size();
 	if (!nl) { GpuLight dummy = {}; lights.push_back(dummy); }
 	UploadAlloc la = Upload(lights.size() * sizeof(GpuLight), 256);
@@ -944,7 +960,8 @@ static void RenderWorldView()
 	Transition(cl, R.hdr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	{
 		uint32_t k[8] = { R.hdr.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, R.ao.srv,
-			(ao ? 1u : 0u) | (shadows ? 2u : 0u), (uint32_t)Q_max(0, kt_debugView->integer), 0 };
+			(ao ? 1u : 0u) | (shadows ? 2u : 0u) | (kt_volumetric->integer ? 4u : 0u), (uint32_t)Q_max(0, kt_debugView->integer),
+			(hd && kt_ssr->integer && R.hdrPrevValid) ? R.hdrPrev.srv : 0u };
 		Dispatch(cl, R.csLighting, k, 8, gx, gy);
 	}
 
@@ -969,6 +986,14 @@ static void RenderWorldView()
 
 	// ---- camera: exposure
 	D3D12_RESOURCE_STATES srvAll = srv;
+	// keep this frame's lit scene for next frame's screen-space reflections
+	if (hd && kt_ssr->integer) {
+		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		Transition(cl, R.hdrPrev, D3D12_RESOURCE_STATE_COPY_DEST);
+		cl->CopyResource(R.hdrPrev.res, R.hdr.res);
+		Transition(cl, R.hdrPrev, srvAll);
+		R.hdrPrevValid = true;
+	}
 	Transition(cl, R.hdr, srvAll);
 	Transition(cl, R.exposure, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	{
@@ -1027,6 +1052,24 @@ static void RenderWorldView()
 	Transition(cl, R.screen, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.defaultCB);
 }
+
+// a lightsaber blade (from the glow surface): a line light from the hilt to the tip
+void R_AddSaberLight(const float* start, const float* dir, float length, const uint8_t* rgba)
+{
+	if (!R.inView || length < 1.0f || R.tubes.size() >= 64) return;
+	GpuLight l = {};
+	for (int q = 0; q < 3; q++) { l.pos[q] = start[q]; l.dir[q] = dir[q] * length; }
+	l.radius = 220.0f + length;
+	// the blade colour, saturated (the glow sprites carry it), as radiance; intensity / d^2 from the nearest point
+	float c[3] = { rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f };
+	float mx = Q_max(c[0], Q_max(c[1], c[2]));
+	if (mx < 0.01f) { c[0] = c[1] = c[2] = 1; mx = 1; }
+	for (int q = 0; q < 3; q++) l.color[q] = powf(c[q] / mx, 2.2f) * 1.0f;
+	l.type = 2;
+	l.invSquare = 5000.0f;
+	R.tubes.push_back(l);
+}
+float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }
 
 void R_EndView()
 {

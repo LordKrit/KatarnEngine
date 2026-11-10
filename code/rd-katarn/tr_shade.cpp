@@ -1932,7 +1932,7 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	}
 	d.albedoTex = albedo->texnum;
 	d.flags = flags;
-	d.roughness = world ? 0.7f : 0.55f;
+	d.roughness = world ? 0.7f : 0.78f;   // characters: cloth / skin (0.55 read as plastic)
 	d.metallic = 0.0f;
 	d.bakedScale = 1.0f;
 	memcpy(d.tint, tint, sizeof(tint));
@@ -2022,7 +2022,7 @@ static void RB_IterateStagesGeneric(const shaderCommands_t* input)
 		{
 			continue;
 		}
-		kt::GL_SetStage(p_stage, p_stage->glow);
+		kt::GL_SetStage(p_stage, p_stage->glow || (backEnd.currentEntity && backEnd.currentEntity->e.reType == RT_SABER_GLOW));
 
 		// Reject this stage if it's not a glow stage but we are doing a glow pass.
 		if (g_bRenderGlowingObjects && !p_stage->glow)

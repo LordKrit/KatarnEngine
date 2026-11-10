@@ -64,6 +64,8 @@ bool R_ViewIsWorld();
 void R_Begin2D();
 
 void R_AppendLegacy(const LegacyDraw& d);
+void R_AddSaberLight(const float* start, const float* dir, float length, const uint8_t* rgba);
+float SaberGlowBoost();
 void GL_SetStage(const void* stage, bool glow);   // the shader stage being drawn (glow boost)
 // projection to use for 3D views (D3D, reversed-Z infinite) - the GL translation layer swaps it in for the
 // front end's GL projection
