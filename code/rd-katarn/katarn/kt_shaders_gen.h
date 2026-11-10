@@ -520,8 +520,30 @@ Light LoadLight(uint i)
 	return l;
 }
 
+// the HD world's sky texture (Blender equirectangular), else Katarn's atmosphere LUT
+float3 SkyRadianceLod(float3 d, float lod)
+{
+	if (indices2.x) {
+		float2 uv = float2(0.5 - atan2(d.y, d.x) / (2 * PI), 0.5 - asin(clamp(d.z, -1, 1)) / PI);
+		return Tex2D[indices2.x].SampleLevel(sWrap, uv, lod).rgb * skyParams.y;
+	}
+	float phi = atan2(d.y, d.x);
+	float el = asin(clamp(d.z, -1, 1));
+	float2 uv = float2(phi / (2 * PI) + 0.5, 0.5 - el / PI);
+	return Tex2D[indices1.z].SampleLevel(sWrap, uv, 0).rgb;
+}
+
+float SkyMips()
+{
+	if (!indices2.x) return 1;
+	uint w, h, m;
+	Tex2D[indices2.x].GetDimensions(0, w, h, m);
+	return m;
+}
+
 float3 SkyRadiance(float3 d)
 {
+	if (indices2.x) return SkyRadianceLod(d, 0);
 	float phi = atan2(d.y, d.x);
 	float el = asin(clamp(d.z, -1, 1));
 	float2 uv = float2(phi / (2 * PI) + 0.5, 0.5 - el / PI);
@@ -530,6 +552,7 @@ float3 SkyRadiance(float3 d)
 
 float3 SkyAmbient(float3 n)
 {
+	if (indices2.y) return EvalSH(n);
 	float3 sh[9];
 	for (int k = 0; k < 9; k++) sh[k] = asfloat(BUF(shBuf).Load3(k * 16));
 	float3 r = sh[0] * 0.282095;
@@ -537,7 +560,7 @@ float3 SkyAmbient(float3 n)
 	r += sh[4] * 1.092548 * n.x * n.y + sh[5] * 1.092548 * n.y * n.z;
 	r += sh[6] * 0.315392 * (3.0 * n.z * n.z - 1.0);
 	r += sh[7] * 1.092548 * n.x * n.z + sh[8] * 0.546274 * (n.x * n.x - n.y * n.y);
-	return max(r, 0) / PI;
+	return max(r, 0);
 }
 
 float D_GGX(float NoH, float a) { float a2 = a * a; float f = (NoH * a2 - NoH) * NoH + 1.0; return a2 / (PI * f * f); }
@@ -672,12 +695,16 @@ void CS(uint3 id : SV_DispatchThreadID)
 		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
 		float3 b = cross(R, t);
 		float cone = rough * rough * 1.2;
-		float3 acc = SkyRadiance(R);
-		[unroll] for (int k = 0; k < 6; k++) {
-			float a = k * (2 * PI / 6);
-			acc += SkyRadiance(normalize(R + (t * cos(a) + b * sin(a)) * cone));
+		if (indices2.x) spec = SkyRadianceLod(R, rough * (SkyMips() - 1) * 0.8);
+		else {
+			float3 acc = SkyRadiance(R);
+			[unroll] for (int k = 0; k < 6; k++) {
+				float a = k * (2 * PI / 6);
+				acc += SkyRadiance(normalize(R + (t * cos(a) + b * sin(a)) * cone)))KTSRC",
+R"KTSRC(;
+			}
+			spec = acc / 7.0;
 		}
-		spec = acc / 7.0;
 		// below the horizon the "sky" is the ground: darken reflections that point down
 		spec *= saturate(R.z * 4 + 0.6);
 	}
@@ -1674,14 +1701,10 @@ FsOut FullscreenVS(uint id : SV_VertexID)
 
 cbuffer Draw : register(b0)
 {
-	uint instanceBase;
-	uint materialIndex;
-	uint instanceBuf;     // ByteAddressBuffer: per instance 3 rows object->world, 3 rows normal matrix (float4 each)
 	uint materialBuf;     // ByteAddressBuffer: Material records
 	uint cascade;         // shadow pass: cascade index
 	uint drawMode;        // 0 gbuffer, 1 shadow
 	uint drawPad0;
-	uint drawPad1;
 };
 
 struct Material {
@@ -1710,26 +1733,23 @@ Material LoadMaterial(uint i)
 	return m;
 }
 
-struct VsIn { float3 pos : POSITION; float3 normal : NORMAL; float4 tangent : TANGENT; float2 uv : TEXCOORD0; uint inst : SV_InstanceID; };
+struct VsIn { float3 pos : POSITION; float2 n : NORMAL; float2 t : TANGENT; float2 uv : TEXCOORD0; uint2 mat : BLENDINDICES; };
 struct VsOut {
 	float4 pos : SV_Position;
 	float3 normal : NORMAL;
 	float4 tangent : TANGENT;
 	float2 uv : TEXCOORD0;
+	nointerpolation uint mat : MATERIAL;
 };
 
 VsOut VS(VsIn i)
 {
-	uint o = (instanceBase + i.inst) * 96;
-	float4 r0 = asfloat(BUF(instanceBuf).Load4(o)), r1 = asfloat(BUF(instanceBuf).Load4(o + 16)), r2 = asfloat(BUF(instanceBuf).Load4(o + 32));
-	float3 wp = float3(dot(r0, float4(i.pos, 1)), dot(r1, float4(i.pos, 1)), dot(r2, float4(i.pos, 1)));
-	float3 n0 = asfloat(BUF(instanceBuf).Load3(o + 48)), n1 = asfloat(BUF(instanceBuf).Load3(o + 64)), n2 = asfloat(BUF(instanceBuf).Load3(o + 80));
 	VsOut v;
-	v.pos = mul(drawMode == 1 ? cascadeViewProj[cascade] : viewProj, float4(wp, 1));
-	v.normal = float3(dot(n0, i.normal), dot(n1, i.normal), dot(n2, i.normal));
-	float3 t = float3(dot(r0.xyz, i.tangent.xyz), dot(r1.xyz, i.tangent.xyz), dot(r2.xyz, i.tangent.xyz));
-	v.tangent = float4(t, i.tangent.w);
+	v.pos = mul(drawMode == 1 ? cascadeViewProj[cascade] : viewProj, float4(i.pos, 1));
+	v.normal = DecodeNormal(i.n);
+	v.tangent = float4(DecodeNormal(i.t), i.mat.y > 32767 ? -1.0 : 1.0);
 	v.uv = i.uv;
+	v.mat = i.mat.x;
 	return v;
 }
 
@@ -1741,7 +1761,7 @@ struct GBufferOut {
 
 GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 {
-	Material m = LoadMaterial(materialIndex);
+	Material m = LoadMaterial(i.mat);
 	float4 albedo = m.baseColor;
 	if (m.albedoTex) albedo *= Tex2D[NonUniformResourceIndex(m.albedoTex)].Sample(sWrap, i.uv);
 	if (m.mflags & 1) clip(albedo.a - m.alphaCutoff);
@@ -1775,7 +1795,7 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 // shadow depth (alpha-tested materials only; opaque uses a null pixel shader)
 void ShadowPS(VsOut i)
 {
-	Material m = LoadMaterial(materialIndex);
+	Material m = LoadMaterial(i.mat);
 	float a = m.baseColor.a;
 	if (m.albedoTex) a *= Tex2D[NonUniformResourceIndex(m.albedoTex)].Sample(sWrap, i.uv).a;
 	clip(a - m.alphaCutoff);

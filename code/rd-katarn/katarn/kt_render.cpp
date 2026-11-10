@@ -26,7 +26,7 @@ void GL_ResetState();
 // ------------------------------------------------------------------------------------------------ cvars
 static cvar_t* kt_debug, * kt_ssao, * kt_shadows, * kt_shadowRes, * kt_shadowDist, * kt_bloom, * kt_exposure, * kt_manualExposure;
 static cvar_t* kt_fxaa, * kt_glowBoost, * kt_debugView, * kt_shaderDir, * kt_legacyDeferred, * kt_sun, * kt_fog, * kt_aoRadius, * kt_aoIntensity;
-static cvar_t* kt_lights, * kt_dlightScale;
+static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds;
 
 static void RegisterCvars()
 {
@@ -49,6 +49,7 @@ static void RegisterCvars()
 	kt_aoIntensity = ri.Cvar_Get("kt_aoIntensity", "1.0", CVAR_ARCHIVE);
 	kt_lights = ri.Cvar_Get("kt_lights", "1", CVAR_ARCHIVE);
 	kt_dlightScale = ri.Cvar_Get("kt_dlightScale", "1.0", CVAR_ARCHIVE);
+	kt_speeds = ri.Cvar_Get("kt_speeds", "0", 0);
 }
 
 // ------------------------------------------------------------------------------------------------ math
@@ -140,6 +141,8 @@ static struct RState {
 	int lastMsec = 0;
 	float dt = 0.016f;
 	bool firstFrame = true;
+	float cascadeTexel[4] = {};
+	int lastSpeeds = 0;
 } R;
 
 static std::string ShaderSource(const char* file)
@@ -624,6 +627,8 @@ void R_BeginView(const ViewDesc& v)
 	c.sunColor[0] = env.sunColor[0]; c.sunColor[1] = env.sunColor[1]; c.sunColor[2] = env.sunColor[2];
 	c.sunColor[3] = kt_sun->integer ? env.sunIntensity : 0.0f;
 	c.skyParams[0] = env.haze; c.skyParams[1] = env.skyIntensity; c.skyParams[2] = env.ambient; c.skyParams[3] = World_Active() ? 1.0f : 0.0f;
+	if (env.envSrv) { c.indices2[0] = env.envSrv; c.skyParams[1] = env.envStrength; }
+	if (env.hasSH) { c.indices2[1] = 1; for (int k = 0; k < 9; k++) for (int q = 0; q < 3; q++) c.ambientSH[k][q] = env.sh[k][q]; }
 	if (kt_fog->integer) {
 		c.fogParams[0] = env.fogDensity; c.fogParams[1] = env.fogFalloff; c.fogParams[2] = env.fogHeight; c.fogParams[3] = env.fogStart;
 	}
@@ -678,6 +683,7 @@ void R_BeginView(const ViewDesc& v)
 			}
 			rad = ceilf(rad / 16.0f) * 16.0f;
 			float texel = 2.0f * rad / R.shadowRes;
+			R.cascadeTexel[ci] = texel;
 			// snap the centre to whole texels in light space
 			float cx = Dot3(ctr, rgt), cy = Dot3(ctr, upl), cz = Dot3(ctr, L);
 			cx = floorf(cx / texel) * texel; cy = floorf(cy / texel) * texel;
@@ -791,7 +797,7 @@ static void FullscreenPass(ID3D12GraphicsCommandList* cl, ID3D12PipelineState* p
 	cl->DrawInstanced(3, 1, 0, 0);
 }
 
-static void WorldView()
+static void RenderWorldView()
 {
 	ID3D12GraphicsCommandList* cl = R.cl;
 	const ViewDesc& v = R.view;
@@ -824,7 +830,14 @@ static void WorldView()
 	cl->OMSetRenderTargets(3, gbs, FALSE, &R.depth.dsv[0]);
 	cl->RSSetViewports(1, &vp);
 	cl->RSSetScissorRects(1, &rect);
-	if (hd) World_DrawGBuffer(cl, R.viewProj);
+	if (hd) {
+		WorldView wv;
+		wv.viewProj = R.viewProj;
+		wv.cam[0] = v.origin[0]; wv.cam[1] = v.origin[1]; wv.cam[2] = v.origin[2];
+		wv.pixelScale = v.h * 0.5f * c.projParams[1];
+		wv.lodError = 1.0f;
+		World_DrawGBuffer(cl, wv);
+	}
 	if (!R.deferred.empty()) DrawDeferredList(cl, false, 0);
 
 	// ---- sun shadows
@@ -838,7 +851,7 @@ static void WorldView()
 			cl->OMSetRenderTargets(0, nullptr, FALSE, &R.shadow.dsv[ci]);
 			cl->RSSetViewports(1, &svp);
 			cl->RSSetScissorRects(1, &src);
-			World_DrawShadow(cl, ci, c.cascadeViewProj[ci]);
+			World_DrawShadow(cl, ci, c.cascadeViewProj[ci], R.cascadeTexel[ci]);
 			if (!R.deferred.empty()) DrawDeferredList(cl, true, ci);
 		}
 	}
@@ -856,9 +869,9 @@ static void WorldView()
 		float ga = 0.3f;
 		uint32_t k[8] = { R.skyLut.uav[0], R.skyLut.srv, R.sh.uav, 128, 64, 0, 0, 0 };
 		memcpy(&k[5], &ga, 4);
-		Dispatch(cl, R.csSkyLut, k, 8, 16, 8);
+		if (!c.indices2[0]) Dispatch(cl, R.csSkyLut, k, 8, 16, 8);
 		Transition(cl, R.skyLut, srv);
-		Dispatch(cl, R.csSkySh, k, 8, 1, 1);
+		if (!c.indices2[1]) Dispatch(cl, R.csSkySh, k, 8, 1, 1);
 		Transition(cl, R.sh, srv);
 	}
 
@@ -989,12 +1002,21 @@ static void WorldView()
 
 void R_EndView()
 {
+	if (R.ready && R.inView && R.viewWorld && kt_speeds && kt_speeds->integer && World_Active()) {
+		int now = ri.Milliseconds();
+		if (now - R.lastSpeeds > 1000) {
+			R.lastSpeeds = now;
+			uint32_t cl; uint64_t tr;
+			World_Stats(cl, tr);
+			ri.Printf(PRINT_ALL, "katarn: %.1f ms, %u clusters, %.2fM triangles (gbuffer), %d characters/models\n", R.dt * 1000.0f, cl, tr / 1e6, (int)R.deferred.size());
+		}
+	}
 	if (!R.ready || !R.inView) return;
 	EnsureList();
 	ID3D12GraphicsCommandList* cl = R.cl;
 	bool world = R.viewWorld && (World_Active() || kt_legacyDeferred->integer >= 0);
 	if (world && R.csLighting && R.tonemapPSO) {
-		WorldView();
+		RenderWorldView();
 	}
 	else {
 		// UI model view (or no world): forward into the screen with its own depth

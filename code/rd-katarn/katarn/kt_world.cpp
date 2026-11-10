@@ -1,4 +1,4 @@
-// KatarnEngine - HD worlds: GPU-resident instanced meshes with PBR materials, cooked from Blender (.kworld)
+// KatarnEngine - HD worlds: GPU-resident world-space clusters with LOD chains and bindless PBR materials (.kworld v2)
 #include "kt_world.h"
 #include "kt_render.h"
 #include "kworld_format.h"
@@ -11,40 +11,38 @@
 
 namespace kt {
 
-struct InstGpu { float r[12]; float n[12]; };     // 96 bytes: object->world rows, normal matrix rows (xyz + pad)
-
 static struct World {
 	bool active = false;
 	std::string name;
 	Buffer vb, ib, materials;
 	std::vector<Texture> textures;
-	std::vector<KwMesh> meshes;
-	std::vector<KwSubmesh> subs;
-	std::vector<KwInstance> inst;
-	std::vector<InstGpu> instGpu;
+	std::vector<KwCluster> clusters;
+	std::vector<KwLod> lods;
 	std::vector<KwMaterial> mats;
-	std::vector<std::vector<uint32_t>> byMesh;   // instance indices per mesh
 	std::vector<KwLight> lights;
 	WorldEnv env;
-	uint32_t instSrv[kFrames][5] = {};
-	ID3D12PipelineState* gbPSO[2] = {};          // cull back, two-sided
+	ID3D12PipelineState* gbPSO[3] = {};          // per cluster class
 	ID3D12PipelineState* shPSO[2] = {};          // opaque, alpha-tested
 	Shader vs, ps, shadowPS;
 	bool pipelines = false;
 	float bmin[3], bmax[3];
-	std::vector<uint32_t> visible;
+	uint64_t drawnTris = 0;
+	uint32_t drawnClusters = 0;
 } W;
 
 static WorldEnv defaultEnv;
+static cvar_t* kt_lodError = nullptr;
+static cvar_t* kt_lodLock = nullptr;
 
 bool World_Active() { return W.active; }
 const WorldEnv& World_Env() { return W.active ? W.env : defaultEnv; }
 
 static const D3D12_INPUT_ELEMENT_DESC kWorldLayout[] = {
 	{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-	{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-	{ "TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-	{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	{ "NORMAL", 0, DXGI_FORMAT_R16G16_SNORM, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	{ "TANGENT", 0, DXGI_FORMAT_R16G16_SNORM, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	{ "BLENDINDICES", 0, DXGI_FORMAT_R16G16_UINT, 0, 28, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 };
 
 static D3D12_SHADER_BYTECODE BCode(const Shader& s)
@@ -57,41 +55,44 @@ static D3D12_SHADER_BYTECODE BCode(const Shader& s)
 static bool CreateWorldPipelines()
 {
 	if (W.pipelines) return true;
+	kt_lodError = ri.Cvar_Get("kt_lodError", "1.0", CVAR_ARCHIVE);
+	kt_lodLock = ri.Cvar_Get("kt_lodLock", "-1", 0);
 	W.vs = R_Shader("world", "VS", "vs_5_1");
 	W.ps = R_Shader("world", "PS", "ps_5_1");
 	W.shadowPS = R_Shader("world", "ShadowPS", "ps_5_1");
 	if (!W.vs.ok || !W.ps.ok) return false;
-	for (int i = 0; i < 2; i++) {
-		D3D12_GRAPHICS_PIPELINE_STATE_DESC d = {};
-		d.SampleMask = 0xffffffff;
-		d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-		d.RasterizerState.CullMode = i ? D3D12_CULL_MODE_NONE : D3D12_CULL_MODE_BACK;
-		d.RasterizerState.FrontCounterClockwise = TRUE;
-		d.RasterizerState.DepthClipEnable = TRUE;
-		for (auto& rt : d.BlendState.RenderTarget) rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL, rt.SrcBlend = D3D12_BLEND_ONE,
-			rt.DestBlend = D3D12_BLEND_ZERO, rt.BlendOp = D3D12_BLEND_OP_ADD, rt.SrcBlendAlpha = D3D12_BLEND_ONE, rt.DestBlendAlpha = D3D12_BLEND_ZERO,
-			rt.BlendOpAlpha = D3D12_BLEND_OP_ADD, rt.LogicOp = D3D12_LOGIC_OP_NOOP;
-		d.DepthStencilState.DepthEnable = TRUE;
-		d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-		d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-		d.InputLayout = { kWorldLayout, 4 };
-		d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-		d.SampleDesc.Count = 1;
-		d.VS = BCode(W.vs); d.PS = BCode(W.ps);
-		d.NumRenderTargets = 3;
-		d.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT; d.RTVFormats[2] = DXGI_FORMAT_R11G11B10_FLOAT;
-		d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-		W.gbPSO[i] = CreateGraphicsPSO(d, "world gbuffer");
-		// shadows: two-sided (Blender scenes are full of single-sided walls), slope-scaled bias
-		d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-		d.RasterizerState.DepthBias = 1000; d.RasterizerState.SlopeScaledDepthBias = 2.0f; d.RasterizerState.DepthBiasClamp = 0.01f;
-		d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-		d.NumRenderTargets = 0;
-		for (auto& f : d.RTVFormats) f = DXGI_FORMAT_UNKNOWN;
-		d.PS = i ? BCode(W.shadowPS) : D3D12_SHADER_BYTECODE{};
-		W.shPSO[i] = CreateGraphicsPSO(d, "world shadow");
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC d = {};
+	d.SampleMask = 0xffffffff;
+	d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+	d.RasterizerState.FrontCounterClockwise = TRUE;
+	d.RasterizerState.DepthClipEnable = TRUE;
+	for (auto& rt : d.BlendState.RenderTarget) rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL, rt.SrcBlend = D3D12_BLEND_ONE,
+		rt.DestBlend = D3D12_BLEND_ZERO, rt.BlendOp = D3D12_BLEND_OP_ADD, rt.SrcBlendAlpha = D3D12_BLEND_ONE, rt.DestBlendAlpha = D3D12_BLEND_ZERO,
+		rt.BlendOpAlpha = D3D12_BLEND_OP_ADD, rt.LogicOp = D3D12_LOGIC_OP_NOOP;
+	d.DepthStencilState.DepthEnable = TRUE;
+	d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+	d.InputLayout = { kWorldLayout, 5 };
+	d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	d.SampleDesc.Count = 1;
+	d.VS = BCode(W.vs); d.PS = BCode(W.ps);
+	d.NumRenderTargets = 3;
+	d.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT; d.RTVFormats[2] = DXGI_FORMAT_R11G11B10_FLOAT;
+	d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+	for (int c = 0; c < 3; c++) {
+		d.RasterizerState.CullMode = c == KWC_OPAQUE ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+		W.gbPSO[c] = CreateGraphicsPSO(d, "world gbuffer");
 	}
-	for (int f = 0; f < kFrames; f++) for (int k = 0; k < 5; k++) W.instSrv[f][k] = AllocDescriptor();
+	// shadows: two-sided (Blender scenes are full of single-sided walls), slope-scaled bias
+	d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	d.RasterizerState.DepthBias = 1000; d.RasterizerState.SlopeScaledDepthBias = 2.0f; d.RasterizerState.DepthBiasClamp = 0.01f;
+	d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	d.NumRenderTargets = 0;
+	for (auto& f : d.RTVFormats) f = DXGI_FORMAT_UNKNOWN;
+	d.PS = D3D12_SHADER_BYTECODE{};
+	W.shPSO[0] = CreateGraphicsPSO(d, "world shadow");
+	d.PS = BCode(W.shadowPS);
+	W.shPSO[1] = CreateGraphicsPSO(d, "world shadow alpha");
 	W.pipelines = true;
 	return W.gbPSO[0] && W.shPSO[0];
 }
@@ -105,7 +106,7 @@ void World_Unload()
 	DestroyBuffer(W.materials);
 	for (auto& t : W.textures) DestroyTexture(t);
 	W.textures.clear();
-	W.meshes.clear(); W.subs.clear(); W.inst.clear(); W.instGpu.clear(); W.mats.clear(); W.byMesh.clear(); W.lights.clear();
+	W.clusters.clear(); W.lods.clear(); W.mats.clear(); W.lights.clear();
 	W.active = false;
 	W.name.clear();
 }
@@ -113,11 +114,8 @@ void World_Unload()
 void World_Shutdown()
 {
 	World_Unload();
-	for (int i = 0; i < 2; i++) {
-		if (W.gbPSO[i]) W.gbPSO[i]->Release();
-		if (W.shPSO[i]) W.shPSO[i]->Release();
-		W.gbPSO[i] = W.shPSO[i] = nullptr;
-	}
+	for (auto*& p : W.gbPSO) { if (p) p->Release(); p = nullptr; }
+	for (auto*& p : W.shPSO) { if (p) p->Release(); p = nullptr; }
 	Shader* s[] = { &W.vs, &W.ps, &W.shadowPS };
 	for (auto* x : s) { if (x->blob) x->blob->Release(); *x = Shader(); }
 	W.pipelines = false;
@@ -142,7 +140,7 @@ static FILE* OpenWorldFile(const char* mapName, std::string& path)
 	return nullptr;
 }
 
-static void ParseEnv(const std::string& text, WorldEnv& e)
+static void ParseEnv(const std::string& text, WorldEnv& e, int& envTex)
 {
 	size_t p = 0;
 	while (p < text.size()) {
@@ -168,25 +166,14 @@ static void ParseEnv(const std::string& text, WorldEnv& e)
 		else if (k == "fogMax") e.fogMax = a;
 		else if (k == "fogColor" && n >= 4) { e.fogColor[0] = a; e.fogColor[1] = b; e.fogColor[2] = c; }
 		else if (k == "exposureEV") e.exposureEV = a;
+		else if (k == "envTex") envTex = (int)a;
+		else if (k == "envStrength") e.envStrength = a;
+		else if (k.size() == 3 && k[0] == 's' && k[1] == 'h' && k[2] >= '0' && k[2] <= '8' && n >= 4) {
+			int i = k[2] - '0';
+			e.sh[i][0] = a; e.sh[i][1] = b; e.sh[i][2] = c;
+			e.hasSH = true;
+		}
 	}
-}
-
-static void BuildInstGpu(const KwInstance& k, InstGpu& g)
-{
-	memcpy(g.r, k.m, 48);
-	// normal matrix = inverse transpose of the 3x3
-	const float* m = k.m;
-	float a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], gg = m[8], h = m[9], i = m[10];
-	float A = e * i - f * h, B = -(d * i - f * gg), C = d * h - e * gg;
-	float D = -(b * i - c * h), E = a * i - c * gg, F = -(a * h - b * gg);
-	float G = b * f - c * e, H = -(a * f - c * d), I = a * e - b * d;
-	float det = a * A + b * B + c * C;
-	float s = fabsf(det) > 1e-20f ? 1.0f / det : 1.0f;
-	// inverse = adj^T / det; inverse transpose = adj / det (cofactor matrix)
-	float n[9] = { A * s, B * s, C * s, D * s, E * s, F * s, G * s, H * s, I * s };
-	g.n[0] = n[0]; g.n[1] = n[1]; g.n[2] = n[2]; g.n[3] = 0;
-	g.n[4] = n[3]; g.n[5] = n[4]; g.n[6] = n[5]; g.n[7] = 0;
-	g.n[8] = n[6]; g.n[9] = n[7]; g.n[10] = n[8]; g.n[11] = 0;
 }
 
 bool World_Load(const char* mapName)
@@ -199,7 +186,7 @@ bool World_Load(const char* mapName)
 	int t0 = ri.Milliseconds();
 	KwHeader h;
 	if (fread(&h, sizeof(h), 1, f) != 1 || memcmp(h.magic, KW_MAGIC, 8) || h.version != KW_VERSION) {
-		Log("^1KatarnEngine: %s is not a version %d .kworld\n", path.c_str(), KW_VERSION);
+		Log("^1KatarnEngine: %s is not a version %d .kworld - cook it again with tools\\katarn_cook\n", path.c_str(), KW_VERSION);
 		fclose(f);
 		return false;
 	}
@@ -215,30 +202,29 @@ bool World_Load(const char* mapName)
 		_fseeki64(f, (long long)s->offset, SEEK_SET);
 		fread(vec.data(), sizeof(T), vec.size(), f);
 	};
-	readVec(KW_MESH, W.meshes);
-	readVec(KW_SUBM, W.subs);
-	readVec(KW_INST, W.inst);
+	readVec(KW_CLUS, W.clusters);
+	readVec(KW_LODS, W.lods);
 	readVec(KW_MATL, W.mats);
 	readVec(KW_LITE, W.lights);
 	std::vector<KwTexture> texs;
 	readVec(KW_TEXT, texs);
 	W.env = WorldEnv();
+	int envTex = -1;
 	if (const KwSection* s = find(KW_ENVT)) {
 		std::string text(s->size, '\0');
 		_fseeki64(f, (long long)s->offset, SEEK_SET);
 		fread(&text[0], 1, s->size, f);
-		ParseEnv(text, W.env);
+		ParseEnv(text, W.env, envTex);
 	}
 	memcpy(W.bmin, h.boundsMin, 12);
 	memcpy(W.bmax, h.boundsMax, 12);
 
-	// geometry, uploaded in chunks
 	auto uploadSection = [&](uint32_t type, Buffer& buf, const char* name) -> bool {
 		const KwSection* s = find(type);
 		if (!s || !s->size) return false;
 		if (!CreateBuffer(buf, s->size, false, name)) return false;
 		std::vector<uint8_t> chunk;
-		const uint64_t CH = 32ull << 20;
+		const uint64_t CH = 64ull << 20;
 		for (uint64_t off = 0; off < s->size; off += CH) {
 			uint64_t n = std::min<uint64_t>(CH, s->size - off);
 			chunk.resize(n);
@@ -250,14 +236,13 @@ bool World_Load(const char* mapName)
 		return true;
 	};
 	bool ok = uploadSection(KW_VERT, W.vb, "world vertices") && uploadSection(KW_INDX, W.ib, "world indices");
-	if (!ok) { Log("^1KatarnEngine: %s has no geometry\n", path.c_str()); fclose(f); World_Unload(); return false; }
+	if (!ok) { Log("^1KatarnEngine: %s: geometry upload failed\n", path.c_str()); fclose(f); World_Unload(); return false; }
 
-	// textures
 	const KwSection* tdat = find(KW_TDAT);
 	W.textures.resize(texs.size());
 	uint64_t pending = 0, texBytes = 0;
 	std::vector<uint8_t> data;
-	for (size_t i = 0; i < texs.size(); i++) {
+	for (size_t i = 0; i < texs.size() && tdat; i++) {
 		const KwTexture& k = texs[i];
 		Texture& t = W.textures[i];
 		DXGI_FORMAT fmt = (DXGI_FORMAT)k.format;
@@ -282,8 +267,8 @@ bool World_Load(const char* mapName)
 	}
 	FlushUploads();
 	fclose(f);
+	if (envTex >= 0 && envTex < (int)W.textures.size() && W.textures[envTex].res) W.env.envSrv = W.textures[envTex].srvSrgb;
 
-	// materials -> GPU (texture indices -> bindless views)
 	std::vector<KwMaterial> gm = W.mats;
 	for (auto& m : gm) {
 		auto view = [&](int32_t ti, bool srgb) -> int32_t {
@@ -300,19 +285,14 @@ bool World_Load(const char* mapName)
 	UploadBuffer(W.materials, 0, gm.data(), gm.size() * sizeof(KwMaterial));
 	FlushUploads();
 
-	W.instGpu.resize(W.inst.size());
-	W.byMesh.assign(W.meshes.size(), {});
-	for (size_t i = 0; i < W.inst.size(); i++) {
-		BuildInstGpu(W.inst[i], W.instGpu[i]);
-		if (W.inst[i].mesh < W.meshes.size()) W.byMesh[W.inst[i].mesh].push_back((uint32_t)i);
-	}
 	W.active = true;
 	W.name = mapName;
 	uint64_t tris = 0;
-	for (auto& s : W.subs) tris += s.indexCount / 3;
-	Log("KatarnEngine: HD world %s - %u meshes, %u instances, %llu unique triangles, %u materials, %u textures (%llu MB), %u lights, %d ms\n",
-		mapName, (unsigned)W.meshes.size(), (unsigned)W.inst.size(), (unsigned long long)tris, (unsigned)W.mats.size(),
-		(unsigned)W.textures.size(), (unsigned long long)(texBytes >> 20), (unsigned)W.lights.size(), ri.Milliseconds() - t0);
+	for (auto& c : W.clusters) if (c.numLods) tris += W.lods[c.firstLod].indexCount / 3;
+	Log("KatarnEngine: HD world %s - %u clusters, %.2fM triangles (LOD0), %.0f MB geometry, %u materials, %u textures (%llu MB), %u lights, sky %s, %d ms\n",
+		mapName, (unsigned)W.clusters.size(), tris / 1e6, (W.vb.size + W.ib.size) / 1048576.0, (unsigned)W.mats.size(),
+		(unsigned)W.textures.size(), (unsigned long long)(texBytes >> 20), (unsigned)W.lights.size(), W.env.envSrv ? "texture" : "atmosphere",
+		ri.Milliseconds() - t0);
 	return true;
 }
 
@@ -320,22 +300,19 @@ bool World_Load(const char* mapName)
 struct Frustum { float p[6][4]; int n; };
 static void FrustumFromMatrix(const float* m, Frustum& fr, bool ortho)
 {
-	// column-major m: row r = (m[r], m[4+r], m[8+r], m[12+r])
 	auto row = [&](int r, float* o) { o[0] = m[r]; o[1] = m[4 + r]; o[2] = m[8 + r]; o[3] = m[12 + r]; };
 	float r0[4], r1[4], r2[4], r3[4];
 	row(0, r0); row(1, r1); row(2, r2); row(3, r3);
 	int n = 0;
-	for (int i = 0; i < 4; i++) { fr.p[n][i] = r3[i] + r0[i]; } n++;
-	for (int i = 0; i < 4; i++) { fr.p[n][i] = r3[i] - r0[i]; } n++;
-	for (int i = 0; i < 4; i++) { fr.p[n][i] = r3[i] + r1[i]; } n++;
-	for (int i = 0; i < 4; i++) { fr.p[n][i] = r3[i] - r1[i]; } n++;
+	for (int i = 0; i < 4; i++) fr.p[n][i] = r3[i] + r0[i]; n++;
+	for (int i = 0; i < 4; i++) fr.p[n][i] = r3[i] - r0[i]; n++;
+	for (int i = 0; i < 4; i++) fr.p[n][i] = r3[i] + r1[i]; n++;
+	for (int i = 0; i < 4; i++) fr.p[n][i] = r3[i] - r1[i]; n++;
 	if (ortho) {
-		for (int i = 0; i < 4; i++) { fr.p[n][i] = r2[i]; } n++;          // z >= 0 (well behind: casters are kept by the deep z range)
-		for (int i = 0; i < 4; i++) { fr.p[n][i] = r3[i] - r2[i]; } n++;  // z <= 1
+		for (int i = 0; i < 4; i++) fr.p[n][i] = r2[i]; n++;
+		for (int i = 0; i < 4; i++) fr.p[n][i] = r3[i] - r2[i]; n++;
 	}
-	else {
-		for (int i = 0; i < 4; i++) { fr.p[n][i] = r3[i] - r2[i]; } n++;  // reversed-Z: near plane is z <= w
-	}
+	else { for (int i = 0; i < 4; i++) fr.p[n][i] = r3[i] - r2[i]; n++; }
 	fr.n = n;
 }
 static bool BoxVisible(const Frustum& fr, const float* mn, const float* mx)
@@ -347,77 +324,85 @@ static bool BoxVisible(const Frustum& fr, const float* mn, const float* mx)
 	}
 	return true;
 }
-
-static void DrawWorld(ID3D12GraphicsCommandList* cl, const float* matrix, bool shadow, int cascade)
+static float BoxDistance(const float* p, const float* mn, const float* mx)
 {
-	if (!W.active || !W.pipelines) return;
-	Frustum fr;
-	FrustumFromMatrix(matrix, fr, shadow);
-	// visible instances grouped by mesh, written into the upload ring
-	std::vector<uint32_t> counts(W.meshes.size(), 0), starts(W.meshes.size(), 0);
-	W.visible.clear();
-	for (size_t mi = 0; mi < W.meshes.size(); mi++) {
-		starts[mi] = (uint32_t)W.visible.size();
-		for (uint32_t ii : W.byMesh[mi]) {
-			const KwInstance& k = W.inst[ii];
-			if (shadow && (k.flags & 1)) continue;
-			if (!BoxVisible(fr, k.boundsMin, k.boundsMax)) continue;
-			W.visible.push_back(ii);
-		}
-		counts[mi] = (uint32_t)W.visible.size() - starts[mi];
-	}
-	if (W.visible.empty()) return;
-	UploadAlloc a = Upload(W.visible.size() * sizeof(InstGpu), 256);
-	if (!a.cpu) return;
-	InstGpu* dst = (InstGpu*)a.cpu;
-	for (size_t i = 0; i < W.visible.size(); i++) dst[i] = W.instGpu[W.visible[i]];
-	uint32_t srvIdx = W.instSrv[g.frameIndex][shadow ? 1 + cascade : 0];
-	D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
-	sd.Format = DXGI_FORMAT_R32_TYPELESS;
-	sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-	sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	sd.Buffer.FirstElement = a.offset / 4;
-	sd.Buffer.NumElements = (UINT)(W.visible.size() * sizeof(InstGpu) / 4);
-	sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-	g.dev->CreateShaderResourceView(a.res, &sd, CpuHandle(srvIdx));
+	float d2 = 0;
+	for (int i = 0; i < 3; i++) { float d = p[i] < mn[i] ? mn[i] - p[i] : p[i] > mx[i] ? p[i] - mx[i] : 0; d2 += d * d; }
+	return sqrtf(d2);
+}
 
+static void BindGeometry(ID3D12GraphicsCommandList* cl)
+{
 	Transition(cl, W.vb, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	D3D12_VERTEX_BUFFER_VIEW vbv = { W.vb.va, (UINT)W.vb.size, sizeof(KwVertex) };
-	D3D12_INDEX_BUFFER_VIEW ibv = { W.ib.va, (UINT)W.ib.size, DXGI_FORMAT_R32_UINT };
+	Transition(cl, W.ib, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	Transition(cl, W.materials, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	D3D12_VERTEX_BUFFER_VIEW vbv = { W.vb.va, (UINT)Q_min((uint64_t)0xffffffffu, W.vb.size), sizeof(KwVertex) };
+	D3D12_INDEX_BUFFER_VIEW ibv = { W.ib.va, (UINT)Q_min((uint64_t)0xffffffffu, W.ib.size), DXGI_FORMAT_R32_UINT };
 	cl->IASetVertexBuffers(0, 1, &vbv);
 	cl->IASetIndexBuffer(&ibv);
 	cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+}
+
+void World_DrawGBuffer(ID3D12GraphicsCommandList* cl, const WorldView& v)
+{
+	if (!W.active || !W.pipelines) return;
+	Frustum fr;
+	FrustumFromMatrix(v.viewProj, fr, false);
+	BindGeometry(cl);
+	float allowed = Q_max(0.1f, kt_lodError ? kt_lodError->value : 1.0f) * Q_max(0.1f, v.lodError);
+	int lock = kt_lodLock ? kt_lodLock->integer : -1;
 	ID3D12PipelineState* last = nullptr;
-	for (size_t mi = 0; mi < W.meshes.size(); mi++) {
-		if (!counts[mi]) continue;
-		const KwMesh& mesh = W.meshes[mi];
-		for (uint32_t si = 0; si < mesh.numSubmeshes; si++) {
-			const KwSubmesh& sm = W.subs[mesh.firstSubmesh + si];
-			uint32_t matFlags = sm.material < W.mats.size() ? W.mats[sm.material].flags : 0;
-			ID3D12PipelineState* p = shadow ? W.shPSO[(matFlags & KWM_MASK) ? 1 : 0] : W.gbPSO[(matFlags & KWM_TWOSIDED) ? 1 : 0];
-			if (!p) continue;
-			if (p != last) { cl->SetPipelineState(p); last = p; }
-			uint32_t c[8] = { starts[mi], sm.material < W.mats.size() ? sm.material : 0, srvIdx, W.materials.srv, (uint32_t)cascade, shadow ? 1u : 0u, 0, 0 };
-			cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 8, c, 0);
-			cl->DrawIndexedInstanced(sm.indexCount, counts[mi], sm.firstIndex, (INT)mesh.baseVertex, 0);
+	W.drawnTris = 0; W.drawnClusters = 0;
+	for (const KwCluster& c : W.clusters) {
+		if (!c.numLods || !BoxVisible(fr, c.boundsMin, c.boundsMax)) continue;
+		float dist = Q_max(1.0f, BoxDistance(v.cam, c.boundsMin, c.boundsMax));
+		uint32_t l = 0;
+		if (lock >= 0) l = Q_min((uint32_t)lock, c.numLods - 1);
+		else while (l + 1 < c.numLods && W.lods[c.firstLod + l + 1].error * v.pixelScale / dist <= allowed) l++;
+		const KwLod& lod = W.lods[c.firstLod + l];
+		ID3D12PipelineState* p = W.gbPSO[c.cls < 3 ? c.cls : 0];
+		if (p != last) {
+			cl->SetPipelineState(p); last = p;
+			uint32_t k[4] = { W.materials.srv, 0, 0, 0 };
+			cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 4, k, 0);
 		}
+		cl->DrawIndexedInstanced(lod.indexCount, 1, lod.firstIndex, (INT)c.baseVertex, 0);
+		W.drawnTris += lod.indexCount / 3;
+		W.drawnClusters++;
 	}
 }
 
-void World_DrawGBuffer(ID3D12GraphicsCommandList* cl, const float* viewProj) { DrawWorld(cl, viewProj, false, 0); }
-void World_DrawShadow(ID3D12GraphicsCommandList* cl, int cascade, const float* vp) { DrawWorld(cl, vp, true, cascade); }
+void World_DrawShadow(ID3D12GraphicsCommandList* cl, int cascade, const float* vp, float texelWorld)
+{
+	if (!W.active || !W.pipelines) return;
+	Frustum fr;
+	FrustumFromMatrix(vp, fr, true);
+	BindGeometry(cl);
+	ID3D12PipelineState* last = nullptr;
+	for (const KwCluster& c : W.clusters) {
+		if (!c.numLods || (c.flags & 1) || !BoxVisible(fr, c.boundsMin, c.boundsMax)) continue;
+		uint32_t l = 0;
+		while (l + 1 < c.numLods && W.lods[c.firstLod + l + 1].error <= texelWorld * 1.5f) l++;
+		const KwLod& lod = W.lods[c.firstLod + l];
+		ID3D12PipelineState* p = W.shPSO[c.cls == KWC_MASKED ? 1 : 0];
+		if (p != last) {
+			cl->SetPipelineState(p); last = p;
+			uint32_t k[4] = { W.materials.srv, (uint32_t)cascade, 1, 0 };
+			cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 4, k, 0);
+		}
+		cl->DrawIndexedInstanced(lod.indexCount, 1, lod.firstIndex, (INT)c.baseVertex, 0);
+	}
+}
 
 void World_AppendLights(std::vector<GpuLight>& out, const float* cam)
 {
 	if (!W.active || W.lights.empty()) return;
-	// nearest lights first (the lighting pass loops over all of them)
 	std::vector<std::pair<float, uint32_t>> order;
 	order.reserve(W.lights.size());
 	for (uint32_t i = 0; i < W.lights.size(); i++) {
 		const KwLight& l = W.lights[i];
 		float d[3] = { l.pos[0] - cam[0], l.pos[1] - cam[1], l.pos[2] - cam[2] };
-		float dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) - l.radius;
-		order.push_back({ dist, i });
+		order.push_back({ sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) - l.radius, i });
 	}
 	std::sort(order.begin(), order.end());
 	for (size_t k = 0; k < order.size() && k < 256; k++) {
@@ -430,5 +415,7 @@ void World_AppendLights(std::vector<GpuLight>& out, const float* cam)
 		out.push_back(g);
 	}
 }
+
+void World_Stats(uint32_t& clusters, uint64_t& tris) { clusters = W.drawnClusters; tris = W.drawnTris; }
 
 } // namespace kt

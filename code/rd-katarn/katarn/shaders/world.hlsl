@@ -3,14 +3,10 @@
 
 cbuffer Draw : register(b0)
 {
-	uint instanceBase;
-	uint materialIndex;
-	uint instanceBuf;     // ByteAddressBuffer: per instance 3 rows object->world, 3 rows normal matrix (float4 each)
 	uint materialBuf;     // ByteAddressBuffer: Material records
 	uint cascade;         // shadow pass: cascade index
 	uint drawMode;        // 0 gbuffer, 1 shadow
 	uint drawPad0;
-	uint drawPad1;
 };
 
 struct Material {
@@ -39,26 +35,23 @@ Material LoadMaterial(uint i)
 	return m;
 }
 
-struct VsIn { float3 pos : POSITION; float3 normal : NORMAL; float4 tangent : TANGENT; float2 uv : TEXCOORD0; uint inst : SV_InstanceID; };
+struct VsIn { float3 pos : POSITION; float2 n : NORMAL; float2 t : TANGENT; float2 uv : TEXCOORD0; uint2 mat : BLENDINDICES; };
 struct VsOut {
 	float4 pos : SV_Position;
 	float3 normal : NORMAL;
 	float4 tangent : TANGENT;
 	float2 uv : TEXCOORD0;
+	nointerpolation uint mat : MATERIAL;
 };
 
 VsOut VS(VsIn i)
 {
-	uint o = (instanceBase + i.inst) * 96;
-	float4 r0 = asfloat(BUF(instanceBuf).Load4(o)), r1 = asfloat(BUF(instanceBuf).Load4(o + 16)), r2 = asfloat(BUF(instanceBuf).Load4(o + 32));
-	float3 wp = float3(dot(r0, float4(i.pos, 1)), dot(r1, float4(i.pos, 1)), dot(r2, float4(i.pos, 1)));
-	float3 n0 = asfloat(BUF(instanceBuf).Load3(o + 48)), n1 = asfloat(BUF(instanceBuf).Load3(o + 64)), n2 = asfloat(BUF(instanceBuf).Load3(o + 80));
 	VsOut v;
-	v.pos = mul(drawMode == 1 ? cascadeViewProj[cascade] : viewProj, float4(wp, 1));
-	v.normal = float3(dot(n0, i.normal), dot(n1, i.normal), dot(n2, i.normal));
-	float3 t = float3(dot(r0.xyz, i.tangent.xyz), dot(r1.xyz, i.tangent.xyz), dot(r2.xyz, i.tangent.xyz));
-	v.tangent = float4(t, i.tangent.w);
+	v.pos = mul(drawMode == 1 ? cascadeViewProj[cascade] : viewProj, float4(i.pos, 1));
+	v.normal = DecodeNormal(i.n);
+	v.tangent = float4(DecodeNormal(i.t), i.mat.y > 32767 ? -1.0 : 1.0);
 	v.uv = i.uv;
+	v.mat = i.mat.x;
 	return v;
 }
 
@@ -70,7 +63,7 @@ struct GBufferOut {
 
 GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 {
-	Material m = LoadMaterial(materialIndex);
+	Material m = LoadMaterial(i.mat);
 	float4 albedo = m.baseColor;
 	if (m.albedoTex) albedo *= Tex2D[NonUniformResourceIndex(m.albedoTex)].Sample(sWrap, i.uv);
 	if (m.mflags & 1) clip(albedo.a - m.alphaCutoff);
@@ -104,7 +97,7 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 // shadow depth (alpha-tested materials only; opaque uses a null pixel shader)
 void ShadowPS(VsOut i)
 {
-	Material m = LoadMaterial(materialIndex);
+	Material m = LoadMaterial(i.mat);
 	float a = m.baseColor.a;
 	if (m.albedoTex) a *= Tex2D[NonUniformResourceIndex(m.albedoTex)].Sample(sWrap, i.uv).a;
 	clip(a - m.alphaCutoff);

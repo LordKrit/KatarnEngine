@@ -22,8 +22,30 @@ Light LoadLight(uint i)
 	return l;
 }
 
+// the HD world's sky texture (Blender equirectangular), else Katarn's atmosphere LUT
+float3 SkyRadianceLod(float3 d, float lod)
+{
+	if (indices2.x) {
+		float2 uv = float2(0.5 - atan2(d.y, d.x) / (2 * PI), 0.5 - asin(clamp(d.z, -1, 1)) / PI);
+		return Tex2D[indices2.x].SampleLevel(sWrap, uv, lod).rgb * skyParams.y;
+	}
+	float phi = atan2(d.y, d.x);
+	float el = asin(clamp(d.z, -1, 1));
+	float2 uv = float2(phi / (2 * PI) + 0.5, 0.5 - el / PI);
+	return Tex2D[indices1.z].SampleLevel(sWrap, uv, 0).rgb;
+}
+
+float SkyMips()
+{
+	if (!indices2.x) return 1;
+	uint w, h, m;
+	Tex2D[indices2.x].GetDimensions(0, w, h, m);
+	return m;
+}
+
 float3 SkyRadiance(float3 d)
 {
+	if (indices2.x) return SkyRadianceLod(d, 0);
 	float phi = atan2(d.y, d.x);
 	float el = asin(clamp(d.z, -1, 1));
 	float2 uv = float2(phi / (2 * PI) + 0.5, 0.5 - el / PI);
@@ -32,6 +54,7 @@ float3 SkyRadiance(float3 d)
 
 float3 SkyAmbient(float3 n)
 {
+	if (indices2.y) return EvalSH(n);
 	float3 sh[9];
 	for (int k = 0; k < 9; k++) sh[k] = asfloat(BUF(shBuf).Load3(k * 16));
 	float3 r = sh[0] * 0.282095;
@@ -39,7 +62,7 @@ float3 SkyAmbient(float3 n)
 	r += sh[4] * 1.092548 * n.x * n.y + sh[5] * 1.092548 * n.y * n.z;
 	r += sh[6] * 0.315392 * (3.0 * n.z * n.z - 1.0);
 	r += sh[7] * 1.092548 * n.x * n.z + sh[8] * 0.546274 * (n.x * n.x - n.y * n.y);
-	return max(r, 0) / PI;
+	return max(r, 0);
 }
 
 float D_GGX(float NoH, float a) { float a2 = a * a; float f = (NoH * a2 - NoH) * NoH + 1.0; return a2 / (PI * f * f); }
@@ -174,12 +197,15 @@ void CS(uint3 id : SV_DispatchThreadID)
 		float3 t = normalize(abs(R.z) < 0.99 ? cross(R, float3(0, 0, 1)) : cross(R, float3(1, 0, 0)));
 		float3 b = cross(R, t);
 		float cone = rough * rough * 1.2;
-		float3 acc = SkyRadiance(R);
-		[unroll] for (int k = 0; k < 6; k++) {
-			float a = k * (2 * PI / 6);
-			acc += SkyRadiance(normalize(R + (t * cos(a) + b * sin(a)) * cone));
+		if (indices2.x) spec = SkyRadianceLod(R, rough * (SkyMips() - 1) * 0.8);
+		else {
+			float3 acc = SkyRadiance(R);
+			[unroll] for (int k = 0; k < 6; k++) {
+				float a = k * (2 * PI / 6);
+				acc += SkyRadiance(normalize(R + (t * cos(a) + b * sin(a)) * cone));
+			}
+			spec = acc / 7.0;
 		}
-		spec = acc / 7.0;
 		// below the horizon the "sky" is the ground: darken reflections that point down
 		spec *= saturate(R.z * 4 + 0.6);
 	}

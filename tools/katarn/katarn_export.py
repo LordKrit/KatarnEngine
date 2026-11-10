@@ -148,6 +148,88 @@ def tex_ref(t):
 
 
 materials = {}
+groups = {}          # node group trees used by materials
+
+_SKIP_PROPS = {"rna_type", "name", "label", "location", "width", "width_hidden", "height", "dimensions", "inputs", "outputs",
+               "internal_links", "parent", "use_custom_color", "color", "select", "show_options", "show_preview", "hide",
+               "mute", "show_texture", "bl_idname", "bl_label", "bl_description", "bl_icon", "bl_static_type", "bl_width_default",
+               "bl_width_min", "bl_width_max", "bl_height_default", "bl_height_min", "bl_height_max", "type", "location_absolute",
+               "warning_propagation", "color_tag", "texture_mapping", "color_mapping", "image_user", "interface", "is_active_output"}
+
+
+def _val(v):
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, set):
+        return sorted(v)
+    try:
+        return [float(x) for x in v]
+    except TypeError:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return float(v)
+        return str(v)
+
+
+def dump_tree(nt):
+    """every node with its properties, unlinked input values and links (sockets by identifier)"""
+    nodes = {}
+    for n in nt.nodes:
+        d = {"type": n.type, "props": {}, "inputs": [], "outputs": []}
+        for prop in n.bl_rna.properties:
+            k = prop.identifier
+            if k in _SKIP_PROPS or prop.type in ("POINTER", "COLLECTION"):
+                continue
+            try:
+                d["props"][k] = _val(getattr(n, k))
+            except Exception:
+                pass
+        if n.type == "TEX_IMAGE" and n.image is not None:
+            d["props"]["image"] = export_image(n.image)
+            d["props"]["colorspace"] = n.image.colorspace_settings.name
+            d["props"]["alpha_mode"] = n.image.alpha_mode
+        if n.type == "TEX_ENVIRONMENT" and n.image is not None:
+            d["props"]["image"] = export_image(n.image)
+            d["props"]["colorspace"] = n.image.colorspace_settings.name
+        if n.type == "VALTORGB":
+            cr = n.color_ramp
+            d["props"]["ramp"] = {"interpolation": cr.interpolation, "color_mode": cr.color_mode,
+                                  "elements": [[e.position] + list(e.color) for e in cr.elements]}
+        if n.type in ("CURVE_RGB", "CURVE_VEC", "CURVE_FLOAT"):
+            try:
+                n.mapping.initialize()
+                d["props"]["curves"] = [[[p.location[0], p.location[1]] for p in c.points] for c in n.mapping.curves]
+            except Exception:
+                pass
+        if n.type == "GROUP" and n.node_tree is not None:
+            d["props"]["tree"] = n.node_tree.name
+            if n.node_tree.name not in groups:
+                groups[n.node_tree.name] = None
+                groups[n.node_tree.name] = dump_tree(n.node_tree)
+        for s in n.inputs:
+            e = {"id": s.identifier, "name": s.name, "type": s.type, "enabled": bool(getattr(s, "enabled", True))}
+            if hasattr(s, "default_value"):
+                try:
+                    e["value"] = _val(s.default_value)
+                except Exception:
+                    pass
+            if s.is_linked and s.links:
+                lk = s.links[0]
+                if not lk.is_muted:
+                    e["link"] = [lk.from_node.name, lk.from_socket.identifier]
+            d["inputs"].append(e)
+        for s in n.outputs:
+            e = {"id": s.identifier, "name": s.name, "type": s.type, "enabled": bool(getattr(s, "enabled", True))}
+            if n.type in ("VALUE", "RGB") and hasattr(s, "default_value"):
+                e["value"] = _val(s.default_value)
+            d["outputs"].append(e)
+        if n.type == "OUTPUT_MATERIAL" or n.type == "OUTPUT_WORLD":
+            d["props"]["active"] = bool(n.is_active_output)
+        nodes[n.name] = d
+    return {"nodes": nodes}
 
 
 def material(m):
@@ -161,7 +243,13 @@ def material(m):
     info = {"baseColor": list(m.diffuse_color), "roughness": float(m.roughness), "metallic": float(m.metallic),
             "twoSided": not m.use_backface_culling, "alphaMode": "OPAQUE"}
     rm = getattr(m, "surface_render_method", "DITHERED")
+    info["renderMethod"] = rm
     nt = m.node_tree if m.use_nodes else None
+    if nt is not None:
+        try:
+            info["graph"] = dump_tree(nt)
+        except Exception as e:
+            log("  graph dump failed for", m.name, e)
     if nt:
         out = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output), None) or \
               next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL"), None)
@@ -351,6 +439,10 @@ w = scene.world
 if w is not None:
     world["color"] = list(w.color)
     if w.use_nodes and w.node_tree:
+        try:
+            world["graph"] = dump_tree(w.node_tree)
+        except Exception as e:
+            log("  world graph dump failed", e)
         for n in w.node_tree.nodes:
             if n.type == "BACKGROUND":
                 c = n.inputs.get("Color")
@@ -371,10 +463,12 @@ if scene.camera is not None:
 
 allb = [m["bounds"] for m in meshes]
 out = {
-    "format": "katarn-scene", "version": 1, "source": os.path.basename(blend), "blender": bpy.app.version_string,
+    "format": "katarn-scene", "version": 2, "source": os.path.basename(blend), "blender": bpy.app.version_string,
     "units": "metre", "unitScale": scene.unit_settings.scale_length,
     "meshes": meshes, "instances": instances, "materials": materials, "lights": lights,
-    "world": world, "camera": cam, "images": images, "packs": packs,
+    "world": world, "camera": cam, "images": images, "packs": packs, "groups": groups,
+    "view": {"exposure": float(scene.view_settings.exposure), "look": scene.view_settings.look,
+             "transform": scene.view_settings.view_transform},
     "stats": {"uniqueTriangles": tri_total, "instancedTriangles": inst_tri_total, "instances": len(instances),
               "meshes": len(meshes), "materials": len(materials), "lights": len(lights), "images": len(images),
               "seconds": round(time.time() - t0, 1)},

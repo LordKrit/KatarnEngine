@@ -1,19 +1,21 @@
 // KatarnEngine .kworld - cooked HD world (shared by the renderer and tools/katarn_cook)
 //
-// File: KwHeader, then sections anywhere in the file (KwSection table right after the header).
-// Coordinates are Quake units, Z up. Matrices are 3 rows (object -> world).
+// File: KwHeader, KwSection table, then the sections (256-byte aligned).
+// The world is baked into world-space clusters (one spatial cell x one material class each). Every cluster has a
+// LOD chain over the same vertices; the renderer picks a LOD per cluster from its screen-space error. Each vertex
+// carries its material index, so a cluster is drawn with one call whatever materials it holds (bindless).
+// Coordinates are Quake units, Z up.
 #pragma once
 #include <stdint.h>
 
-#define KW_MAGIC "KWORLD01"
-#define KW_VERSION 1
+#define KW_MAGIC "KWORLD02"
+#define KW_VERSION 2
 
 enum KwSectionType : uint32_t {
 	KW_VERT = 0x54524556,   // 'VERT' KwVertex[]
-	KW_INDX = 0x58444E49,   // 'INDX' uint32_t[]
-	KW_MESH = 0x4853454D,   // 'MESH' KwMesh[]
-	KW_SUBM = 0x4D425553,   // 'SUBM' KwSubmesh[]
-	KW_INST = 0x54534E49,   // 'INST' KwInstance[]
+	KW_INDX = 0x58444E49,   // 'INDX' uint32_t[] (relative to the cluster's baseVertex)
+	KW_CLUS = 0x53554C43,   // 'CLUS' KwCluster[]
+	KW_LODS = 0x53444F4C,   // 'LODS' KwLod[]
 	KW_MATL = 0x4C54414D,   // 'MATL' KwMaterial[]
 	KW_TEXT = 0x54584554,   // 'TEXT' KwTexture[]
 	KW_TDAT = 0x54414454,   // 'TDAT' texture mip data (offsets in KwTexture are relative to this section)
@@ -34,26 +36,26 @@ struct KwSection {
 	uint64_t offset;
 	uint64_t size;
 };
-struct KwVertex {               // 48 bytes
+struct KwVertex {               // 32 bytes
 	float pos[3];
-	float normal[3];
-	float tangent[4];           // xyz, w = bitangent sign
+	int16_t normal[2];          // octahedral, snorm
+	int16_t tangent[2];         // octahedral, snorm
 	float uv[2];
+	uint16_t material;
+	int16_t tangentSign;        // +1 / -1 (bitangent = cross(n, t) * sign)
 };
-struct KwMesh {
-	uint32_t firstSubmesh, numSubmeshes;
+enum KwClusterClass : uint32_t { KWC_OPAQUE = 0, KWC_TWOSIDED = 1, KWC_MASKED = 2 };
+struct KwCluster {
+	float boundsMin[3], boundsMax[3];
 	uint32_t baseVertex, numVertices;
-	float boundsMin[3], boundsMax[3];   // object space
-};
-struct KwSubmesh {
-	uint32_t firstIndex, indexCount;
-	uint32_t material, pad;
-};
-struct KwInstance {
-	float m[12];                // 3 rows object -> world
-	uint32_t mesh;
+	uint32_t firstLod, numLods;
+	uint32_t cls;               // KwClusterClass
 	uint32_t flags;             // 1 = no shadow
-	float boundsMin[3], boundsMax[3];   // world space
+};
+struct KwLod {
+	uint32_t firstIndex, indexCount;
+	float error;                // world units
+	uint32_t pad;
 };
 enum KwMaterialFlags : uint32_t { KWM_MASK = 1, KWM_TWOSIDED = 2, KWM_ORM_AO = 4, KWM_BLEND = 8 };
 struct KwMaterial {             // 64 bytes, same layout the shader reads (texture fields are texture indices, -1 = none)
@@ -66,7 +68,7 @@ struct KwMaterial {             // 64 bytes, same layout the shader reads (textu
 struct KwTexture {
 	uint64_t offset, size;      // in TDAT
 	uint32_t width, height, mips;
-	uint32_t format;            // DXGI_FORMAT (BC7_UNORM 98, BC5_UNORM 83, BC4_UNORM 80, R8G8B8A8_UNORM 28)
+	uint32_t format;            // DXGI_FORMAT (BC7_UNORM 98, BC5_UNORM 83, R8G8B8A8_UNORM 28)
 	uint32_t srgb;              // colour data: sample through the sRGB view
 	uint32_t pad;
 };

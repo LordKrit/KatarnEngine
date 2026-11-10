@@ -23,6 +23,17 @@ struct WorldEnv {
 	float fogColor[3] = { 1, 1, 1 };
 	float fogMax = 0.85f;
 	float exposureEV = 0.0f;
+	uint32_t envSrv = 0;           // sky texture (equirectangular, sRGB view), 0 = Katarn's atmosphere
+	float envStrength = 1.0f;
+	bool hasSH = false;
+	float sh[9][3] = {};           // diffuse sky radiance (SH, cosine-convolved, / pi)
+};
+
+struct WorldView {
+	const float* viewProj;
+	float cam[3];
+	float pixelScale;              // pixels per unit at distance 1 (viewport height / 2 * cot(fovY / 2))
+	float lodError;                // allowed screen-space error, pixels
 };
 
 bool World_Load(const char* mapName);
@@ -31,8 +42,9 @@ bool World_Active();
 const WorldEnv& World_Env();
 void World_AppendLights(std::vector<GpuLight>& out, const float* camPos);
 // GBuffer: targets and view constants already bound
-void World_DrawGBuffer(ID3D12GraphicsCommandList* cl, const float* viewProj);
-void World_DrawShadow(ID3D12GraphicsCommandList* cl, int cascade, const float* cascadeViewProj);
+void World_DrawGBuffer(ID3D12GraphicsCommandList* cl, const WorldView& v);
+void World_DrawShadow(ID3D12GraphicsCommandList* cl, int cascade, const float* cascadeViewProj, float texelWorld);
 void World_Shutdown();
+void World_Stats(uint32_t& clusters, uint64_t& tris);
 
 } // namespace kt
