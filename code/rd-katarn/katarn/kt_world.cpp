@@ -35,6 +35,7 @@ static struct World {
 static WorldEnv defaultEnv;
 static cvar_t* kt_lodError = nullptr;
 static cvar_t* kt_lodLock = nullptr;
+static cvar_t* kt_worldPath = nullptr;
 
 bool World_Active() { return W.active; }
 const WorldEnv& World_Env() { return W.active ? W.env : defaultEnv; }
@@ -59,6 +60,7 @@ static bool CreateWorldPipelines()
 	if (W.pipelines) return true;
 	kt_lodError = ri.Cvar_Get("kt_lodError", "1.0", CVAR_ARCHIVE);
 	kt_lodLock = ri.Cvar_Get("kt_lodLock", "-1", 0);
+	kt_worldPath = ri.Cvar_Get("kt_worldPath", "", CVAR_ARCHIVE);   // extra folder holding <map>.kworld (checked first)
 	W.vs = R_Shader("world", "VS", "vs_5_1");
 	W.ps = R_Shader("world", "PS", "ps_5_1");
 	W.shadowPS = R_Shader("world", "ShadowPS", "ps_5_1");
@@ -148,6 +150,11 @@ static FILE* OpenWorldFile(const char* mapName, std::string& path)
 	const char* game = ri.Cvar_VariableString("fs_game");
 	const char* dirs[] = { game, "base" };
 	const char* roots[] = { home, base };
+	const char* extra = ri.Cvar_VariableString("kt_worldPath");
+	if (extra && extra[0]) {
+		path = std::string(extra) + "/" + mapName + ".kworld";
+		if (FILE* f = fopen(path.c_str(), "rb")) return f;
+	}
 	for (const char* root : roots) {
 		if (!root || !*root) continue;
 		for (const char* d : dirs) {
