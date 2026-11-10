@@ -203,7 +203,7 @@ static bool CreateRootSignature()
 	for (auto& t : tables) {
 		D3D12_DESCRIPTOR_RANGE1& r = ranges[t.p];
 		r.RangeType = t.t;
-		r.NumDescriptors = kHeapSize;
+		r.NumDescriptors = UINT_MAX;   // unbounded, as the shaders declare them
 		r.BaseShaderRegister = 0;
 		r.RegisterSpace = t.space;
 		r.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
