@@ -1731,8 +1731,8 @@ static qboolean ParseStage(shaderStage_t* stage, const char** text)
 		}
 		else
 		{
-			ri.Printf(PRINT_WARNING, "WARNING: unknown parameter '%s' in shader '%s'\n", token, shader.name);
-			return qfalse;
+			ri.Printf(PRINT_DEVELOPER, "WARNING: unknown parameter '%s' in shader '%s' (skipped)\n", token, shader.name);
+			SkipRestOfLine(text);   // KatarnEngine: rend2 keywords must not throw away the whole material
 		}
 	}
 
@@ -2431,9 +2431,8 @@ static qboolean ParseShader(const char** text)
 
 		else
 		{
-			ri.Printf(PRINT_WARNING, "WARNING: unknown general shader parameter '%s' in '%s'\n", token, shader.name);
-			COM_EndParseSession();
-			return qfalse;
+			ri.Printf(PRINT_DEVELOPER, "WARNING: unknown general shader parameter '%s' in '%s' (skipped)\n", token, shader.name);
+			SkipRestOfLine(text);
 		}
 	}
 
@@ -3748,8 +3747,22 @@ static void ScanAndLoadShaderFiles(void)
 	==========================================================
 	*/
 	char** shaderFiles = ri.FS_ListFiles("shaders", ".shader", &numShaderFiles);
+	// KatarnEngine: rend2 material files (.mtr) too, as rend2 reads them. They come last in this list, so their text is
+	// placed first and a definition in a .mtr wins over the same name in a .shader (MD ships its saber materials and
+	// character materials this way).
+	int numMtrFiles = 0;
+	char** mtrFiles = ri.FS_ListFiles("shaders", ".mtr", &numMtrFiles);
+	static char s_allNames[MAX_SHADER_FILES][MAX_QPATH];
+	{
+		int n = 0;
+		for (int k = 0; k < numShaderFiles && n < MAX_SHADER_FILES; k++, n++) Q_strncpyz(s_allNames[n], shaderFiles[k], MAX_QPATH);
+		for (int k = 0; k < numMtrFiles && n < MAX_SHADER_FILES; k++, n++) Q_strncpyz(s_allNames[n], mtrFiles[k], MAX_QPATH);
+		if (mtrFiles) ri.FS_FreeFileList(mtrFiles);
+		ri.Printf(PRINT_ALL, "KatarnEngine: %d .shader + %d .mtr files\n", numShaderFiles, numMtrFiles);
+		numShaderFiles = n;
+	}
 
-	if (shaderFiles == nullptr || numShaderFiles == 0)
+	if (numShaderFiles == 0)
 	{
 		// Non-fatal: just warn and bail
 		ri.Printf(PRINT_WARNING, "WARNING: no shader files found\n");
@@ -3776,7 +3789,7 @@ static void ScanAndLoadShaderFiles(void)
 	{
 		char filename[MAX_QPATH];
 
-		Com_sprintf(filename, sizeof(filename), "shaders/%s", shaderFiles[i]);
+		Com_sprintf(filename, sizeof(filename), "shaders/%s", s_allNames[i]);
 
 		const long summand = ri.FS_ReadFile(filename, reinterpret_cast<void**>(&s_shaderBuffers[i]));
 
@@ -3819,7 +3832,7 @@ static void ScanAndLoadShaderFiles(void)
 	COM_Compress(s_shaderText);
 
 	// Free file list
-	ri.FS_FreeFileList(shaderFiles);
+	if (shaderFiles) ri.FS_FreeFileList(shaderFiles);
 
 #ifdef USE_STL_FOR_SHADER_LOOKUPS
 	/*
