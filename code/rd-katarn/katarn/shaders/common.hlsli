@@ -55,7 +55,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black

@@ -26,6 +26,7 @@ void GL_ResetState();
 // ------------------------------------------------------------------------------------------------ cvars
 static cvar_t* kt_debug, * kt_ssao, * kt_shadows, * kt_shadowRes, * kt_shadowDist, * kt_bloom, * kt_exposure, * kt_manualExposure;
 static cvar_t* kt_fxaa, * kt_glowBoost, * kt_debugView, * kt_shaderDir, * kt_legacyDeferred, * kt_sun, * kt_fog, * kt_aoRadius, * kt_aoIntensity;
+static cvar_t* kt_tonemap = nullptr;
 static cvar_t* kt_dynGlow, * kt_contactShadows, * kt_lightShadows;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
@@ -38,6 +39,7 @@ static void RegisterCvars()
 	kt_shadowDist = ri.Cvar_Get("kt_shadowDist", "6000", CVAR_ARCHIVE);
 	kt_bloom = ri.Cvar_Get("kt_bloom", "0.06", CVAR_ARCHIVE);
 	kt_exposure = ri.Cvar_Get("kt_exposure", "0", CVAR_ARCHIVE);
+	kt_tonemap = ri.Cvar_Get("kt_tonemap", "1", CVAR_ARCHIVE);           // HD worlds: 1 AgX (Blender's look), 0 ACES
 	kt_manualExposure = ri.Cvar_Get("kt_manualExposure", "0", CVAR_ARCHIVE);
 	kt_fxaa = ri.Cvar_Get("kt_fxaa", "1", CVAR_ARCHIVE);
 	kt_glowBoost = ri.Cvar_Get("kt_glowBoost", "3", CVAR_ARCHIVE);
@@ -702,6 +704,7 @@ void R_BeginView(const ViewDesc& v)
 	c.postParams[2] = kt_manualExposure->value;
 	c.postParams[3] = kt_glowBoost->value;
 	c.extraParams[0] = (float)(1 << tr.overbrightBits);
+	c.extraParams[1] = kt_tonemap->integer ? 1.0f : 0.0f;
 	if (!World_Active()) c.postParams[2] = 1.0f;   // legacy maps: fixed exposure (their content is display-referred)
 
 	// sun cascades

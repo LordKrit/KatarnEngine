@@ -184,6 +184,22 @@ def find_principled(node, depth=0):
     return None
 
 
+def has_shader(node, kind, depth=0):
+    """a shader node of this type anywhere in the mix / add / group tree feeding the output"""
+    if node is None or depth > 12: return False
+    if node.type == kind: return True
+    if node.type in ("MIX_SHADER", "ADD_SHADER", "REROUTE"):
+        return any(has_shader(i.links[0].from_node, kind, depth + 1) for i in node.inputs
+                   if i.is_linked and (i.type == "SHADER" or node.type == "REROUTE"))
+    if node.type == "GROUP" and node.node_tree:
+        for gn in node.node_tree.nodes:
+            if gn.type == "GROUP_OUTPUT":
+                for i in gn.inputs:
+                    if i.type == "SHADER" and i.is_linked and has_shader(i.links[0].from_node, kind, depth + 1):
+                        return True
+    return False
+
+
 def tex_ref(t):
     if not t: return None
     f = export_image(t["image"])
@@ -338,7 +354,8 @@ def material(m):
                             nm = nn2.links[0].from_node
                             info["normalStrength"] = val(nm.inputs.get("Strength"))
                             info["normalTex"] = tex_ref(trace_image(nm.inputs.get("Color")))
-        if info.get("alphaTex") or (isinstance(info.get("alpha"), float) and info["alpha"] < 0.999):
+        if info.get("alphaTex") or (isinstance(info.get("alpha"), float) and info["alpha"] < 0.999) or \
+                (out and out.inputs[0].is_linked and has_shader(out.inputs[0].links[0].from_node, "BSDF_TRANSPARENT")):
             info["alphaMode"] = "BLEND" if rm == "BLENDED" else "MASK"
     for k in [k for k, v in info.items() if v is None]:
         del info[k]
@@ -422,9 +439,138 @@ def export_mesh(ob):
         ob.to_mesh_clear()
 
 
+def export_hair(ob):
+    """hair / curves objects (grass, ivy strands): each strand becomes a flat ribbon as wide as its radius x2,
+    facing up-ish, with UVs running along the strand (u across, v along) so card textures map like on hair cards"""
+    global tri_total
+    cv = ob.data
+    try:
+        pts = cv.points; crv = cv.curves
+        npt = len(pts); ncv = len(crv)
+    except Exception:
+        return None
+    if npt < 2 or ncv == 0:
+        return None
+    co = np.empty(npt * 3, np.float32); pts.foreach_get("position", co); co = co.reshape(-1, 3)
+    rad = np.full(npt, 0.005, np.float32)
+    try:
+        pts.foreach_get("radius", rad)
+    except Exception:
+        pass
+    off = np.empty(ncv + 1, np.int32)
+    try:
+        cv.curve_offset_data.foreach_get("value", off)
+    except Exception:
+        off = np.array([c.first_point_index for c in crv] + [npt], np.int32)
+    verts, idx = [], []
+    base = 0
+    for c in range(ncv):
+        a, b = int(off[c]), int(off[c + 1])
+        if b - a < 2:
+            continue
+        P = co[a:b]
+        T = np.gradient(P, axis=0); T /= np.maximum(np.linalg.norm(T, axis=1, keepdims=True), 1e-8)
+        up = np.where(np.abs(T[:, 2:3]) > 0.9, np.array([[1, 0, 0]], np.float32), np.array([[0, 0, 1]], np.float32))
+        side = np.cross(T, up); side /= np.maximum(np.linalg.norm(side, axis=1, keepdims=True), 1e-8)
+        N = np.cross(side, T)
+        w = np.maximum(rad[a:b], 0.002)[:, None]
+        n = b - a
+        v = np.linspace(0, 1, n, dtype=np.float32)[:, None]
+        L = np.hstack([P - side * w, N, np.zeros((n, 1), np.float32), v])
+        R = np.hstack([P + side * w, N, np.ones((n, 1), np.float32), v])
+        verts.append(np.vstack([L, R]))
+        for i in range(n - 1):
+            l0, l1, r0, r1 = base + i, base + i + 1, base + n + i, base + n + i + 1
+            idx += [l0, r0, l1, l1, r0, r1]
+        base += 2 * n
+        if base > 4_000_000:
+            break
+    if not idx:
+        return None
+    verts = np.vstack(verts).astype(np.float32)
+    idx = np.array(idx, np.uint32)
+    slots = [s.material for s in ob.material_slots] or list(cv.materials)
+    m = slots[0] if slots else None
+    nt = len(idx) // 3
+    rec = {"vertexCount": int(len(verts)), "indexCount": int(len(idx)), "submeshes": [{"material": material(m), "start": 0, "count": int(len(idx))}],
+           "bounds": [verts[:, 0:3].min(0).tolist(), verts[:, 0:3].max(0).tolist()], "hair": True}
+    f, o = pack_write(verts.tobytes() + idx.tobytes())
+    rec["pack"], rec["offset"] = f, o
+    tri_total += nt
+    return rec
+
+
 GEOM = {"MESH", "CURVE", "SURFACE", "META", "FONT", "CURVES"}
 lights = []
+
+
+# --------------------------------------------------------------------------- render visibility
+# The export reads the evaluated (viewport) scene, but what Blender renders can be much more: objects and collections
+# hidden in the viewport for speed, particle systems showing a fraction of their instances, modifiers switched off
+# in the viewport, lower subdivision levels. Switch everything to its render setting first (the .blend is never
+# saved, so nothing changes on disk).
+def match_render_settings():
+    vl = bpy.context.view_layer
+    n_ob = n_col = n_mod = n_ps = 0
+
+    def walk(lc):
+        nonlocal n_col
+        if lc.exclude:
+            return
+        col = lc.collection
+        if col.hide_render:            # not rendered: leave it out entirely
+            try:
+                lc.exclude = True
+            except Exception:
+                pass
+            return
+        if True:
+            if lc.hide_viewport or col.hide_viewport:
+                n_col += 1
+            lc.hide_viewport = False
+            col.hide_viewport = False
+        for ch in lc.children:
+            walk(ch)
+    walk(vl.layer_collection)
+    for ob in scene.objects:
+        if ob.hide_render:
+            continue
+        try:
+            if ob.hide_get(view_layer=vl) or ob.hide_viewport:
+                n_ob += 1
+            ob.hide_set(False, view_layer=vl)
+            ob.hide_viewport = False
+        except Exception:
+            pass
+        for m in ob.modifiers:
+            try:
+                if m.show_viewport != m.show_render:
+                    m.show_viewport = m.show_render; n_mod += 1
+                if m.type in ("SUBSURF", "MULTIRES") and hasattr(m, "render_levels"):
+                    lv = "levels" if m.type == "SUBSURF" else "levels"
+                    if getattr(m, lv) != m.render_levels:
+                        setattr(m, lv, m.render_levels); n_mod += 1
+            except Exception:
+                pass
+        for ps in getattr(ob, "particle_systems", []):
+            st = ps.settings
+            try:
+                if st.display_percentage != 100: st.display_percentage = 100; n_ps += 1
+                if st.child_type != "NONE" and st.child_percent != st.rendered_child_count:
+                    st.child_percent = st.rendered_child_count; n_ps += 1
+                if st.render_type in ("OBJECT", "COLLECTION") and st.display_method != "RENDER":
+                    st.display_method = "RENDER"; n_ps += 1
+            except Exception:
+                pass
+    log("render visibility: %d objects and %d collections unhidden, %d modifier / subdivision settings, %d particle settings set to render"
+        % (n_ob, n_col, n_mod, n_ps))
+
+
+match_render_settings()
+bpy.context.view_layer.update()
 dg = bpy.context.evaluated_depsgraph_get()
+dg.update()
+skipped_types = {}
 scene = bpy.context.scene
 n_inst = 0
 last = time.time()
@@ -432,7 +578,7 @@ for inst in dg.object_instances:
     ob = inst.object
     orig = ob.original
     if not inst.is_instance:
-        if orig.hide_render or not orig.visible_get():
+        if orig.hide_render:
             continue
     elif inst.parent is not None and inst.parent.original.hide_render:
         continue
@@ -462,10 +608,14 @@ for inst in dg.object_instances:
     mid = mesh_key.get(key)
     if mid is None:
         rec = export_mesh(ob)
+        if rec is None and ob.type == "CURVES":
+            rec = export_hair(ob)
         mid = -1
         if rec:
             rec["name"] = ob.name
             mid = len(meshes); meshes.append(rec)
+        else:
+            skipped_types[ob.type] = skipped_types.get(ob.type, 0) + 1
         mesh_key[key] = mid
     if mid < 0:
         continue
@@ -476,6 +626,8 @@ for inst in dg.object_instances:
         last = time.time()
         log("  %d instances, %d unique meshes, %.1fM unique tris, %.0fs" % (n_inst, len(meshes), tri_total / 1e6, time.time() - t0))
 if pack_f: pack_f.close()
+if skipped_types:
+    log("objects with no surface to export (by type):", skipped_types)
 
 # --------------------------------------------------------------------------- world, sun, camera
 world = {}

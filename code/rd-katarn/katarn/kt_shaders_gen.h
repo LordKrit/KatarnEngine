@@ -60,7 +60,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -264,7 +264,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -517,7 +517,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -755,8 +755,8 @@ float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 		sunVis = lit / STEPS;
 		sunVis = lerp(1, sunVis, saturate(maxD / max(dist, 1)));
 	}
-	float phase = pow(saturate(dot(-V, sunDir.xyz)), 8))KTSRC",
-R"KTSRC( * 0.25 + 0.04;   // forward scattering + a little everywhere
+	float phase = pow(saturate()KTSRC",
+R"KTSRC(dot(-V, sunDir.xyz)), 8) * 0.25 + 0.04;   // forward scattering + a little everywhere
 	inscatter += sunColor.rgb * sunColor.w * phase * fogColor.rgb * (sunVis * 1.6 - 0.15 * (1 - sunVis));
 	return lerp(col, max(inscatter, 0), opacity);
 }
@@ -786,9 +786,10 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 g2 = Tex2D[indices0.z].Load(int3(px, 0)).rgb;
 	float3 N = DecodeNormal(g1.xy);
 	bool baked = g1.z < 0;
-	bool skin = g1.w > 3.5;                      // rend2 skin keyword: soft, subsurface-scattered diffuse
-	bool plainLegacy = !skin && g1.w > 1.5;      // old model without PBR maps
-	float rough = abs(g1.z), metal = skin ? g1.w - 4.0 : plainLegacy ? g1.w - 2.0 : g1.w;
+	bool foliage = g1.w > 7.5;                   // HD world leaves / grass: light passes through
+	bool skin = !foliage && g1.w > 3.5;          // rend2 skin keyword: soft, subsurface-scattered diffuse
+	bool plainLegacy = !foliage && !skin && g1.w > 1.5;      // old model without PBR maps
+	float rough = abs(g1.z), metal = foliage ? g1.w - 8.0 : skin ? g1.w - 4.0 : plainLegacy ? g1.w - 2.0 : g1.w;
 	float3 albedo = g0.rgb;
 	float ao = g0.a;
 	if (lflags & 1) ao *= Tex2D[aoTex].Load(int3(px, 0)).r;
@@ -801,7 +802,17 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 Lo = 0;
 	// sun
 	float3 L = sunDir.xyz;
-	if (skin && sunColor.w > 0) {
+	if (foliage && sunColor.w > 0) {
+		// leaves: lit on the side facing the sun, and glowing through (a warmer, yellower green) when the sun is behind
+		// them; the forward-scatter lobe brightens canopies seen against the sun like Cycles' translucent BSDF
+		float nl = dot(N, L);
+		float sh = Shadow(P, nl < 0 ? -N : N, viewZ);
+		float3 thru = diff * float3(1.05, 1.1, 0.55);
+		float fwd = pow(saturate(dot(-V, L)), 4);
+		Lo += (diff * saturate(nl) + thru * saturate(-nl) * 0.65 + thru * fwd * 0.35) / PI * sunColor.rgb * sunColor.w * sh;
+		if (nl > 0) Lo += Brdf(N, V, L, 0, f0, max(rough, 0.5)) * sunColor.rgb * sunColor.w * sh * 0.5;
+	}
+	else if (skin && sunColor.w > 0) {
 		// wrapped diffuse with a warm scattered terminator (light bleeding through skin), GGX on top
 		float nl = dot(N, L);
 		float wrap = saturate((nl + 0.45) / 1.45);
@@ -999,7 +1010,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -1192,17 +1203,41 @@ float3 ACESFitted(float3 c)
 	return saturate(mul(outM, a / b));
 }
 
+// AgX (Blender's default view transform since 4.0): inset into a wider gamut, log2 encoding over -12.47..+4.03 EV
+// around middle grey, the AgX sigmoid, outset back. Same image formation as the Blender renders the worlds come from.
+float3 AgxContrast(float3 x)
+{
+	float3 x2 = x * x, x4 = x2 * x2;
+	return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+float3 AgX(float3 c)
+{
+	const float3x3 inset = float3x3(0.842479062253094, 0.0784335999999992, 0.0792237451477643,
+	                                0.0423282422610123, 0.878468636469772, 0.0791661274605434,
+	                                0.0423756549057051, 0.0784336, 0.879142973793104);
+	const float3x3 outset = float3x3(1.19687900512017, -0.0980208811401368, -0.0990297440797205,
+	                                 -0.0528968517574562, 1.15190312990417, -0.0989611768448433,
+	                                 -0.0529716355144438, -0.0980434501171241, 1.15107367264116);
+	const float minEv = -12.47393, maxEv = 4.026069;
+	c = mul(inset, max(c, 1e-10));
+	c = saturate((log2(c) - minEv) / (maxEv - minEv));
+	c = AgxContrast(c);
+	c = mul(outset, c);
+	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
+}
+
 float4 TonemapPS(FsOut i) : SV_Target0
 {
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
-	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
+	// legacy BSP maps: pixels not)KTSRC",
+R"KTSRC(hing drew (depth 0) keep what is already in the screen (a sky portal view)
 	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 	if (skyParams.w > 0.5) {
-		c = ACESFitted(c * 1.4);
+		c = extraParams.y > 0.5 ? AgX(c) : ACESFitted(c * 1.4);
 		float2 v = i.uv - 0.5;
-		c *= 1 - dot(v, v) * 0.35;
+		c *= 1 - dot(v, v) * 0.2;
 	}
 	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 	c = LinearToSrgb(c);
@@ -1219,8 +1254,7 @@ float4 FxaaPS(FsOut i) : SV_Target0
 	// legacy BSP maps: pixels nothing drew (depth 0) keep what is already in the screen (a sky portal view)
 	if (skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float4 m = Tex2D[srcSrv].SampleLevel(sClamp, uv, 0);
-	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.)KTSRC",
-R"KTSRC(5, -0.5) * rcp, 0).a;
+	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * rcp, 0).a;
 	float ne = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, -0.5) * rcp, 0).a;
 	float sw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, 0.5) * rcp, 0).a;
 	float se = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, 0.5) * rcp, 0).a;
@@ -1296,7 +1330,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -1435,7 +1469,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -1635,7 +1669,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -1884,7 +1918,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -2085,7 +2119,7 @@ cbuffer View : register(b1)
 	uint4 indices2;            // x light buffer, y light count, z hdr srv, w frame
 	float4 postParams;         // x exposure compensation (EV), y bloom intensity, z manual exposure (0 = auto), w legacy glow boost
 	float4 ambientSH[9];       // sky irradiance SH (rgb)
-	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
+	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when the frame is presented), y 1 = AgX tone mapping
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
@@ -2299,7 +2333,8 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	if (m.emissiveTex) em *= Tex2D[NonUniformResourceIndex(m.emissiveTex)].Sample(sWrap, i.uv).rgb;
 	GBufferOut o;
 	o.albedo = float4(albedo.rgb, ao);
-	o.normal = float4(EncodeNormal(n), clamp(rough, 0.045, 1.0), saturate(metal));
+	// foliage (Blender Translucent BSDF): +8 in the metal channel, the lighting pass lets sun through the leaves
+	o.normal = float4(EncodeNormal(n), clamp(rough, 0.045, 1.0), saturate(metal) + ((m.mflags & 128) ? 8.0 : 0.0));
 	o.emissive = float4(em, 0);
 	return o;
 }
@@ -2333,11 +2368,11 @@ float4 FxFog(float3 P, float3 V, float dist)
 	float f = fogParams.y;
 	float camDens = fogParams.x * exp(-f * (camPos.z - fogParams.z));
 	float fz = f * dz;
-	float lineInt = abs(fz) > 1e-4 ? (1 - exp(-fz)) / fz : 1 - 0.5 * fz;
+	float lineInt = abs(fz) > 1e-4 ? (1)KTSRC",
+R"KTSRC( - exp(-fz)) / fz : 1 - 0.5 * fz;
 	float opacity = min(1 - exp(-camDens * lineInt * rayLen), fogColor.w);
 	float3 hd = normalize(float3(-V.xy, 0.05));
-	float3 inscatter)KTSRC",
-R"KTSRC( = FxSky(hd, 8) * fogColor.rgb;
+	float3 inscatter = FxSky(hd, 8) * fogColor.rgb;
 	inscatter += sunColor.rgb * sunColor.w * pow(saturate(dot(-V, sunDir.xyz)), 8) * 0.25 * fogColor.rgb;
 	return float4(inscatter, opacity);
 }

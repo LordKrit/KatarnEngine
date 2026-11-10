@@ -58,7 +58,8 @@ struct KwLod {
 	float error;                // world units
 	uint32_t pad;
 };
-enum KwMaterialFlags : uint32_t { KWM_MASK = 1, KWM_TWOSIDED = 2, KWM_ORM_AO = 4, KWM_BLEND = 8, KWM_SPLAT = 16, KWM_WATER = 32, KWM_FLOW = 64 };
+enum KwMaterialFlags : uint32_t { KWM_MASK = 1, KWM_TWOSIDED = 2, KWM_ORM_AO = 4, KWM_BLEND = 8, KWM_SPLAT = 16, KWM_WATER = 32, KWM_FLOW = 64, KWM_FOLIAGE = 128 };
+// KWM_FOLIAGE: leaves / grass (a Translucent BSDF in Blender): light through the leaves from behind, no collision.
 // KWM_WATER: baseColor = water colour, emissive = absorption colour, roughness, normalScale = wave strength.
 // KWM_FLOW: flowing water sheet (waterfalls), albedoTex = byte offset of a flow record (header kind 1) in SPLT.
 // KWM_SPLAT: a terrain material evaluated in the shader from world position (layers of tiled textures blended by

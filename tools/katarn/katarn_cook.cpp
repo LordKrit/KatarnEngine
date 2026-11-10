@@ -345,10 +345,26 @@ static std::vector<TexOut> textures;
 static std::mutex texMutex;
 static std::map<uint64_t, int> texByHash;
 
-static void EncodeImage(const BakeImage& img, TexKind kind, uint32_t format, std::vector<uint8_t>& out, uint32_t& mips, bool parallel)
+// alpha-tested textures: each mip's alpha is scaled so the same share of texels passes the 0.5 test as in the full
+// image (plain averaging thins leaves out with every mip until trees and hedges vanish in the distance)
+static float AlphaCoverage(const BakeImage& m, float scale)
+{
+	size_t n = (size_t)m.w * m.h, pass = 0;
+	for (size_t i = 0; i < n; i++) if (m.px[i * 4 + 3] * scale >= 0.5f) pass++;
+	return n ? (float)pass / n : 0.0f;
+}
+static void PreserveCoverage(BakeImage& m, float target)
+{
+	float lo = 0.25f, hi = 16.0f;
+	for (int it = 0; it < 14; it++) { float mid = sqrtf(lo * hi); if (AlphaCoverage(m, mid) < target) lo = mid; else hi = mid; }
+	for (size_t i = 3; i < m.px.size(); i += 4) m.px[i] = std::min(1.0f, m.px[i] * hi);
+}
+
+static void EncodeImage(const BakeImage& img, TexKind kind, uint32_t format, std::vector<uint8_t>& out, uint32_t& mips, bool parallel, bool alphaTest = false)
 {
 	std::vector<BakeImage> chain;
 	chain.push_back(img);
+	const float coverage = alphaTest ? AlphaCoverage(img, 1.0f) : 0.0f;
 	while (chain.back().w > 1 || chain.back().h > 1) {
 		const BakeImage& p = chain.back();
 		BakeImage n = Resample(p, std::max(1, p.w / 2), std::max(1, p.h / 2));
@@ -358,6 +374,7 @@ static void EncodeImage(const BakeImage& img, TexKind kind, uint32_t format, std
 				float l = sqrtf(x * x + y * y + z * z); if (l < 1e-6f) l = 1;
 				n.px[i] = x / l * 0.5f + 0.5f; n.px[i + 1] = y / l * 0.5f + 0.5f; n.px[i + 2] = z / l * 0.5f + 0.5f;
 			}
+		if (alphaTest && coverage > 0.0f && n.w * n.h >= 4) PreserveCoverage(n, coverage);
 		chain.push_back(std::move(n));
 	}
 	mips = (uint32_t)chain.size();
@@ -403,9 +420,9 @@ static uint64_t HashImage(const BakeImage& img, TexKind kind)
 }
 
 // encodes (or reuses an identical) texture; returns its index
-static int AddTexture(const BakeImage& img, TexKind kind, bool parallel)
+static int AddTexture(const BakeImage& img, TexKind kind, bool parallel, bool alphaTest = false)
 {
-	uint64_t h = HashImage(img, kind);
+	uint64_t h = HashImage(img, kind) ^ (alphaTest ? 0x9e3779b97f4a7c15ull : 0);
 	{
 		std::lock_guard<std::mutex> lk(texMutex);
 		auto it = texByHash.find(h);
@@ -419,7 +436,7 @@ static int AddTexture(const BakeImage& img, TexKind kind, bool parallel)
 	}
 	TexOut t = {};
 	uint32_t fmt = kind == TK_NORMAL ? 83 : 98;
-	EncodeImage(img, kind, fmt, t.data, t.k.mips, parallel);
+	EncodeImage(img, kind, fmt, t.data, t.k.mips, parallel, alphaTest);
 	t.k.width = img.w; t.k.height = img.h; t.k.format = fmt; t.k.srgb = kind == TK_COLOR ? 1 : 0;
 	std::lock_guard<std::mutex> lk(texMutex);
 	auto it = texByHash.find(h);
@@ -451,6 +468,49 @@ static std::vector<MatInfo> mats;
 static std::map<std::string, uint32_t> matIndex;
 static std::vector<KwMaterial> kmats;
 
+static const Json* g_groups = nullptr;
+static const char* OutputShaderNode(const Json& nodes);
+
+// what the material's shader tree is made of: a Transparent BSDF (cut-out leaves, railings, decals), a Translucent
+// BSDF (foliage), or a Principled BSDF whose Alpha is driven / below 1. Blender's alphaMode only knows the last.
+struct ShaderTraits { bool transparent = false, translucent = false; };
+static void WalkShader(const Json& nodes, const std::string& name, ShaderTraits& t, int depth)
+{
+	if (depth > 24 || !nodes.has(name.c_str())) return;
+	const Json& n = nodes[name.c_str()];
+	std::string type = n["type"].str();
+	auto follow = [&](const Json& in) { if (in["link"].t == Json::ARR) WalkShader(nodes, in["link"][(size_t)0].str(), t, depth + 1); };
+	if (type == "BSDF_TRANSPARENT") { t.transparent = true; return; }
+	if (type == "BSDF_TRANSLUCENT") { t.translucent = true; return; }
+	if (type == "BSDF_PRINCIPLED") {
+		for (auto& in : n["inputs"].a) {
+			std::string id = in["id"].str();
+			if (id == "Alpha" && (in["link"].t == Json::ARR || (in["value"].t == Json::NUM && in["value"].n < 0.999))) t.transparent = true;
+		}
+		return;
+	}
+	if (type == "MIX_SHADER" || type == "ADD_SHADER" || type == "REROUTE") {
+		for (auto& in : n["inputs"].a) if (in["type"].str() == "SHADER" || type == "REROUTE") follow(in);
+		return;
+	}
+	if (type == "GROUP" && g_groups) {
+		const Json& gt = (*g_groups)[n["props"]["tree"].str().c_str()];
+		if (gt.t != Json::OBJ) return;
+		const Json& gn = gt["nodes"];
+		for (auto& kv : gn.o) if (kv.second["type"].str() == "GROUP_OUTPUT")
+			for (auto& si : kv.second["inputs"].a) if (si["type"].str() == "SHADER" && si["link"].t == Json::ARR)
+				WalkShader(gn, si["link"][(size_t)0].str(), t, depth + 1);
+	}
+}
+static ShaderTraits GetShaderTraits(const Json& m)
+{
+	ShaderTraits t;
+	if (m["graph"].t != Json::OBJ) return t;
+	const char* out = OutputShaderNode(m["graph"]["nodes"]);
+	if (out) WalkShader(m["graph"]["nodes"], out, t, 0);
+	return t;
+}
+
 static uint32_t MaterialFlags(const Json& m)
 {
 	uint32_t f = 0;
@@ -458,6 +518,9 @@ static uint32_t MaterialFlags(const Json& m)
 	if (mode == "MASK" || mode == "BLEND") f |= KWM_MASK;
 	if (mode == "BLEND") f |= KWM_BLEND;
 	if (m["twoSided"].t == Json::BOOL && m["twoSided"].b) f |= KWM_TWOSIDED;
+	ShaderTraits st = GetShaderTraits(m);
+	if (st.transparent) f |= KWM_MASK;            // classified before baking: masked clusters get alpha-tested shadows
+	if (st.translucent) f |= KWM_FOLIAGE | KWM_TWOSIDED;
 	if (f & KWM_MASK) f |= KWM_TWOSIDED;
 	return f;
 }
@@ -1063,13 +1126,13 @@ static void BakeMaterial(MatInfo& mi, KwMaterial& k, std::vector<std::string>& w
 		return img;
 	};
 	// albedo + alpha
+	if (alphaVaries || alpha0 < 0.99f) {
+		if (!(k.flags & KWM_MASK)) k.flags |= KWM_MASK | KWM_TWOSIDED;
+	}
 	if (!oBase.varies) { for (int c = 0; c < 4; c++) k.baseColor[c] = oBase.c[c]; }
 	else {
 		k.baseColor[0] = k.baseColor[1] = k.baseColor[2] = k.baseColor[3] = 1;
-		k.albedoTex = AddTexture(image(oBase), TK_COLOR, false);
-	}
-	if (alphaVaries || alpha0 < 0.99f) {
-		if (!(k.flags & KWM_MASK)) k.flags |= KWM_MASK | KWM_TWOSIDED;
+		k.albedoTex = AddTexture(image(oBase), TK_COLOR, false, (k.flags & KWM_MASK) && !(k.flags & KWM_BLEND));
 	}
 	if (blend) k.flags |= KWM_BLEND;
 	// normal
@@ -1213,6 +1276,9 @@ static void BuildLods(Bucket& b)
 	const float nw[3] = { 0.5f, 0.5f, 0.5f };
 	const float ratios[] = { 1.0f, 0.5f, 0.25f, 0.1f, 0.035f };
 	const float errs[] = { LOD0_ERROR, 2.0f, 8.0f, 32.0f, 128.0f };
+	// alpha-tested foliage: cards are separate quads, and pruning / permissive collapses would delete whole leaves
+	// and branches (trees go bald with distance); simplify them only where the cards stay intact
+	const bool cards = b.cls == KWC_MASKED;
 	std::vector<std::vector<uint32_t>> prev = groups;
 	size_t prevCount = 0;
 	for (auto& gg : groups) prevCount += gg.size();
@@ -1233,7 +1299,7 @@ static void BuildLods(Bucket& b)
 				else
 					n = meshopt_simplify(dst.data(), src.data(), src.size(), &b.v[0].pos[0], b.v.size(), sizeof(KwVertex),
 						std::min(target, src.size()), errs[L] / scale,
-						meshopt_SimplifyLockBorder | meshopt_SimplifyPermissive | (L >= 3 ? meshopt_SimplifyPrune : 0), &e);
+						cards ? (unsigned)meshopt_SimplifyLockBorder : (meshopt_SimplifyLockBorder | meshopt_SimplifyPermissive | (L >= 3 ? meshopt_SimplifyPrune : 0)), &e);
 				dst.resize(n);
 				meshopt_optimizeVertexCache(dst.data(), dst.data(), dst.size(), b.v.size());
 			}
@@ -1242,6 +1308,7 @@ static void BuildLods(Bucket& b)
 			total += dst.size();
 			cur2[gi] = std::move(dst);
 		}
+		if (getenv("KT_LODLOG")) printf("    lod cls %d L%d %zu tris err %.2f\n", b.cls, L, total / 3, maxErr);
 		if (L > 0 && total > prevCount * 0.8) break;   // not worth another level
 		KwLod lod = {};
 		lod.firstIndex = (uint32_t)b.lodIdx.size();
@@ -1309,6 +1376,13 @@ static void WriteCollision(const std::vector<KwCluster>& clusters, const std::ve
 	float lo[3] = { floorf(cmin[0] - COLL_PAD), floorf(cmin[1] - COLL_PAD), floorf(cmin[2] - COLL_PAD) };
 	float hi[3] = { ceilf(cmax[0] + COLL_PAD), ceilf(cmax[1] + COLL_PAD), ceilf(cmax[2] + 4096.0f) };
 	auto inCore = [&](const float* p) { return p[0] > lo[0] && p[0] < hi[0] && p[1] > lo[1] && p[1] < hi[1] && p[2] > lo[2] && p[2] < hi[2]; };
+	// materials you walk through: leaves, flowers, vines, cut-out cards, water (same order as the cook numbers them)
+	std::vector<bool> passThrough;
+	for (auto& kv : scene["materials"].o) {
+		uint32_t f = MaterialFlags(kv.second);
+		passThrough.push_back((f & (KWM_FOLIAGE | KWM_MASK)) != 0 || IsWaterMaterial(kv.first, kv.second));
+	}
+	size_t passSkipped = 0;
 	// detail falls off with the distance from the core: full detail where you play, coarser further out
 	std::vector<float> errScale(clusters.size(), 1.0f);
 	std::vector<bool> nearCore(clusters.size(), false);
@@ -1359,6 +1433,8 @@ static void WriteCollision(const std::vector<KwCluster>& clusters, const std::ve
 		SpillRead(iBase[ci] + (uint64_t)l.firstIndex * 4, BI.data(), BI.size() * 4);
 		for (uint32_t k = 0; k < c.numVertices; k++) memcpy(&P[k * 3], BV[k].pos, 12);
 		for (uint32_t t2 = 0; t2 + 2 < l.indexCount; t2 += 3) {
+			uint16_t tm = BV[BI[t2]].material;
+			if (tm < passThrough.size() && passThrough[tm]) { passSkipped++; continue; }
 			const float* a3 = &P[BI[t2] * 3], * b3 = &P[BI[t2 + 1] * 3], * c3 = &P[BI[t2 + 2] * 3];
 			float ctr[3] = { (a3[0] + b3[0] + c3[0]) / 3, (a3[1] + b3[1] + c3[1]) / 3, (a3[2] + b3[2] + c3[2]) / 3 };
 			if (!inCore(ctr)) continue;
@@ -1389,17 +1465,18 @@ static void WriteCollision(const std::vector<KwCluster>& clusters, const std::ve
 	{
 		size_t fl = 0, flNear = 0, wl = 0, wlNear = 0;
 		for (size_t k = 0; k < NS; k++) { size_t n = collTri[k].size() / 3; if (k & 1) { wl += n; if (slotNear[k]) wlNear += n; } else { fl += n; if (slotNear[k]) flNear += n; } }
-		printf("  collision: %zu triangles: floors %zu (%zu in the core) at %.0f units, walls %zu (%zu in the core) at %.0f units\n",
-			collTotal, fl, flNear, COLL_ERROR, wl, wlNear, COLL_ERROR * COLL_WALL_MUL);
+		printf("  collision: %zu triangles: floors %zu (%zu in the core) at %.0f units, walls %zu (%zu in the core) at %.0f units (%zu foliage / water triangles left out)\n",
+			collTotal, fl, flNear, COLL_ERROR, wl, wlNear, COLL_ERROR * COLL_WALL_MUL, passSkipped);
 	}
 	// phases: the surroundings, then walls in the core, then floors in the core too
+	// (walls are only for blocking: they go to 16x before the floors you walk on lose any detail)
 	static const char* phaseName[3] = { "surroundings", "core walls", "everything" };
 	for (int phase = 0; phase < 3 && collTotal > COLL_BUDGET; phase++) {
-		for (float m = 2; collTotal > COLL_BUDGET && m <= (phase == 1 ? 4.0f : 256.0f); m *= 2) {
+		for (float m = 2; collTotal > COLL_BUDGET && m <= (phase == 1 ? 16.0f : 256.0f); m *= 2) {
 			collTotal = 0;
 			for (size_t k = 0; k < NS; k++) {
 				bool take = phase == 0 ? !slotNear[k] : phase == 1 ? (!slotNear[k] || (k & 1)) : true;
-				if (take) simplifySlot(k, slotErr[k] * (phase == 2 && (k & 1) ? std::max(m, 4.0f) : m), !slotNear[k] || (k & 1));
+				if (take) simplifySlot(k, slotErr[k] * (phase == 2 && (k & 1) ? std::max(m, 16.0f) : m), !slotNear[k] || (k & 1));
 				collTotal += collTri[k].size() / 3;
 			}
 			printf("  collision: %zu triangles (%s x%.0f)\n", collTotal, phaseName[phase], m);
@@ -1648,6 +1725,7 @@ int main(int argc, char** argv)
 	if (!g_spill) { printf("cannot create %s\n", spillPath.c_str()); return 1; }
 	std::thread watchdog(MemoryWatchdog);
 	const Json* groups = scene.has("groups") ? &scene["groups"] : nullptr;
+	g_groups = groups;
 	if (COLL_ONLY) return CollisionOnly(scene, outDir, mapName, t0);
 
 	// ---- materials (flags now, baked after we know how much surface each covers)

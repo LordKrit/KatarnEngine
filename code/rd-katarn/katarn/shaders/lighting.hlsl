@@ -208,9 +208,10 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 g2 = Tex2D[indices0.z].Load(int3(px, 0)).rgb;
 	float3 N = DecodeNormal(g1.xy);
 	bool baked = g1.z < 0;
-	bool skin = g1.w > 3.5;                      // rend2 skin keyword: soft, subsurface-scattered diffuse
-	bool plainLegacy = !skin && g1.w > 1.5;      // old model without PBR maps
-	float rough = abs(g1.z), metal = skin ? g1.w - 4.0 : plainLegacy ? g1.w - 2.0 : g1.w;
+	bool foliage = g1.w > 7.5;                   // HD world leaves / grass: light passes through
+	bool skin = !foliage && g1.w > 3.5;          // rend2 skin keyword: soft, subsurface-scattered diffuse
+	bool plainLegacy = !foliage && !skin && g1.w > 1.5;      // old model without PBR maps
+	float rough = abs(g1.z), metal = foliage ? g1.w - 8.0 : skin ? g1.w - 4.0 : plainLegacy ? g1.w - 2.0 : g1.w;
 	float3 albedo = g0.rgb;
 	float ao = g0.a;
 	if (lflags & 1) ao *= Tex2D[aoTex].Load(int3(px, 0)).r;
@@ -223,7 +224,17 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 Lo = 0;
 	// sun
 	float3 L = sunDir.xyz;
-	if (skin && sunColor.w > 0) {
+	if (foliage && sunColor.w > 0) {
+		// leaves: lit on the side facing the sun, and glowing through (a warmer, yellower green) when the sun is behind
+		// them; the forward-scatter lobe brightens canopies seen against the sun like Cycles' translucent BSDF
+		float nl = dot(N, L);
+		float sh = Shadow(P, nl < 0 ? -N : N, viewZ);
+		float3 thru = diff * float3(1.05, 1.1, 0.55);
+		float fwd = pow(saturate(dot(-V, L)), 4);
+		Lo += (diff * saturate(nl) + thru * saturate(-nl) * 0.65 + thru * fwd * 0.35) / PI * sunColor.rgb * sunColor.w * sh;
+		if (nl > 0) Lo += Brdf(N, V, L, 0, f0, max(rough, 0.5)) * sunColor.rgb * sunColor.w * sh * 0.5;
+	}
+	else if (skin && sunColor.w > 0) {
 		// wrapped diffuse with a warm scattered terminator (light bleeding through skin), GGX on top
 		float nl = dot(N, L);
 		float wrap = saturate((nl + 0.45) / 1.45);

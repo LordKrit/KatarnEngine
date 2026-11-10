@@ -154,7 +154,8 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	if (m.emissiveTex) em *= Tex2D[NonUniformResourceIndex(m.emissiveTex)].Sample(sWrap, i.uv).rgb;
 	GBufferOut o;
 	o.albedo = float4(albedo.rgb, ao);
-	o.normal = float4(EncodeNormal(n), clamp(rough, 0.045, 1.0), saturate(metal));
+	// foliage (Blender Translucent BSDF): +8 in the metal channel, the lighting pass lets sun through the leaves
+	o.normal = float4(EncodeNormal(n), clamp(rough, 0.045, 1.0), saturate(metal) + ((m.mflags & 128) ? 8.0 : 0.0));
 	o.emissive = float4(em, 0);
 	return o;
 }

@@ -133,6 +133,29 @@ float3 ACESFitted(float3 c)
 	return saturate(mul(outM, a / b));
 }
 
+// AgX (Blender's default view transform since 4.0): inset into a wider gamut, log2 encoding over -12.47..+4.03 EV
+// around middle grey, the AgX sigmoid, outset back. Same image formation as the Blender renders the worlds come from.
+float3 AgxContrast(float3 x)
+{
+	float3 x2 = x * x, x4 = x2 * x2;
+	return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+float3 AgX(float3 c)
+{
+	const float3x3 inset = float3x3(0.842479062253094, 0.0784335999999992, 0.0792237451477643,
+	                                0.0423282422610123, 0.878468636469772, 0.0791661274605434,
+	                                0.0423756549057051, 0.0784336, 0.879142973793104);
+	const float3x3 outset = float3x3(1.19687900512017, -0.0980208811401368, -0.0990297440797205,
+	                                 -0.0528968517574562, 1.15190312990417, -0.0989611768448433,
+	                                 -0.0529716355144438, -0.0980434501171241, 1.15107367264116);
+	const float minEv = -12.47393, maxEv = 4.026069;
+	c = mul(inset, max(c, 1e-10));
+	c = saturate((log2(c) - minEv) / (maxEv - minEv));
+	c = AgxContrast(c);
+	c = mul(outset, c);
+	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
+}
+
 float4 TonemapPS(FsOut i) : SV_Target0
 {
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
@@ -141,9 +164,9 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 	if (skyParams.w > 0.5) {
-		c = ACESFitted(c * 1.4);
+		c = extraParams.y > 0.5 ? AgX(c) : ACESFitted(c * 1.4);
 		float2 v = i.uv - 0.5;
-		c *= 1 - dot(v, v) * 0.35;
+		c *= 1 - dot(v, v) * 0.2;
 	}
 	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 	c = LinearToSrgb(c);
