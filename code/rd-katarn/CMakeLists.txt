@@ -43,13 +43,12 @@ set(KatarnFiles
 	)
 
 add_library(${SPKatarn} SHARED ${KatarnFiles})
-# Ghoul2 surfaces up to 16000 vertices (HD ports; rend2 has no such limit), CPU-skinned through tess
-target_compile_definitions(${SPKatarn} PRIVATE SHADER_MAX_VERTEXES=16000)
 if(NOT MSVC)
 	set_target_properties(${SPKatarn} PROPERTIES PREFIX "")
 endif()
 install(TARGETS ${SPKatarn} RUNTIME DESTINATION ${JKAInstallDir} COMPONENT ${JKASPClientComponent})
-set_target_properties(${SPKatarn} PROPERTIES COMPILE_DEFINITIONS "${KatarnDefines}")
+# Ghoul2 surfaces up to 16000 vertices (HD ports; rend2 has no such limit), CPU-skinned through tess
+set_target_properties(${SPKatarn} PROPERTIES COMPILE_DEFINITIONS "${KatarnDefines};SHADER_MAX_VERTEXES=16000")
 set_property(TARGET ${SPKatarn} APPEND PROPERTY COMPILE_OPTIONS ${OPENJK_VISIBILITY_FLAGS})
 set_target_properties(${SPKatarn} PROPERTIES INCLUDE_DIRECTORIES "${KatarnIncludeDirectories}")
 set_target_properties(${SPKatarn} PROPERTIES PROJECT_LABEL "SP KatarnEngine Renderer")

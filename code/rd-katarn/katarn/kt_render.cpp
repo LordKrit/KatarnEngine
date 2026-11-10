@@ -54,7 +54,7 @@ static void RegisterCvars()
 	kt_volumetric = ri.Cvar_Get("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
 	kt_saberLight = ri.Cvar_Get("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
 	kt_saberGlow = ri.Cvar_Get("kt_saberGlow", "2", CVAR_ARCHIVE);     // blade brightness
-	kt_saberDraw = ri.Cvar_Get("kt_saberDraw", "1", CVAR_ARCHIVE);     // 1: Katarn draws the blades (the old glow sprites / core lines are skipped)
+	kt_saberDraw = ri.Cvar_Get("kt_saberDraw2", "0", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
 }
 
 // ------------------------------------------------------------------------------------------------ math

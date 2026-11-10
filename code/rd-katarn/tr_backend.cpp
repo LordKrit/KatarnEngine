@@ -1437,7 +1437,10 @@ static const void* RB_DrawSurfs(const void* data)
 	*/
 
 	// Render dynamic glowing/flaring objects.
-	if (!(backEnd.refdef.rdflags & RDF_NOWORLDMODEL) && g_bDynamicGlowSupported && (r_DynamicGlow->integer || RB_BloomActive()))
+	// KatarnEngine: no GL dynamic-glow pass. It cleared the frame, redrew the glow stages into a small viewport and
+	// relied on texture copies the D3D12 back end does not do, which left glowing surfaces (saber blades) as black,
+	// blocky low-resolution shapes. Katarn's HDR bloom does the glow.
+	if (false && !(backEnd.refdef.rdflags & RDF_NOWORLDMODEL) && g_bDynamicGlowSupported && (r_DynamicGlow->integer || RB_BloomActive()))
 	{
 		// Copy the normal scene to texture.
 		qglDisable(GL_TEXTURE_2D);
