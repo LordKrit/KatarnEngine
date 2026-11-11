@@ -32,6 +32,7 @@ enum RootParam : UINT {
 	RP_UAV_TEX,         // u0 space1 RWTexture2D<float4>[]
 	RP_UAV_BUF,         // u0 space2 RWByteAddressBuffer[]
 	RP_UAV_TEX2DARRAY,  // u0 space3 RWTexture2DArray<float4>[]
+	RP_UAV_TEX3D,       // u0 space4 RWTexture3D<float4>[]
 	RP_COUNT
 };
 

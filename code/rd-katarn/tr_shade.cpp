@@ -1986,6 +1986,11 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	d.specTex = st->ktSpec ? st->ktSpec->texnum : 0;
 	d.parallax = st->ktParallax;
 	if (st->ktNormal && st->ktNormalGen) flags |= 32;
+	// character hair and eyes, by material name (old models have no material types)
+	if (!world) {
+		if (Q_stristr(sh->name, "hair") || Q_stristr(sh->name, "beard") || Q_stristr(sh->name, "brow")) flags |= 64;
+		else if ((Q_stristr(sh->name, "_eye") || Q_stristr(sh->name, "/eye") || Q_stristr(sh->name, "eyes")) && !Q_stristr(sh->name, "lash")) flags |= 128;
+	}
 	d.flags = flags;
 	d.roughness = world ? 0.7f : 0.78f;   // characters: cloth / skin (0.55 read as plastic)
 	d.metallic = 0.0f;

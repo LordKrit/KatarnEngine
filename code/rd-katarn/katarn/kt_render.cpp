@@ -41,6 +41,10 @@ static cvar_t* kt_tonemap = nullptr;
 static cvar_t* kt_fogScale = nullptr;
 static cvar_t* kt_dynGlow, * kt_contactShadows, * kt_lightShadows;
 static cvar_t* kt_probes = nullptr, * kt_probeScale = nullptr, * kt_parallax = nullptr, * kt_wind = nullptr;
+static cvar_t* kt_vfog = nullptr, * kt_vfogDensity = nullptr, * kt_vfogLights = nullptr, * kt_vfogSun = nullptr, * kt_vfogFar = nullptr,
+	* kt_vfogHeight = nullptr, * kt_vfogAmbient = nullptr, * kt_vfogColor = nullptr;
+static cvar_t* kt_sss = nullptr, * kt_dof = nullptr, * kt_dofFocus = nullptr, * kt_dofAperture = nullptr, * kt_motionBlur = nullptr;
+static cvar_t* kt_taa = nullptr, * kt_taaSharpen = nullptr, * kt_gi = nullptr, * kt_giRadius = nullptr;
 static cvar_t* kt_bspSun = nullptr, * kt_bspSunAmbient = nullptr, * kt_bspSunDist = nullptr;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
@@ -186,6 +190,25 @@ static void RegisterCvars()
 	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
 	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
+	kt_taa = KtCvar("kt_taa", "1", CVAR_ARCHIVE);
+	// volumetric fog (froxels): light from the sun, lamps and lightsabers scattered in the air
+	kt_vfog = KtCvar("kt_vfog", "1", CVAR_ARCHIVE);
+	kt_vfogDensity = KtCvar("kt_vfogDensity", "0.00005", CVAR_ARCHIVE);   // per unit (0.00005: 80% clear at 4000 units)
+	kt_vfogLights = KtCvar("kt_vfogLights", "150", CVAR_ARCHIVE);        // how strongly lamps and sabers light the air
+	kt_vfogSun = KtCvar("kt_vfogSun", "1", CVAR_ARCHIVE);
+	kt_vfogFar = KtCvar("kt_vfogFar", "8000", CVAR_ARCHIVE);
+	kt_vfogHeight = KtCvar("kt_vfogHeight", "0", CVAR_ARCHIVE);          // thinner with height (per unit above the floor)
+	kt_vfogAmbient = KtCvar("kt_vfogAmbient", "0.25", CVAR_ARCHIVE);     // old maps: light already in the air
+	kt_vfogColor = KtCvar("kt_vfogColor", "1 1 1", CVAR_ARCHIVE);
+	kt_gi = KtCvar("kt_gi", "1", CVAR_ARCHIVE);
+	kt_sss = KtCvar("kt_sss", "0.6", CVAR_ARCHIVE);               // skin subsurface scattering radius (units, 0 = off)
+	// camera (for cinematics; off in play)
+	kt_dof = KtCvar("kt_dof", "0", CVAR_ARCHIVE);                 // depth of field
+	kt_dofFocus = KtCvar("kt_dofFocus", "0", 0);                  // focus distance in units, 0 = what is in the middle of the screen
+	kt_dofAperture = KtCvar("kt_dofAperture", "1", CVAR_ARCHIVE); // blur strength
+	kt_motionBlur = KtCvar("kt_motionBlur", "0", CVAR_ARCHIVE);   // camera motion blur (0.5 = half-open shutter)                   // HD worlds: bounced light (screen-space GI)
+	kt_giRadius = KtCvar("kt_giRadius", "400", CVAR_ARCHIVE);     // how far bounced light travels (units)                 // temporal anti-aliasing (replaces FXAA when on)
+	kt_taaSharpen = KtCvar("kt_taaSharpen", "0.35", CVAR_ARCHIVE);   // sharpening after TAA (0 = off)
 	kt_bspSunAmbient = KtCvar("kt_bspSunAmbient", "0.5", CVAR_ARCHIVE);
 	kt_bspSunDist = KtCvar("kt_bspSunDist", "3072", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
 
@@ -254,6 +277,11 @@ struct ViewConstants {
 	float grade0[4], grade1[4], grade2[4], grade3[4];   // rend2 colour grade (r_grade*), grade3.w 1 = on
 	float atmos0[4], atmos1[4], atmos2[4];             // rend2 atmosphere (r_atmos*): haze rgb + density; sun uv, visible, shafts; sun rgb + falloff
 	float atmos3[4];                                    // x haze start, y 1 = on
+	float taaParams[4];           // x, y this frame's jitter (pixels), z sharpen, w 1 = TAA on
+	float vfog0[4];               // volumetric fog: density, height falloff, -, far
+	float vfog1[4];               // sun scattering, light scattering, ambient (BSP maps), near
+	float vfogColor[4];
+	uint32_t vfogIdx[4];          // x on, y grid w | h << 16, w depth slices
 };
 
 struct LVert { float pos[3]; float normal[3]; float uv[2]; float lmuv[2]; uint32_t color; };
@@ -312,6 +340,28 @@ static struct RState {
 	std::vector<Probe> probes;
 	uint32_t probeSrv[kFrames] = {};
 	ID3D12PipelineState* csProbe = nullptr;
+	// TAA
+	ID3D12PipelineState* csTaa = nullptr;
+	// bounced light
+	ID3D12PipelineState* csGiTrace = nullptr, * csGiTemporal = nullptr, * csGiSpatial = nullptr;
+	Texture giRaw, giAcc[2], gi;
+	int giIdx = 0;
+	bool giValid = false;
+	uint32_t giFrame = 0;
+	// volumetric fog
+	ID3D12PipelineState* csFogInject = nullptr, * csFogIntegrate = nullptr, * csFogApply = nullptr;
+	Texture froxIn, froxOut;
+	bool fogTypedLoad = false;
+	// skin
+	ID3D12PipelineState* csSss = nullptr;
+	ID3D12PipelineState* csFocus = nullptr, * csDof = nullptr, * csMotionBlur = nullptr;
+	Texture sssTmp;
+	Texture taa[2];
+	int taaIdx = 0;
+	bool taaValid = false, taaThisView = false;
+	float taaJitter[2] = {};
+	uint32_t taaFrame = 0;
+	float taaLastOrg[3] = {}, taaLastFwd[3] = {};
 	bool capture = false;            // this view is a probe capture
 	int capProbe = 0, capFace = 0;
 	float capSavedVP[16] = {};
@@ -346,7 +396,7 @@ static std::string ShaderSource(const char* file)
 		{ "legacy", kt_src_legacy_parts }, { "present", kt_src_present_parts }, { "world", kt_src_world_parts },
 		{ "legacy_gbuffer", kt_src_legacy_gbuffer_parts }, { "sky", kt_src_sky_parts }, { "lighting", kt_src_lighting_parts },
 		{ "ssao", kt_src_ssao_parts }, { "post", kt_src_post_parts }, { "saber", kt_src_saber_parts },
-		{ "probes", kt_src_probes_parts },
+		{ "probes", kt_src_probes_parts }, { "taa", kt_src_taa_parts }, { "gi", kt_src_gi_parts }, { "fog", kt_src_fog_parts }, { "sss", kt_src_sss_parts }, { "camera", kt_src_camera_parts },
 	};
 	for (auto& e : table) if (!strcmp(e.name, file)) { std::string s; for (int i = 0; e.parts[i]; i++) s += e.parts[i]; return s; }
 	return std::string();
@@ -548,6 +598,38 @@ static bool CreatePipelines()
 		if (ps.ok) R.csProbe = CreateComputePSO(ps, "probe filter");
 		if (ps.blob) ps.blob->Release();
 	}
+	{
+		Shader ts = R_Shader("taa", "ResolveCS", "cs_5_1");
+		if (ts.ok) R.csTaa = CreateComputePSO(ts, "taa");
+		if (ts.blob) ts.blob->Release();
+	}
+	{
+		Shader fi = R_Shader("lighting", "FogInjectCS", "cs_5_1"), fg = R_Shader("fog", "IntegrateCS", "cs_5_1"), fa = R_Shader("fog", "ApplyCS", "cs_5_1");
+		if (fi.ok) R.csFogInject = CreateComputePSO(fi, "fog inject");
+		if (fg.ok) R.csFogIntegrate = CreateComputePSO(fg, "fog integrate");
+		if (fa.ok) R.csFogApply = CreateComputePSO(fa, "fog apply");
+		for (Shader* s : { &fi, &fg, &fa }) if (s->blob) s->blob->Release();
+		// applying the fog reads the HDR scene as a UAV (typed load of RGBA16F)
+		D3D12_FEATURE_DATA_FORMAT_SUPPORT fs = { DXGI_FORMAT_R16G16B16A16_FLOAT };
+		R.fogTypedLoad = SUCCEEDED(g.dev->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) && (fs.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD);
+		{
+			Shader a = R_Shader("camera", "FocusCS", "cs_5_1"), b = R_Shader("camera", "DofCS", "cs_5_1"), m = R_Shader("camera", "MotionBlurCS", "cs_5_1");
+			if (a.ok) R.csFocus = CreateComputePSO(a, "dof focus");
+			if (b.ok) R.csDof = CreateComputePSO(b, "dof");
+			if (m.ok) R.csMotionBlur = CreateComputePSO(m, "motion blur");
+			for (Shader* s : { &a, &b, &m }) if (s->blob) s->blob->Release();
+		}
+		Shader ss = R_Shader("sss", "BlurCS", "cs_5_1");
+		if (ss.ok) R.csSss = CreateComputePSO(ss, "skin");
+		if (ss.blob) ss.blob->Release();
+		const char* e[3] = { "TraceCS", "TemporalCS", "SpatialCS" };
+		ID3D12PipelineState** o[3] = { &R.csGiTrace, &R.csGiTemporal, &R.csGiSpatial };
+		for (int i = 0; i < 3; i++) {
+			Shader s = R_Shader("gi", e[i], "cs_5_1");
+			if (s.ok) *o[i] = CreateComputePSO(s, "gi");
+			if (s.blob) s.blob->Release();
+		}
+	}
 	return R.presentPSO != nullptr;
 }
 
@@ -573,6 +655,22 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 	ok &= CreateTexture(R.glow, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "glow");
 	ok &= CreateTexture(R.hdrPrev, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, nullptr, "hdr previous");
 	R.hdrPrevValid = false;
+	for (int i = 0; i < 2; i++) ok &= CreateTexture(R.taa[i], w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "taa history");
+	R.taaValid = false;
+	{
+		uint32_t hw = Q_max(1u, w / 2), hh = Q_max(1u, h / 2);
+		ok &= CreateTexture(R.giRaw, hw, hh, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "gi raw");
+		ok &= CreateTexture(R.gi, hw, hh, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "gi");
+		for (int i = 0; i < 2; i++) ok &= CreateTexture(R.giAcc[i], hw, hh, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "gi history");
+		R.giValid = false;
+	}
+	{
+		// froxels: 1/16 of the screen per cell, 64 depth slices
+		uint32_t fx = Q_max(16u, (w + 15) / 16), fy = Q_max(9u, (h + 15) / 16);
+		ok &= CreateTexture(R.froxIn, fx, fy, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV | TEX_3D, 64, nullptr, "fog froxels");
+		ok &= CreateTexture(R.sssTmp, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "skin blur");
+		ok &= CreateTexture(R.froxOut, fx, fy, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV | TEX_3D, 64, nullptr, "fog integrated");
+	}
 	ok &= CreateTexture(R.depth, w, h, 1, DXGI_FORMAT_D32_FLOAT, TEX_DEPTH, 1, zero, "depth");
 	ok &= CreateTexture(R.gb0, w, h, 1, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, TEX_RT, 1, black, "gbuffer albedo");
 	ok &= CreateTexture(R.gb1, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "gbuffer normal");
@@ -651,7 +749,7 @@ void R_Shutdown()
 	for (auto& kv : R.psos) if (kv.second) kv.second->Release();
 	R.psos.clear();
 	ID3D12PipelineState* ps[] = { R.presentPSO, R.tonemapPSO, R.fxaaPSO, R.lgPSO[0], R.lgPSO[1], R.lgPSO[2], R.lgShadowPSO, R.lgShadowAlphaPSO,
-		R.csSkyLut, R.csSkySh, R.csLighting, R.csAo, R.csAoBlur, R.csHist, R.csExposure, R.csBloomDown, R.csBloomUp, R.csProbe };
+		R.csSkyLut, R.csSkySh, R.csLighting, R.csAo, R.csAoBlur, R.csHist, R.csExposure, R.csBloomDown, R.csBloomUp, R.csProbe, R.csTaa, R.csGiTrace, R.csGiTemporal, R.csGiSpatial, R.csFogInject, R.csFogIntegrate, R.csFogApply, R.csSss, R.csFocus, R.csDof, R.csMotionBlur };
 	for (auto* p : ps) if (p) p->Release();
 	Shader* sh[] = { &R.legacyVS, &R.legacyPS, &R.fsVS, &R.presentPS, &R.tonemapPS, &R.fxaaPS, &R.lgVS, &R.lgPS, &R.lgShadowPS };
 	for (auto* s : sh) if (s->blob) s->blob->Release();
@@ -841,6 +939,21 @@ void R_BeginView(const ViewDesc& v)
 	memset(R.proj, 0, 64);
 	R.proj[0] = sx; R.proj[5] = sy; R.proj[11] = -1.0f; R.proj[14] = v.zNear;
 	MatMul(R.vpNoJitter, R.proj, v.worldToEye);
+	// TAA: the game's own world view only (not probe captures or the sky portal), a Halton (2,3) sub-pixel jitter
+	R.taaThisView = v.world && !R.capture && !v.skyPortal && kt_taa->integer && R.csTaa && v.w >= 64 && v.h >= 64;
+	R.taaJitter[0] = R.taaJitter[1] = 0;
+	if (R.taaThisView) {
+		auto halton = [](uint32_t i, uint32_t b) { float f = 1, r = 0; while (i) { f /= b; r += f * (i % b); i /= b; } return r; };
+		uint32_t n = (R.taaFrame++ % 8) + 1;
+		R.taaJitter[0] = halton(n, 2) - 0.5f; R.taaJitter[1] = halton(n, 3) - 0.5f;
+		R.proj[8] = R.taaJitter[0] * 2.0f / v.w;
+		R.proj[9] = -R.taaJitter[1] * 2.0f / v.h;
+		// a camera cut or teleport: start the history again
+		float fwd[3] = { -v.worldToEye[2], -v.worldToEye[6], -v.worldToEye[10] };
+		float d[3] = { v.origin[0] - R.taaLastOrg[0], v.origin[1] - R.taaLastOrg[1], v.origin[2] - R.taaLastOrg[2] };
+		if (Dot3(d, d) > 256.0f * 256.0f || Dot3(fwd, R.taaLastFwd) < 0.7f) R.taaValid = false;
+		for (int k = 0; k < 3; k++) { R.taaLastOrg[k] = v.origin[k]; R.taaLastFwd[k] = fwd[k]; }
+	}
 	memcpy(R.prevViewProj, R.viewProj, 64);
 	MatMul(R.viewProj, R.proj, v.worldToEye);
 	R.deferred.clear();
@@ -854,7 +967,21 @@ void R_BeginView(const ViewDesc& v)
 	MatInverse(R.viewProj, c.invViewProj);
 	memcpy(c.worldToEye, v.worldToEye, 64);
 	memcpy(c.prevViewProj, R.prevViewProj, 64);
+	if (R.taaThisView && R.taaValid) memcpy(c.prevViewProj, R.lastVpNoJitter, 64);   // history is resolved: no jitter in it
 	memcpy(c.viewProjNoJitter, R.vpNoJitter, 64);
+	c.taaParams[0] = R.taaJitter[0]; c.taaParams[1] = R.taaJitter[1];
+	c.taaParams[2] = R.taaThisView ? Q_max(0.0f, Q_min(1.0f, kt_taaSharpen->value)) : 0.0f;
+	c.taaParams[3] = R.taaThisView ? 1.0f : 0.0f;
+	if (v.world && !R.capture && !v.skyPortal && kt_vfog->integer && kt_vfogDensity->value > 0 && R.csFogInject && R.csFogIntegrate
+		&& R.csFogApply && R.fogTypedLoad && R.froxIn.res) {
+		c.vfog0[0] = kt_vfogDensity->value; c.vfog0[1] = Q_max(0.0f, kt_vfogHeight->value); c.vfog0[3] = Q_max(1000.0f, kt_vfogFar->value);
+		c.vfog1[0] = Q_max(0.0f, kt_vfogSun->value); c.vfog1[1] = Q_max(0.0f, kt_vfogLights->value); c.vfog1[2] = Q_max(0.0f, kt_vfogAmbient->value);
+		c.vfog1[3] = 16.0f;
+		float fc[3] = { 1, 1, 1 };
+		sscanf(kt_vfogColor->string, "%f %f %f", &fc[0], &fc[1], &fc[2]);
+		c.vfogColor[0] = fc[0]; c.vfogColor[1] = fc[1]; c.vfogColor[2] = fc[2];
+		c.vfogIdx[0] = 1; c.vfogIdx[1] = R.froxIn.width | (R.froxIn.height << 16); c.vfogIdx[3] = R.froxIn.layers;
+	}
 	c.camPos[0] = v.origin[0]; c.camPos[1] = v.origin[1]; c.camPos[2] = v.origin[2]; c.camPos[3] = v.zNear;
 	c.viewport[0] = (float)v.x; c.viewport[1] = (float)((int)R.h - (v.y + v.h)); c.viewport[2] = (float)v.w; c.viewport[3] = (float)v.h;
 	c.invTargetSize[0] = 1.0f / R.w; c.invTargetSize[1] = 1.0f / R.h; c.invTargetSize[2] = (float)R.w; c.invTargetSize[3] = (float)R.h;
@@ -1300,13 +1427,67 @@ static void RenderWorldView()
 	// exposure buffer must be readable by the lighting debug views and the forward pass
 	Transition(cl, R.exposure, srv);
 
+	// ---- bounced light (HD worlds): rays over the depth buffer into last frame's lit scene, half resolution
+	uint32_t giSrv = 0;
+	if (hd && kt_gi->integer && R.hdrPrevValid && !R.capture && !v.skyPortal && R.csGiTrace && R.csGiTemporal && R.csGiSpatial) {
+		uint32_t hw = Q_min((uint32_t)(v.w + 1) / 2, (uint32_t)R.gi.width), hh = Q_min((uint32_t)(v.h + 1) / 2, (uint32_t)R.gi.height);
+		uint32_t hgx = (hw + 7) / 8, hgy = (hh + 7) / 8;
+		float rad = Q_max(64.0f, kt_giRadius->value);
+		Transition(cl, R.hdrPrev, srv);
+		Transition(cl, R.giRaw, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t kt[8] = { R.hdrPrev.srv, R.giRaw.uav[0], 0, hw, hh, R.giFrame, 0, 0 };
+		memcpy(&kt[7], &rad, 4);
+		Dispatch(cl, R.csGiTrace, kt, 8, hgx, hgy);
+		Transition(cl, R.giRaw, srv);
+		Texture& gh = R.giAcc[R.giIdx];
+		Texture& go = R.giAcc[R.giIdx ^ 1];
+		Transition(cl, gh, srv);
+		Transition(cl, go, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t kte[8] = { R.giRaw.srv, go.uav[0], gh.srv, hw, hh, R.giFrame, R.giValid ? 1u : 0u, 0 };
+		Dispatch(cl, R.csGiTemporal, kte, 8, hgx, hgy);
+		Transition(cl, go, srv);
+		Transition(cl, R.gi, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t ks[8] = { go.srv, R.gi.uav[0], 0, hw, hh, R.giFrame, 0, 0 };
+		Dispatch(cl, R.csGiSpatial, ks, 8, hgx, hgy);
+		Transition(cl, R.gi, srv);
+		R.giIdx ^= 1; R.giValid = true; R.giFrame++;
+		giSrv = R.gi.srv;
+	}
+	else if (!R.capture && !v.skyPortal) R.giValid = false;
+
 	// ---- lighting
 	Transition(cl, R.hdr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	{
-		uint32_t k[8] = { R.hdr.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, R.ao.srv,
-			(ao ? 1u : 0u) | (shadows ? 2u : 0u) | (kt_volumetric->integer ? 4u : 0u) | (kt_contactShadows->integer ? 8u : 0u) | (kt_lightShadows->integer ? 16u : 0u), (uint32_t)Q_max(0, kt_debugView->integer),
-			(kt_ssr->integer && R.hdrPrevValid && !R.capture) ? R.hdrPrev.srv : 0u };
-		Dispatch(cl, R.csLighting, k, 8, gx, gy);
+		uint32_t k[9] = { R.hdr.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, R.ao.srv,
+			(ao ? 1u : 0u) | (shadows ? 2u : 0u) | ((kt_volumetric->integer && !c.vfogIdx[0]) ? 4u : 0u) | (kt_contactShadows->integer ? 8u : 0u) | (kt_lightShadows->integer ? 16u : 0u), (uint32_t)Q_max(0, kt_debugView->integer),
+			(kt_ssr->integer && R.hdrPrevValid && !R.capture) ? R.hdrPrev.srv : 0u, giSrv };
+		Dispatch(cl, R.csLighting, k, 9, gx, gy);
+	}
+	// ---- skin: subsurface blur of the lit skin (two passes through a temporary)
+	if (kt_sss->value > 0 && R.csSss && !R.capture) {
+		float wdt = kt_sss->value;
+		Transition(cl, R.hdr, srv);
+		Transition(cl, R.sssTmp, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t k1[4] = { R.hdr.srv, R.sssTmp.uav[0], 0, 0 };
+		memcpy(&k1[3], &wdt, 4);
+		Dispatch(cl, R.csSss, k1, 4, gx, gy);
+		Transition(cl, R.sssTmp, srv);
+		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t k2[4] = { R.sssTmp.srv, R.hdr.uav[0], 1, 0 };
+		memcpy(&k2[3], &wdt, 4);
+		Dispatch(cl, R.csSss, k2, 4, gx, gy);
+		UavBarrier(cl, R.hdr.res);
+	}
+	// ---- volumetric fog: light the froxels and integrate them (applied after the forward pass)
+	if (c.vfogIdx[0]) {
+		Transition(cl, R.froxIn, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t k[8] = { R.froxIn.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, 0, (shadows ? 2u : 0u), 0, 0 };
+		Dispatch(cl, R.csFogInject, k, 8, (R.froxIn.width + 7) / 8, (R.froxIn.height + 7) / 8);
+		Transition(cl, R.froxIn, srv);
+		Transition(cl, R.froxOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t ki[4] = { R.froxIn.srv, R.froxOut.uav[0], R.froxIn.width | (R.froxIn.height << 16), R.froxIn.layers };
+		Dispatch(cl, R.csFogIntegrate, ki, 4, (R.froxIn.width + 7) / 8, (R.froxIn.height + 7) / 8);
+		Transition(cl, R.froxOut, srv);
 	}
 
 	// ---- water / flowing water (reads the scene depth, blends into the lit scene)
@@ -1357,6 +1538,34 @@ static void RenderWorldView()
 				cl->DrawInstanced(6, 1, 0, 0);
 			}
 	}
+	// ---- volumetric fog over everything drawn so far (before TAA, which smooths its noise)
+	if (c.vfogIdx[0]) {
+		Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
+		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t k[4] = { R.froxOut.srv, R.hdr.uav[0], R.froxIn.width | (R.froxIn.height << 16), R.froxIn.layers };
+		Dispatch(cl, R.csFogApply, k, 4, gx, gy);
+		UavBarrier(cl, R.hdr.res);
+	}
+	// ---- TAA resolve (history clipped to this frame's neighbourhood), written back into the HDR scene
+	if (R.taaThisView) {
+		Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
+		Texture& hist = R.taa[R.taaIdx];
+		Texture& out = R.taa[R.taaIdx ^ 1];
+		Transition(cl, R.hdr, srvAll);
+		Transition(cl, hist, srvAll);
+		Transition(cl, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		float fmin = 0.08f, fmax = 0.3f;
+		uint32_t k[8] = { R.hdr.srv, hist.srv, out.uav[0], R.depth.srv, R.taaValid ? 1u : 0u, 0, 0, 0 };
+		memcpy(&k[5], &fmin, 4); memcpy(&k[6], &fmax, 4);
+		Dispatch(cl, R.csTaa, k, 8, gx, gy);
+		Transition(cl, out, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_DEST);
+		cl->CopyResource(R.hdr.res, out.res);
+		Transition(cl, out, srvAll);
+		R.taaIdx ^= 1;
+		R.taaValid = true;
+		memcpy(R.lastVpNoJitter, R.vpNoJitter, 64);
+	}
 	// keep this frame's lit scene for next frame's screen-space reflections
 	if (R.capture) {
 		// probe capture: the lit HDR view goes into the probe's cube face; no camera effects
@@ -1364,7 +1573,7 @@ static void RenderWorldView()
 		cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.defaultCB);
 		return;
 	}
-	if (kt_ssr->integer) {
+	if (kt_ssr->integer || (hd && kt_gi->integer)) {   // also the light the bounced-light rays pick up
 		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_SOURCE);
 		Transition(cl, R.hdrPrev, D3D12_RESOURCE_STATE_COPY_DEST);
 		cl->CopyResource(R.hdrPrev.res, R.hdr.res);
@@ -1380,7 +1589,31 @@ static void RenderWorldView()
 		UavBarrier(cl, R.exposure.res);
 		Dispatch(cl, R.csExposure, k, 8, 1, 1);
 	}
+	bool dof = kt_dof->integer && R.csFocus && R.csDof && !v.skyPortal;
+	bool mblur = kt_motionBlur->value > 0 && R.csMotionBlur && !v.skyPortal && R.taaThisView;
+	float camK[4] = { kt_dofFocus->value, Q_max(0.0f, kt_dofAperture->value) * 6.0f, Q_max(0.0f, Q_min(1.0f, kt_motionBlur->value)), R.dt };
+	if (dof && kt_dofFocus->value <= 0) {
+		Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
+		UavBarrier(cl, R.exposure.res);
+		uint32_t k[8] = { 0, 0, R.exposure.uav, 1, 0, 0, 0, 0 };
+		memcpy(&k[4], camK, 16);
+		Dispatch(cl, R.csFocus, k, 8, 1, 1);
+	}
 	Transition(cl, R.exposure, srvAll);
+	// ---- camera: motion blur, then depth of field (each into a temporary and back)
+	for (int pass = 0; pass < 2; pass++) {
+		if (pass == 0 ? !mblur : !dof) continue;
+		Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
+		Transition(cl, R.hdr, srvAll);
+		Transition(cl, R.sssTmp, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		uint32_t k[8] = { R.hdr.srv, R.sssTmp.uav[0], 0, kt_dofFocus->value <= 0 ? 1u : 0u, 0, 0, 0, 0 };
+		memcpy(&k[4], camK, 16);
+		Dispatch(cl, pass == 0 ? R.csMotionBlur : R.csDof, k, 8, gx, gy);
+		Transition(cl, R.sssTmp, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		Transition(cl, R.hdr, D3D12_RESOURCE_STATE_COPY_DEST);
+		cl->CopyResource(R.hdr.res, R.sssTmp.res);
+		Transition(cl, R.hdr, srvAll);
+	}
 
 	// ---- bloom
 	uint32_t bloomSrv = 0;
@@ -1413,7 +1646,7 @@ static void RenderWorldView()
 
 	// ---- tone map (+ FXAA) into the screen
 	cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
-	bool fxaa = kt_fxaa->integer && R.fxaaPSO;
+	bool fxaa = kt_fxaa->integer && R.fxaaPSO && !R.taaThisView;   // TAA does the anti-aliasing
 	Texture& tmTarget = fxaa ? R.ldr : R.screen;
 	Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
 	Transition(cl, tmTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);

@@ -11,6 +11,7 @@ cbuffer Draw : register(b0)
 	uint lflags;     // 1 = AO on, 2 = shadows on, 4 = volumetric sun
 	uint debugMode;
 	uint ssrSrv;     // last frame's lit scene (0 = no screen-space reflections)
+	uint giSrv;      // bounced light (half res: rgb light, a share of rays that hit something), 0 = none
 };
 
 struct Light { float3 pos; float radius; float3 color; float type; float3 dir; float spotCos; float spotInner; float invSquare; float2 lp; };
@@ -245,10 +246,13 @@ void CS(uint3 id : SV_DispatchThreadID)
 	float3 g2 = Tex2D[indices0.z].Load(int3(px, 0)).rgb;
 	float3 N = DecodeNormal(g1.xy);
 	bool baked = g1.z < 0;
-	bool foliage = g1.w > 7.5;                   // HD world leaves / grass: light passes through
-	bool skin = !foliage && g1.w > 3.5;          // rend2 skin keyword: soft, subsurface-scattered diffuse
-	bool plainLegacy = !foliage && !skin && g1.w > 1.5;      // old model without PBR maps
-	float rough = abs(g1.z), metal = foliage ? g1.w - 8.0 : skin ? g1.w - 4.0 : plainLegacy ? g1.w - 2.0 : g1.w;
+	float fw = g1.w;
+	bool eye = fw > 31.5; if (eye) fw -= 32.0;   // character eyes (wet, sharp highlights)
+	bool hair = fw > 15.5; if (hair) fw -= 16.0; // character hair: Kajiya-Kay highlights
+	bool foliage = fw > 7.5;                     // HD world leaves / grass: light passes through
+	bool skin = !foliage && fw > 3.5;            // rend2 skin keyword: soft, subsurface-scattered diffuse
+	bool plainLegacy = !foliage && !skin && fw > 1.5;        // old model without PBR maps
+	float rough = abs(g1.z), metal = foliage ? fw - 8.0 : skin ? fw - 4.0 : plainLegacy ? fw - 2.0 : fw;
 	float3 albedo = g0.rgb;
 	float ao = g0.a;
 	if (lflags & 1) ao *= Tex2D[aoTex].Load(int3(px, 0)).r;
@@ -279,6 +283,12 @@ void CS(uint3 id : SV_DispatchThreadID)
 		float3 scatter = lerp(float3(1.0, 0.35, 0.22), 1.0, saturate(nl * 2.0));
 		Lo += diff / PI * wrap * scatter * sunColor.rgb * sunColor.w * lerp(0.35, 1.0, sh);
 		if (nl > 0) Lo += (Brdf(N, V, L, 0, f0, rough)) * sunColor.rgb * sunColor.w * sh;
+	}
+	else if (hair && sunColor.w > 0) {
+		float sh = Shadow(P, N, viewZ);
+		float nl = dot(N, L);
+		Lo += diff / PI * saturate((nl + 0.3) / 1.3) * sunColor.rgb * sunColor.w * sh;
+		Lo += HairSpec(HairStrand(N), N, V, L, albedo, rough) * sunColor.rgb * sunColor.w * sh;
 	}
 	else if (sunColor.w > 0 && dot(N, L) > 0) {
 		float sh = Shadow(P, N, viewZ);
@@ -331,7 +341,8 @@ void CS(uint3 id : SV_DispatchThreadID)
 			shadowed++;
 			att *= ScreenShadow(P, N, Ld, min(dl, 320.0), 14, 40, pxJitter);
 		}
-		Lo += Brdf(N, V, Ld, diff, f0, rough) * l.color * att;
+		if (hair) Lo += (diff / PI * saturate(dot(N, Ld)) + HairSpec(HairStrand(N), N, V, Ld, albedo, rough)) * l.color * att;
+		else Lo += Brdf(N, V, Ld, diff, f0, rough) * l.color * att;
 	}
 	// ambient
 	float NoV = max(dot(N, V), 1e-4);
@@ -410,7 +421,18 @@ void CS(uint3 id : SV_DispatchThreadID)
 		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 	}
 	else {
-		Lo += SkyAmbient(N) * diff * ao * skyParams.z;
+		// indirect diffuse: the sky, the reflection probes' surroundings (their blurriest level), bounced light
+		float3 amb = SkyAmbient(N) * skyParams.z;
+		if (probeParams.y) {
+			float pw;
+			float3 pirr = SampleProbes(P, N, 1.0, pw);
+			amb = lerp(amb, pirr * asfloat(probeParams.z), pw * 0.85);
+		}
+		if (giSrv) {
+			float4 gi = Tex2D[giSrv].SampleLevel(sClamp, (float2(px) - viewport.xy + 0.5) * invTargetSize.xy, 0);
+			amb = amb * (1 - saturate(gi.a) * 0.8) + gi.rgb;
+		}
+		Lo += amb * diff * ao;
 		Lo += spec * env * specOcc * skyParams.z * (plainLegacy ? 0.25 : 1.0);
 		Lo += g2;
 	}
@@ -421,4 +443,54 @@ void CS(uint3 id : SV_DispatchThreadID)
 	else if (debugMode == 4) Lo = Shadow(P, N, viewZ);
 	if (debugMode) Lo /= max(Exposure(), 1e-6);
 	UavTex[outUav][px] = float4(Sane(Lo), 1);
+}
+
+// ------------------------------------------------------------------------------------------------ volumetric fog
+// Frostbite-style froxels: a grid over the view frustum (exponential depth slices); each cell gets the fog's density and
+// the light scattered towards the camera from the sun (through its shadow map), the local lights and lightsabers, and
+// the sky. Uses this pass's constants: outUav = the froxel grid (RWTexture3D), lightBuf / lightCount, lflags.
+float FroxelDepth(float s) { return vfog1.w * pow(vfog0.w / vfog1.w, s / vfogIdx.w); }
+
+[numthreads(8, 8, 1)]
+void FogInjectCS(uint3 id : SV_DispatchThreadID)
+{
+	uint3 dim = uint3(vfogIdx.y & 0xffff, vfogIdx.y >> 16, vfogIdx.w);
+	if (id.x >= dim.x || id.y >= dim.y) return;
+	float jit = frac(sin(dot(float2(id.xy) + projParams.w * 7.13, float2(12.9898, 78.233))) * 43758.5453);
+	for (uint z = 0; z < dim.z; z++) {
+		float viewZ = FroxelDepth(z + jit);
+		float2 vuv = (float2(id.xy) + 0.5) / float2(dim.xy);
+		float4 w = mul(invViewProj, float4(vuv * float2(2, -2) + float2(-1, 1), projParams.z / viewZ, 1));
+		float3 P = w.xyz / w.w;
+		float3 V = normalize(P - camPos.xyz);
+		float dens = vfog0.x * exp(-vfog0.y * max(P.z - (camPos.z - 64), 0));
+		float3 S = 0;
+		// sun: Henyey-Greenstein forward scattering through the cascades
+		if (vfog1.x > 0 && (lflags & 2)) {
+			float g = 0.6, ct = dot(V, sunDir.xyz);
+			float hg = (1 - g * g) / (4 * PI * pow(abs(1 + g * g - 2 * g * ct), 1.5));
+			float3 sunC = sunColor.w > 0 ? sunColor.rgb * sunColor.w : float3(1, 0.96, 0.9);
+			S += sunC * hg * ShadowFast(P, viewZ) * vfog1.x;
+		}
+		// local lights and lightsabers (no shadows), scaled up the way Unreal's volumetric scattering intensity is
+		[loop] for (uint i = 0; i < lightCount; i++) {
+			Light l = LoadLight(i);
+			float3 d;
+			if (l.type == 2) {
+				float len2 = max(dot(l.dir, l.dir), 1e-4);
+				d = l.pos + l.dir * saturate(dot(P - l.pos, l.dir) / len2) - P;
+			}
+			else d = l.pos - P;
+			float d2 = dot(d, d);
+			if (d2 > l.radius * l.radius) continue;
+			float wnd = saturate(1 - pow(d2 / (l.radius * l.radius), 2)); wnd *= wnd;
+			float att = l.invSquare > 0 ? wnd * l.invSquare / max(d2, 256.0) : wnd;
+			if (l.type == 1) att *= smoothstep(l.spotCos, l.spotInner, dot(-normalize(d), l.dir));
+			S += l.color * att / (4 * PI) * vfog1.y;
+		}
+		// sky / ambient
+		S += (skyParams.w > 0.5 ? SkyAmbient(float3(0, 0, 1)) * skyParams.z : vfog1.zzz) * 0.5;
+		S *= vfogColor.rgb * dens;
+		UavTex3D[outUav][uint3(id.xy, z)] = float4(S, dens);
+	}
 }

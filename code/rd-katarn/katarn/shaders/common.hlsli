@@ -10,6 +10,7 @@ Texture3D Tex3D[] : register(t0, space5);
 RWTexture2D<float4> UavTex[] : register(u0, space1);
 RWByteAddressBuffer UavBuf[] : register(u0, space2);
 RWTexture2DArray<float4> UavTexArray[] : register(u0, space3);
+RWTexture3D<float4> UavTex3D[] : register(u0, space4);
 
 #ifdef KT_GLSLANG   // offline syntax check with glslang, which lacks arrays of byte-address buffers
 #define NonUniformResourceIndex(x) (x)
@@ -67,6 +68,11 @@ cbuffer View : register(b1)
 	float4 atmos1;             // sun screen uv, sun visible, shaft strength
 	float4 atmos2;             // sun rgb, height falloff
 	float4 atmos3;             // x haze start, y 1 = on
+	float4 taaParams;          // jitter xy (pixels), z sharpen, w 1 = TAA on
+	float4 vfog0;              // volumetric fog: density, height falloff, -, far
+	float4 vfog1;              // sun scattering, light scattering, ambient (BSP maps), near
+	float4 vfogColor;          // scattering colour
+	uint4 vfogIdx;             // x on, y grid w | h << 16, w depth slices
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -97,6 +103,21 @@ float3 WorldFromDepth(float2 uv, float depth)
 	return w.xyz / w.w;
 }
 float ViewDepth(float depth) { return projParams.z / max(depth, 1e-7); }   // reversed-Z infinite: near / depth
+
+// Kajiya-Kay hair highlight (Unreal / Marschner-style two lobes): the primary shifted towards the root, white; the
+// secondary towards the tip, tinted by the hair colour. T = strand direction (no tangents in old models: hair is taken
+// to fall down, the world's up projected onto the surface)
+float3 HairStrand(float3 N) { float3 up = float3(0, 0, 1); float3 T = up - N * dot(N, up); float l = length(T); return l > 1e-3 ? T / l : float3(1, 0, 0); }
+float3 HairSpec(float3 T, float3 N, float3 V, float3 L, float3 albedo, float rough)
+{
+	float3 H = normalize(L + V);
+	float e1 = exp2(10 * (1 - rough) + 2), e2 = e1 * 0.25;
+	float3 T1 = normalize(T + N * 0.08), T2 = normalize(T - N * 0.12);
+	float th1 = dot(T1, H), th2 = dot(T2, H);
+	float s1 = pow(sqrt(saturate(1 - th1 * th1)), e1), s2 = pow(sqrt(saturate(1 - th2 * th2)), e2);
+	float nl = saturate(dot(N, L) * 0.75 + 0.25);
+	return (s1 * 0.12 + s2 * 0.18 * albedo) * nl;
+}
 
 float Exposure()
 {

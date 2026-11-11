@@ -226,6 +226,16 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb);
+	if (taaParams.z > 0) {
+		// sharpen after TAA (contrast-adaptive: less where the neighbourhood already has strong contrast)
+		int2 p = int2(i.pos.xy);
+		float3 n = Sane(Tex2D[srcSrv].Load(int3(p + int2(0, -1), 0)).rgb), s = Sane(Tex2D[srcSrv].Load(int3(p + int2(0, 1), 0)).rgb);
+		float3 e = Sane(Tex2D[srcSrv].Load(int3(p + int2(1, 0), 0)).rgb), w = Sane(Tex2D[srcSrv].Load(int3(p + int2(-1, 0), 0)).rgb);
+		float3 mn = min(c, min(min(n, s), min(e, w))), mx = max(c, max(max(n, s), max(e, w)));
+		float3 amp = saturate(min(mn, 2.0 * max(mx, 1e-4) - mx) / max(mx, 1e-4));
+		float3 wgt = -sqrt(amp) * taaParams.z * 0.2;
+		c = max(0, (c + (n + s + e + w) * wgt) / (1 + 4 * wgt));
+	}
 	if (atmos3.y > 0.5) c = Atmosphere(c, i.uv, int2(i.pos.xy));
 	c *= Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
