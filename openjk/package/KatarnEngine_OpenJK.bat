@@ -18,4 +18,4 @@ if not exist "%GAME%\maps\naboo_theed.kworld" (
 )
 
 set ARGS=+set fs_basepath "%JA%" +set fs_homepath "%~dp0home" +set fs_game katarn +set cl_renderer rdsp-katarn +set g_char_model tali +set g_char_skin_head model_default +set g_char_skin_torso model_default +set g_char_skin_legs model_default
-start "" openjk_sp.x86_64.exe %ARGS%
+start "" openjk_sp.x86_64.exe %ARGS% +exec widescreen

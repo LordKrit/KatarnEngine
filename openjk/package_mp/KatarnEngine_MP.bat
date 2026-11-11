@@ -23,4 +23,4 @@ if exist "%HD%" (
 )
 if exist "%~dp0..\home\MD\shaders\katarn_hd.shader" xcopy /D /Y /Q "%~dp0..\home\MD\shaders\katarn_hd.shader" "home\base\shaders\" >nul
 
-start "" openjk.x86_64.exe +set fs_basepath "%JA%" +set fs_homepath "%~dp0home" +set cl_renderer rd-katarn +set kt_worldPath "%HD%" %*
+start "" openjk.x86_64.exe +set fs_basepath "%JA%" +set fs_homepath "%~dp0home" +set cl_renderer rd-katarn +set kt_worldPath "%HD%" +exec widescreen %*
