@@ -24,6 +24,10 @@ Files
   rd-vanilla_x86_64.dll            OpenJK's OpenGL renderer (fallback)
   home\base\                       jampgame / cgame / ui x86_64 DLLs built from the same source; config, screenshots
 
-HD worlds: put <map>.kworld in home\base\maps (the server needs the map's .bsp as usual).
+HD worlds (Naboo Theed)
+  Naboo_Theed_MP.bat      a local free-for-all on naboo_theed (or: devmap naboo_theed; it is also in Create Server)
+  KatarnEngine_MP.bat reads the .kworld files straight from KatarnEngine's home\MD\maps (kt_worldPath) and copies
+  each one's collision .bsp into home\base\maps when it is newer, so a re-cook reaches MP on the next start.
+  Elsewhere: put <map>.kworld in home\base\maps or point kt_worldPath at its folder; the server needs the .bsp.
 
 Online play: servers and other players use their usual files; the renderer only changes how this client draws.
