@@ -1,8 +1,3 @@
-From: KatarnEngine <noreply@anthropic.com>
-Subject: [PATCH] KatarnEngine renderers for OpenJK SP (rdsp-katarn) and MP (rd-katarn)
-
-Apply to OpenJK 260c59c2 with: git apply openjk-katarn.patch
----
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 149e82d7..e5210589 100644
 --- a/CMakeLists.txt
@@ -22891,10 +22886,10 @@ index 00000000..1cbf23e0
 +} // namespace kt
 diff --git a/code/rd-katarn/katarn/kt_gl.cpp b/code/rd-katarn/katarn/kt_gl.cpp
 new file mode 100644
-index 00000000..296ed7a4
+index 00000000..694caa9e
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_gl.cpp
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,653 @@
 +// KatarnEngine - fixed-function OpenGL 1.x translation for legacy content.
 +//
 +// The vanilla front end (menus, HUD, BSP maps, Ghoul2 characters, effects) still issues GL 1.x calls. They are
@@ -23025,6 +23020,7 @@ index 00000000..296ed7a4
 +	std::vector<IVert> imm;
 +	const void* stage = nullptr;
 +	bool glow = false;
++	bool saber = false;
 +	float scale = 1.0f;
 +} s;
 +
@@ -23040,9 +23036,11 @@ index 00000000..296ed7a4
 +	s.stack[0].assign(1, Mat()); MatIdentity(s.stack[0][0].m);
 +	s.stack[1].assign(1, Mat()); MatIdentity(s.stack[1][0].m);
 +	s.matrixMode = GL_MODELVIEW;
++	s.saber = false;
 +}
 +void GL_SetStage(const void* stage, bool glow) { s.stage = stage; s.glow = glow; }
 +void GL_SetScale(float v) { s.scale = v; }
++void GL_SetSaber(bool v) { s.saber = v; }
 +
 +// PSO bits (kt_render.cpp decodes these)
 +enum : uint32_t {
@@ -23109,6 +23107,7 @@ index 00000000..296ed7a4
 +		d.alphaRef = s.alphaRef;
 +	}
 +	if (s.glow) f |= LF_GLOW;
++	if (s.saber) f |= LF_SABER;
 +	d.flags = f;
 +
 +	// matrices
@@ -23546,10 +23545,10 @@ index 00000000..296ed7a4
 +void APIENTRY ktgl_UnlockArraysEXT(void) {}
 diff --git a/code/rd-katarn/katarn/kt_render.cpp b/code/rd-katarn/katarn/kt_render.cpp
 new file mode 100644
-index 00000000..91b9d4ad
+index 00000000..89bf90ed
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_render.cpp
-@@ -0,0 +1,2103 @@
+@@ -0,0 +1,2132 @@
 +// KatarnEngine - the frame.
 +//
 +// Per 3D world view:
@@ -23742,18 +23741,18 @@ index 00000000..91b9d4ad
 +	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 +	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
 +	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
-+	kt_taa = KtCvar("kt_taa", "1", CVAR_ARCHIVE);
++	kt_taa = KtCvar("kt_taa", "0", CVAR_ARCHIVE);
 +	// volumetric fog (froxels): light from the sun, lamps and lightsabers scattered in the air
 +	kt_vfog = KtCvar("kt_vfog", "1", CVAR_ARCHIVE);
-+	kt_vfogDensity = KtCvar("kt_vfogDensity", "0.00005", CVAR_ARCHIVE);   // per unit (0.00005: 80% clear at 4000 units)
-+	kt_vfogLights = KtCvar("kt_vfogLights", "150", CVAR_ARCHIVE);        // how strongly lamps and sabers light the air
++	kt_vfogDensity = KtCvar("kt_vfogDensity", "0.000015", CVAR_ARCHIVE);   // per unit (0.000015: 94% clear at 4000 units)
++	kt_vfogLights = KtCvar("kt_vfogLights", "12", CVAR_ARCHIVE);         // how strongly lamps and sabers light the air
 +	kt_vfogSun = KtCvar("kt_vfogSun", "1", CVAR_ARCHIVE);
 +	kt_vfogFar = KtCvar("kt_vfogFar", "8000", CVAR_ARCHIVE);
 +	kt_vfogHeight = KtCvar("kt_vfogHeight", "0", CVAR_ARCHIVE);          // thinner with height (per unit above the floor)
-+	kt_vfogAmbient = KtCvar("kt_vfogAmbient", "0.25", CVAR_ARCHIVE);     // old maps: light already in the air
++	kt_vfogAmbient = KtCvar("kt_vfogAmbient", "0.08", CVAR_ARCHIVE);     // old maps: light already in the air
 +	kt_vfogColor = KtCvar("kt_vfogColor", "1 1 1", CVAR_ARCHIVE);
-+	kt_gi = KtCvar("kt_gi", "1", CVAR_ARCHIVE);
-+	kt_sss = KtCvar("kt_sss", "0.6", CVAR_ARCHIVE);               // skin subsurface scattering radius (units, 0 = off)
++	kt_gi = KtCvar("kt_gi", "0", CVAR_ARCHIVE);
++	kt_sss = KtCvar("kt_sss", "0.3", CVAR_ARCHIVE);               // skin subsurface scattering radius (units, 0 = off)
 +	// camera (for cinematics; off in play)
 +	kt_dof = KtCvar("kt_dof", "0", CVAR_ARCHIVE);                 // depth of field
 +	kt_dofFocus = KtCvar("kt_dofFocus", "0", 0);                  // focus distance in units, 0 = what is in the middle of the screen
@@ -23772,6 +23771,13 @@ index 00000000..91b9d4ad
 +		for (auto& r : reset) ri.Cvar_Set(r[0], r[1]);
 +		ri.Cvar_Set("kt_configVersion", "2");
 +		ri.Printf(PRINT_ALL, "KatarnEngine: bloom, glow and saber settings reset to the defaults\n");
++	}
++	if (ver->integer < 3) {
++		// r11's first settings were too heavy (soft TAA, costly bounced light, thick fog, strong skin blur)
++		const char* reset[][2] = { { "kt_taa", "0" }, { "kt_gi", "0" }, { "kt_vfogDensity", "0.000015" }, { "kt_vfogLights", "12" },
++			{ "kt_vfogAmbient", "0.08" }, { "kt_sss", "0.3" }, { "kt_saberLight", "1" } };
++		for (auto& r : reset) ri.Cvar_Set(r[0], r[1]);
++		ri.Cvar_Set("kt_configVersion", "3");
 +	}
 +}
 +
@@ -23853,6 +23859,7 @@ index 00000000..91b9d4ad
 +	// targets
 +	Texture screen, screenDepth, ldr;
 +	Texture hdr, depth, gb0, gb1, gb2, ao, aoTmp, shadow, skyLut;
++	Texture overlay;                 // lightsaber blades in display space: added after the tone map (rend2's look)
 +	Texture glow;                    // glow stages (saber blades, lights) drawn again here; blurred into the bloom (rend2 dynamic glow)
 +	Texture hdrPrev;                 // last frame's lit scene (screen-space reflections)
 +	bool hdrPrevValid = false;
@@ -24049,9 +24056,9 @@ index 00000000..91b9d4ad
 +	}
 +	if (bits & PSO_WIRE) d.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
 +	d.PrimitiveTopologyType = (bits & PSO_LINES) ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-+	d.NumRenderTargets = target == 1 ? 2 : 1;   // HDR: + the glow target (same blend)
++	d.NumRenderTargets = target == 1 ? 3 : 1;   // HDR: + the glow target and the saber overlay (same blend)
 +	d.RTVFormats[0] = target == 1 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
-+	if (target == 1) d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
++	if (target == 1) d.RTVFormats[1] = d.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 +	d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 +	ID3D12PipelineState* p = CreateGraphicsPSO(d, "legacy");
 +	R.psos[key] = p;
@@ -24188,7 +24195,7 @@ index 00000000..91b9d4ad
 +// ------------------------------------------------------------------------------------------------ targets
 +static void DestroyTargets()
 +{
-+	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
++	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.overlay, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
 +	for (Texture* t : all) DestroyTexture(*t);
 +	for (auto& t : R.bloomDown) DestroyTexture(t);
 +	for (auto& t : R.bloomUp) DestroyTexture(t);
@@ -24205,6 +24212,7 @@ index 00000000..91b9d4ad
 +	ok &= CreateTexture(R.ldr, w, h, 1, DXGI_FORMAT_R8G8B8A8_UNORM, TEX_RT, 1, black, "ldr");
 +	ok &= CreateTexture(R.hdr, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT | TEX_UAV, 1, black, "hdr");
 +	ok &= CreateTexture(R.glow, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "glow");
++	ok &= CreateTexture(R.overlay, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "saber overlay");
 +	ok &= CreateTexture(R.hdrPrev, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, nullptr, "hdr previous");
 +	R.hdrPrevValid = false;
 +	for (int i = 0; i < 2; i++) ok &= CreateTexture(R.taa[i], w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "taa history");
@@ -24358,8 +24366,9 @@ index 00000000..91b9d4ad
 +	Transition(cl, ds, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 +	if (target == 1) {
 +		Transition(cl, R.glow, D3D12_RESOURCE_STATE_RENDER_TARGET);
-+		D3D12_CPU_DESCRIPTOR_HANDLE two[2] = { rt.rtv[0], R.glow.rtv[0] };
-+		cl->OMSetRenderTargets(2, two, FALSE, &ds.dsv[0]);
++		Transition(cl, R.overlay, D3D12_RESOURCE_STATE_RENDER_TARGET);
++		D3D12_CPU_DESCRIPTOR_HANDLE three[3] = { rt.rtv[0], R.glow.rtv[0], R.overlay.rtv[0] };
++		cl->OMSetRenderTargets(3, three, FALSE, &ds.dsv[0]);
 +	}
 +	else cl->OMSetRenderTargets(1, &rt.rtv[0], FALSE, &ds.dsv[0]);
 +	if (target == 1) cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
@@ -24962,6 +24971,17 @@ index 00000000..91b9d4ad
 +			for (int q = 0; q < 3; q++) l.color[q] *= kt_saberLight->value;
 +			lights.push_back(l);
 +		}
++	// nearest first: the screen-space shadows go to the closest lights, and the fog only takes the first few
++	{
++		const float* o = v.origin;
++		auto key = [o](const GpuLight& l) {
++			float p[3] = { l.pos[0], l.pos[1], l.pos[2] };
++			if (l.type == 2.0f) for (int q = 0; q < 3; q++) p[q] += l.dir[q] * 0.5f;
++			float d = sqrtf((p[0] - o[0]) * (p[0] - o[0]) + (p[1] - o[1]) * (p[1] - o[1]) + (p[2] - o[2]) * (p[2] - o[2]));
++			return d - l.radius * 0.5f;
++		};
++		std::stable_sort(lights.begin(), lights.end(), [&](const GpuLight& a, const GpuLight& b) { return key(a) < key(b); });
++	}
 +	uint32_t nl = (uint32_t)lights.size();
 +	if (!nl) { GpuLight dummy = {}; lights.push_back(dummy); }
 +	UploadAlloc la = Upload(lights.size() * sizeof(GpuLight), 256);
@@ -25033,7 +25053,7 @@ index 00000000..91b9d4ad
 +	// ---- volumetric fog: light the froxels and integrate them (applied after the forward pass)
 +	if (c.vfogIdx[0]) {
 +		Transition(cl, R.froxIn, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-+		uint32_t k[8] = { R.froxIn.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, 0, (shadows ? 2u : 0u), 0, 0 };
++		uint32_t k[8] = { R.froxIn.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], Q_min(nl, 16u), 0, (shadows ? 2u : 0u), 0, 0 };
 +		Dispatch(cl, R.csFogInject, k, 8, (R.froxIn.width + 7) / 8, (R.froxIn.height + 7) / 8);
 +		Transition(cl, R.froxIn, srv);
 +		Transition(cl, R.froxOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -25063,9 +25083,12 @@ index 00000000..91b9d4ad
 +		const float zero4g[4] = { 0, 0, 0, 0 };
 +		Transition(cl, R.glow, D3D12_RESOURCE_STATE_RENDER_TARGET);
 +		cl->ClearRenderTargetView(R.glow.rtv[0], zero4g, 0, nullptr);
++		Transition(cl, R.overlay, D3D12_RESOURCE_STATE_RENDER_TARGET);
++		cl->ClearRenderTargetView(R.overlay.rtv[0], zero4g, 0, nullptr);
 +	}
 +	FlushStream(1);
 +	Transition(cl, R.glow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++	Transition(cl, R.overlay, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 +
 +	// ---- camera: exposure
 +	D3D12_RESOURCE_STATES srvAll = srv;
@@ -25203,7 +25226,7 @@ index 00000000..91b9d4ad
 +	Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
 +	Transition(cl, tmTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
 +	{
-+		uint32_t k[8] = { R.hdr.srv, 0, 0, bloomSrv, R.w, R.h, 0, 0 };
++		uint32_t k[8] = { R.hdr.srv, R.overlay.srv, 0, bloomSrv, R.w, R.h, 0, 0 };
 +		FullscreenPass(cl, R.tonemapPSO, tmTarget, k, 8);
 +	}
 +	if (fxaa) {
@@ -25222,14 +25245,19 @@ index 00000000..91b9d4ad
 +	if (!R.inView || length < 1.0f || R.tubes.size() >= 64) return;
 +	GpuLight l = {};
 +	for (int q = 0; q < 3; q++) { l.pos[q] = start[q]; l.dir[q] = dir[q] * length; }
-+	l.radius = 220.0f + length;
-+	// the blade colour, saturated (the glow sprites carry it), as radiance; intensity / d^2 from the nearest point
++	l.radius = 320.0f + length * 0.5f;
++	// Battlefront II (2017) style: the blade colour with a little of the white-hot core in it, a soft-cored inverse
++	// square from the nearest point of the blade (bright pools on floors and walls nearby, not a hard hot spot on
++	// whatever touches it) and a faint hum flicker
 +	float c[3] = { rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f };
 +	float mx = Q_max(c[0], Q_max(c[1], c[2]));
 +	if (mx < 0.01f) { c[0] = c[1] = c[2] = 1; mx = 1; }
-+	for (int q = 0; q < 3; q++) l.color[q] = powf(c[q] / mx, 2.2f) * 1.0f;
++	const float t = ri.Milliseconds() * 0.001f;
++	const float hum = 1.0f + 0.04f * sinf(t * 47.0f + start[0] * 0.05f) + 0.03f * sinf(t * 113.0f);
++	for (int q = 0; q < 3; q++) l.color[q] = (powf(c[q] / mx, 2.2f) * 0.85f + 0.15f) * hum;
 +	l.type = 2;
-+	l.invSquare = 220.0f;   // a soft fill, about what rend2's saber dynamic light gives
++	l.invSquare = 800.0f;
++	l.pad[0] = 32.0f * 32.0f;   // soft radius squared (lighting.hlsl Light.lp.x)
 +	R.tubes.push_back(l);
 +}
 +float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }
@@ -25655,10 +25683,10 @@ index 00000000..91b9d4ad
 +} // namespace kt
 diff --git a/code/rd-katarn/katarn/kt_render.h b/code/rd-katarn/katarn/kt_render.h
 new file mode 100644
-index 00000000..fda23474
+index 00000000..c6377942
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_render.h
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,141 @@
 +// KatarnEngine - frame renderer interface (used by the vanilla back end and the GL translation layer)
 +#pragma once
 +#include "kt_device.h"
@@ -25675,6 +25703,7 @@ index 00000000..fda23474
 +	LF_ATEST_SHIFT = 8,          // 3 bits: 0 off, 1 >, 2 <, 3 >=, 4 <=, 5 ==, 6 !=
 +	LF_GLOW = 1u << 11,          // shader stage marked glow: boosted in HDR so bloom picks it up
 +	LF_ENV0_SHIFT = 12,          // 2 bits: unit 0 env (replace ignores vertex colour)
++	LF_SABER = 1u << 14,         // lightsaber blade / glow: composited after the tone map, the way rend2 shows it
 +};
 +
 +struct PsoKey {
@@ -25732,6 +25761,7 @@ index 00000000..fda23474
 +void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba, uint32_t glowTex, const uint8_t* vertexRgba, bool coreOnly);
 +void R_AddSaberCore(const float* start, const float* end, float radius, const uint8_t* rgba, uint32_t tex, bool alphaBlend);
 +void GL_SetStage(const void* stage, bool glow);
++void GL_SetSaber(bool v);   // the next draws are lightsaber blades (LF_SABER)
 +void GL_SetScale(float v);   // extra HDR brightness for the next draws (saber glow sprites)   // the shader stage being drawn (glow boost)
 +// projection to use for 3D views (D3D, reversed-Z infinite) - the GL translation layer swaps it in for the
 +// front end's GL projection
@@ -25800,10 +25830,10 @@ index 00000000..fda23474
 +} // namespace kt
 diff --git a/code/rd-katarn/katarn/kt_shaders_gen.h b/code/rd-katarn/katarn/kt_shaders_gen.h
 new file mode 100644
-index 00000000..f103d056
+index 00000000..94cd5dad
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_shaders_gen.h
-@@ -0,0 +1,4408 @@
+@@ -0,0 +1,4457 @@
 +// generated by shaders/gen.py - do not edit
 +#pragma once
 +
@@ -26734,20 +26764,31 @@ index 00000000..f103d056
 +	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 +}
 +
-+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; };
-+float4 Shade(VsOut i);
++struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; };
++float4 Shade(VsOut i, out float4 display);
 +PsOut PS(VsOut i)
 +{
 +	PsOut o;
-+	o.c = Shade(i);
++	float4 display;
++	o.c = Shade(i, display);
 +	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
 +	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
++	o.overlay = float4(0, 0, 0, o.c.a);
++	if (drawTarget == 1 && (flags & (1u << 14))) {
++		// lightsaber blade: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added to the
++		// display after the tone map with the plain clamp rend2 has; a softer copy feeds the bloom
++		o.overlay = display;
++		o.glow = float4(o.c.rgb * 0.35, o.c.a);
++		o.c = float4(0, 0, 0, o.c.a);
++	}
 +	return o;
 +}
-+float4 Shade(VsOut i)
++float4 Shade(VsOut i, out float4 display)
 +{
 +	float4 c = i.color;
-+	if (drawTarget == 1) c.rgb = SrgbToLinear(c.rgb);
++	display = 0;
++	const bool saber = drawTarget == 1 && (flags & (1u << 14));
++	if (drawTarget == 1 && !saber) c.rgb = SrgbToLinear(c.rgb);
 +	if (flags & 1) {
 +		float4 t = SampleUnit(tex0, i.uv0, (flags & 4) != 0, (flags & 16) != 0);
 +		uint env0 = (flags >> 12) & 3;
@@ -26772,6 +26813,11 @@ index 00000000..f103d056
 +		else if (at == 6) keep = c.a != alphaRef;
 +		else keep = false;
 +		if (!keep) discard;
++	}
++	if (saber) {
++		// display-space colour (gamma, as authored), scaled by kt_saberGlowScale; the linear copy feeds the bloom
++		display = float4(c.rgb * (drawScale > 0 ? drawScale : 1.0), c.a);
++		c.rgb = SrgbToLinear(saturate(c.rgb));
 +	}
 +	if (drawTarget == 1) {
 +		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
@@ -27571,9 +27617,9 @@ index 00000000..f103d056
 +	else if (skin && sunColor.w > 0) {
 +		// wrapped diffuse with a warm scattered terminator (light bleeding through skin), GGX on top
 +		float nl = dot(N, L);
-+		float wrap = saturate((nl + 0.45) / 1.45);
++		float wrap = saturate((nl + 0.25) / 1.25);
 +		float sh = Shadow(P, N, viewZ);
-+		float3 scatter = lerp(float3(1.0, 0.35, 0.22), 1.0, saturate(nl * 2.0));
++		float3 scatter = lerp(float3(1.0, 0.62, 0.52), 1.0, saturate(nl * 3.0 + 0.3));
 +		Lo += diff / PI * wrap * scatter * sunColor.rgb * sunColor.w * lerp(0.35, 1.0, sh);
 +		if (nl > 0) Lo += (Brdf(N, V, L, 0, f0, rough)) * sunColor.rgb * sunColor.w * sh;
 +	}
@@ -27602,7 +27648,7 @@ index 00000000..f103d056
 +			float dd2 = dot(Cd, Cd);
 +			if (dd2 > l.radius * l.radius) continue;
 +			float wnd = saturate(1 - pow(dd2 / (l.radius * l.radius), 2)); wnd *= wnd;
-+			float att = wnd * l.invSquare / max(dd2, 400.0);
++			float att = wnd * l.invSquare / (dd2 + l.lp.x);   // pad[0]: the blade's soft radius squared
 +			float3 Rr = reflect(-V, N);
 +			float3 A0 = A - P;
 +			float rb = dot(Rr, Bv), ra = dot(Rr, A0);
@@ -27688,13 +27734,13 @@ index 00000000..f103d056
 +					float4 pp = mul(prevViewProj, float4(Q, 1));
 +					huv = pp.xy / pp.w * float2(0.5, -0.5) + 0.5;
 +					float2 e = saturate(min(huv, 1 - huv) * 10);
-+					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0.2);
++					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0)KTSRC",
++R"KTSRC(.2);
 +					break;
 +				}
 +			}
 +			if (hit > 0) {
-+				)KTSRC",
-+R"KTSRC(float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, (viewport.xy + huv * viewport.zw) * invTargetSize.xy, 0).rgb;
++				float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, (viewport.xy + huv * viewport.zw) * invTargetSize.xy, 0).rgb;
 +				sc = min(sc, 64.0);                              // no fireflies from the sun disc
 +				spec = lerp(spec, sc / max(skyParams.z, 1e-3), hit);
 +				ssrHit = hit;
@@ -27750,7 +27796,8 @@ index 00000000..f103d056
 +{
 +	uint3 dim = uint3(vfogIdx.y & 0xffff, vfogIdx.y >> 16, vfogIdx.w);
 +	if (id.x >= dim.x || id.y >= dim.y) return;
-+	float jit = frac(sin(dot(float2(id.xy) + projParams.w * 7.13, float2(12.9898, 78.233))) * 43758.5453);
++	// slice jitter: changes every frame only under TAA (which averages it); without TAA it stays put (no shimmer)
++	float jit = frac(sin(dot(float2(id.xy) + (taaParams.w > 0.5 ? projParams.w * 7.13 : 0.0), float2(12.9898, 78.233))) * 43758.5453);
 +	for (uint z = 0; z < dim.z; z++) {
 +		float viewZ = FroxelDepth(z + jit);
 +		float2 vuv = (float2(id.xy) + 0.5) / float2(dim.xy);
@@ -27778,7 +27825,7 @@ index 00000000..f103d056
 +			float d2 = dot(d, d);
 +			if (d2 > l.radius * l.radius) continue;
 +			float wnd = saturate(1 - pow(d2 / (l.radius * l.radius), 2)); wnd *= wnd;
-+			float att = l.invSquare > 0 ? wnd * l.invSquare / max(d2, 256.0) : wnd;
++			float att = l.invSquare > 0 ? wnd * l.invSquare / (d2 + (l.type == 2 ? l.lp.x : 256.0)) : wnd;
 +			if (l.type == 1) att *= smoothstep(l.spotCos, l.spotInner, dot(-normalize(d), l.dir));
 +			S += l.color * att / (4 * PI) * vfog1.y;
 +		}
@@ -28189,6 +28236,9 @@ index 00000000..f103d056
 +	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 +	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 +	c = LinearToSrgb(c);
++	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
++	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
++	if (dstUav) c = saturate(c + Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb));
 +	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 +	c += (n - 0.5) / 255.0;
 +	return float4(c, dot(c, float3(0.299, 0.587, 0.114)));
@@ -29504,6 +29554,14 @@ index 00000000..f103d056
 +	return w > 3.5 && w < 7.5;
 +}
 +
++// the lit colour divided by the albedo: what gets blurred is the light under the skin, never the texture (pores,
++// stubble, eyebrows stay sharp)
++float3 Irradiance(int2 p)
++{
++	float3 a = Tex2D[indices0.x].Load(int3(p, 0)).rgb;
++	return Tex2D[srcSrv].Load(int3(p, 0)).rgb / max(a, 0.04);
++}
++
 +[numthreads(8, 8, 1)]
 +void BlurCS(uint3 id : SV_DispatchThreadID)
 +{
@@ -29516,25 +29574,28 @@ index 00000000..f103d056
 +	float4 c = Tex2D[srcSrv].Load(int3(px, 0));
 +	// pixels per world unit at this depth
 +	float ppu = projParams.y * viewport.w * 0.5 / z;
-+	float stepPx = clamp(width * ppu / 3.0, 0.0, 6.0);
++	float stepPx = clamp(width * ppu / 3.0, 0.0, 2.5);
 +	if (stepPx < 0.3) { UavTex[outUav][px] = c; return; }
 +	int2 dir = dirY ? int2(0, 1) : int2(1, 0);
-+	// per-channel Gaussian (red scatters furthest)
-+	const float3 sigma = float3(1.0, 0.42, 0.28) * 1.6;
-+	float3 acc = c.rgb, wsum = 1;
++	float3 alb = max(Tex2D[indices0.x].Load(int3(px, 0)).rgb, 0.04);
++	// per-channel Gaussian (red scatters furthest, green and blue barely)
++	const float3 sigma = float3(1.0, 0.35, 0.22) * 1.4;
++	float3 acc = c.rgb / alb, wsum = 1;
 +	int2 lo = int2(viewport.xy), hi = int2(viewport.xy + viewport.zw) - 1;
-+	[unroll] for (int k = -6; k <= 6; k++) {
++	[unroll] for (int k = -4; k <= 4; k++) {
 +		if (k == 0) continue;
 +		float o = k * 0.5;
 +		int2 q = clamp(px + dir * (int)round(o * stepPx), lo, hi);
 +		if (!IsSkin(q)) continue;
 +		float dq = Tex2D[indices0.w].Load(int3(q, 0)).r;
-+		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.5) continue;
++		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.0) continue;
 +		float3 w = exp(-0.5 * (o * o) / (sigma * sigma));
-+		acc += Tex2D[srcSrv].Load(int3(q, 0)).rgb * w;
++		acc += min(Irradiance(q), 64.0) * w;
 +		wsum += w;
 +	}
-+	UavTex[outUav][px] = float4(acc / wsum, c.a);
++	// mostly the original: the scatter only softens the light's edges
++	float3 blurred = acc / wsum * alb;
++	UavTex[outUav][px] = float4(lerp(c.rgb, blurred, 0.7), c.a);
 +}
 +)KTSRC",
 +nullptr };
@@ -29707,6 +29768,24 @@ index 00000000..f103d056
 +float3 Compress(float3 c) { return c / (1.0 + max(c.r, max(c.g, c.b))); }       // tone-map before blending (Karis)
 +float3 Expand(float3 c) { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4); }
 +
++// history fetched with a Catmull-Rom filter (5 bilinear taps): bilinear would soften the image a little every frame
++float3 SampleHistory(float2 tuv)
++{
++	float2 ts = 1.0 / invTargetSize.xy;
++	float2 pos = tuv * ts, c = floor(pos - 0.5) + 0.5, f = pos - c;
++	float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
++	float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);
++	float2 w12 = w1 + w2, o12 = c + w2 / w12;
++	float2 p0 = (c - 1) * invTargetSize.xy, p3 = (c + 2) * invTargetSize.xy, p12 = o12 * invTargetSize.xy;
++	float3 r = Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p0.y), 0).rgb * (w12.x * w0.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p0.x, p12.y), 0).rgb * (w0.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, p12, 0).rgb * (w12.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p3.x, p12.y), 0).rgb * (w3.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p3.y), 0).rgb * (w12.x * w3.y);
++	float wt = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
++	return max(r / wt, 0);
++}
++
 +[numthreads(8, 8, 1)]
 +void ResolveCS(uint3 id : SV_DispatchThreadID)
 +{
@@ -29742,7 +29821,7 @@ index 00000000..f103d056
 +		puv = cuv + (puv - vuv);
 +		if (all(puv >= 0) && all(puv <= 1)) {
 +			float2 tuv = (viewport.xy + puv * viewport.zw) * invTargetSize.xy;
-+			float3 h = RGBToYCoCg(Compress(max(Tex2D[histSrv].SampleLevel(sClamp, tuv, 0).rgb, 0)));
++			float3 h = RGBToYCoCg(Compress(max(SampleHistory(tuv), 0)));
 +			// clip the history to the neighbourhood's colour box (variance clipping)
 +			float3 bmin = m1 - sigma * 1.25, bmax = m1 + sigma * 1.25;
 +			float3 center = 0.5 * (bmax + bmin), ext = max(0.5 * (bmax - bmin), 1e-5);
@@ -31413,10 +31492,10 @@ index 00000000..1edcbc41
 +}
 diff --git a/code/rd-katarn/katarn/shaders/legacy.hlsl b/code/rd-katarn/katarn/shaders/legacy.hlsl
 new file mode 100644
-index 00000000..02e004f3
+index 00000000..54b6db3a
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/legacy.hlsl
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,100 @@
 +// KatarnEngine - legacy fixed-function content (menus, HUD, BSP surfaces, effects) translated from GL 1.x
 +#include "common.hlsli"
 +
@@ -31453,20 +31532,31 @@ index 00000000..02e004f3
 +	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 +}
 +
-+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; };
-+float4 Shade(VsOut i);
++struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; };
++float4 Shade(VsOut i, out float4 display);
 +PsOut PS(VsOut i)
 +{
 +	PsOut o;
-+	o.c = Shade(i);
++	float4 display;
++	o.c = Shade(i, display);
 +	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
 +	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
++	o.overlay = float4(0, 0, 0, o.c.a);
++	if (drawTarget == 1 && (flags & (1u << 14))) {
++		// lightsaber blade: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added to the
++		// display after the tone map with the plain clamp rend2 has; a softer copy feeds the bloom
++		o.overlay = display;
++		o.glow = float4(o.c.rgb * 0.35, o.c.a);
++		o.c = float4(0, 0, 0, o.c.a);
++	}
 +	return o;
 +}
-+float4 Shade(VsOut i)
++float4 Shade(VsOut i, out float4 display)
 +{
 +	float4 c = i.color;
-+	if (drawTarget == 1) c.rgb = SrgbToLinear(c.rgb);
++	display = 0;
++	const bool saber = drawTarget == 1 && (flags & (1u << 14));
++	if (drawTarget == 1 && !saber) c.rgb = SrgbToLinear(c.rgb);
 +	if (flags & 1) {
 +		float4 t = SampleUnit(tex0, i.uv0, (flags & 4) != 0, (flags & 16) != 0);
 +		uint env0 = (flags >> 12) & 3;
@@ -31491,6 +31581,11 @@ index 00000000..02e004f3
 +		else if (at == 6) keep = c.a != alphaRef;
 +		else keep = false;
 +		if (!keep) discard;
++	}
++	if (saber) {
++		// display-space colour (gamma, as authored), scaled by kt_saberGlowScale; the linear copy feeds the bloom
++		display = float4(c.rgb * (drawScale > 0 ? drawScale : 1.0), c.a);
++		c.rgb = SrgbToLinear(saturate(c.rgb));
 +	}
 +	if (drawTarget == 1) {
 +		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
@@ -31716,10 +31811,10 @@ index 00000000..2633c30f
 +}
 diff --git a/code/rd-katarn/katarn/shaders/lighting.hlsl b/code/rd-katarn/katarn/shaders/lighting.hlsl
 new file mode 100644
-index 00000000..7ddf8481
+index 00000000..169ab555
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/lighting.hlsl
-@@ -0,0 +1,496 @@
+@@ -0,0 +1,497 @@
 +// KatarnEngine - deferred lighting: sun with cascaded shadows, local lights, sky ambient + reflections, height fog
 +#include "common.hlsli"
 +
@@ -32000,9 +32095,9 @@ index 00000000..7ddf8481
 +	else if (skin && sunColor.w > 0) {
 +		// wrapped diffuse with a warm scattered terminator (light bleeding through skin), GGX on top
 +		float nl = dot(N, L);
-+		float wrap = saturate((nl + 0.45) / 1.45);
++		float wrap = saturate((nl + 0.25) / 1.25);
 +		float sh = Shadow(P, N, viewZ);
-+		float3 scatter = lerp(float3(1.0, 0.35, 0.22), 1.0, saturate(nl * 2.0));
++		float3 scatter = lerp(float3(1.0, 0.62, 0.52), 1.0, saturate(nl * 3.0 + 0.3));
 +		Lo += diff / PI * wrap * scatter * sunColor.rgb * sunColor.w * lerp(0.35, 1.0, sh);
 +		if (nl > 0) Lo += (Brdf(N, V, L, 0, f0, rough)) * sunColor.rgb * sunColor.w * sh;
 +	}
@@ -32031,7 +32126,7 @@ index 00000000..7ddf8481
 +			float dd2 = dot(Cd, Cd);
 +			if (dd2 > l.radius * l.radius) continue;
 +			float wnd = saturate(1 - pow(dd2 / (l.radius * l.radius), 2)); wnd *= wnd;
-+			float att = wnd * l.invSquare / max(dd2, 400.0);
++			float att = wnd * l.invSquare / (dd2 + l.lp.x);   // pad[0]: the blade's soft radius squared
 +			float3 Rr = reflect(-V, N);
 +			float3 A0 = A - P;
 +			float rb = dot(Rr, Bv), ra = dot(Rr, A0);
@@ -32178,7 +32273,8 @@ index 00000000..7ddf8481
 +{
 +	uint3 dim = uint3(vfogIdx.y & 0xffff, vfogIdx.y >> 16, vfogIdx.w);
 +	if (id.x >= dim.x || id.y >= dim.y) return;
-+	float jit = frac(sin(dot(float2(id.xy) + projParams.w * 7.13, float2(12.9898, 78.233))) * 43758.5453);
++	// slice jitter: changes every frame only under TAA (which averages it); without TAA it stays put (no shimmer)
++	float jit = frac(sin(dot(float2(id.xy) + (taaParams.w > 0.5 ? projParams.w * 7.13 : 0.0), float2(12.9898, 78.233))) * 43758.5453);
 +	for (uint z = 0; z < dim.z; z++) {
 +		float viewZ = FroxelDepth(z + jit);
 +		float2 vuv = (float2(id.xy) + 0.5) / float2(dim.xy);
@@ -32206,7 +32302,7 @@ index 00000000..7ddf8481
 +			float d2 = dot(d, d);
 +			if (d2 > l.radius * l.radius) continue;
 +			float wnd = saturate(1 - pow(d2 / (l.radius * l.radius), 2)); wnd *= wnd;
-+			float att = l.invSquare > 0 ? wnd * l.invSquare / max(d2, 256.0) : wnd;
++			float att = l.invSquare > 0 ? wnd * l.invSquare / (d2 + (l.type == 2 ? l.lp.x : 256.0)) : wnd;
 +			if (l.type == 1) att *= smoothstep(l.spotCos, l.spotInner, dot(-normalize(d), l.dir));
 +			S += l.color * att / (4 * PI) * vfog1.y;
 +		}
@@ -32218,10 +32314,10 @@ index 00000000..7ddf8481
 +}
 diff --git a/code/rd-katarn/katarn/shaders/post.hlsl b/code/rd-katarn/katarn/shaders/post.hlsl
 new file mode 100644
-index 00000000..ab825e38
+index 00000000..e30b9173
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/post.hlsl
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,282 @@
 +// KatarnEngine - camera: auto exposure, bloom, filmic tone mapping, FXAA
 +#include "common.hlsli"
 +
@@ -32472,6 +32568,9 @@ index 00000000..ab825e38
 +	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 +	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 +	c = LinearToSrgb(c);
++	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
++	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
++	if (dstUav) c = saturate(c + Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb));
 +	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 +	c += (n - 0.5) / 255.0;
 +	return float4(c, dot(c, float3(0.299, 0.587, 0.114)));
@@ -32900,10 +32999,10 @@ index 00000000..cf1c3144
 +}
 diff --git a/code/rd-katarn/katarn/shaders/sss.hlsl b/code/rd-katarn/katarn/shaders/sss.hlsl
 new file mode 100644
-index 00000000..25040023
+index 00000000..d21859f2
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/sss.hlsl
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,62 @@
 +// KatarnEngine - skin subsurface scattering (screen space, Jimenez): the lit skin is blurred along the surface in two
 +// passes, red further than green and blue, so light bleeds softly under the skin the way it does in Unreal's
 +// subsurface profile. Only pixels with the skin flag, only from skin neighbours at about the same depth.
@@ -32923,6 +33022,14 @@ index 00000000..25040023
 +	return w > 3.5 && w < 7.5;
 +}
 +
++// the lit colour divided by the albedo: what gets blurred is the light under the skin, never the texture (pores,
++// stubble, eyebrows stay sharp)
++float3 Irradiance(int2 p)
++{
++	float3 a = Tex2D[indices0.x].Load(int3(p, 0)).rgb;
++	return Tex2D[srcSrv].Load(int3(p, 0)).rgb / max(a, 0.04);
++}
++
 +[numthreads(8, 8, 1)]
 +void BlurCS(uint3 id : SV_DispatchThreadID)
 +{
@@ -32935,32 +33042,35 @@ index 00000000..25040023
 +	float4 c = Tex2D[srcSrv].Load(int3(px, 0));
 +	// pixels per world unit at this depth
 +	float ppu = projParams.y * viewport.w * 0.5 / z;
-+	float stepPx = clamp(width * ppu / 3.0, 0.0, 6.0);
++	float stepPx = clamp(width * ppu / 3.0, 0.0, 2.5);
 +	if (stepPx < 0.3) { UavTex[outUav][px] = c; return; }
 +	int2 dir = dirY ? int2(0, 1) : int2(1, 0);
-+	// per-channel Gaussian (red scatters furthest)
-+	const float3 sigma = float3(1.0, 0.42, 0.28) * 1.6;
-+	float3 acc = c.rgb, wsum = 1;
++	float3 alb = max(Tex2D[indices0.x].Load(int3(px, 0)).rgb, 0.04);
++	// per-channel Gaussian (red scatters furthest, green and blue barely)
++	const float3 sigma = float3(1.0, 0.35, 0.22) * 1.4;
++	float3 acc = c.rgb / alb, wsum = 1;
 +	int2 lo = int2(viewport.xy), hi = int2(viewport.xy + viewport.zw) - 1;
-+	[unroll] for (int k = -6; k <= 6; k++) {
++	[unroll] for (int k = -4; k <= 4; k++) {
 +		if (k == 0) continue;
 +		float o = k * 0.5;
 +		int2 q = clamp(px + dir * (int)round(o * stepPx), lo, hi);
 +		if (!IsSkin(q)) continue;
 +		float dq = Tex2D[indices0.w].Load(int3(q, 0)).r;
-+		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.5) continue;
++		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.0) continue;
 +		float3 w = exp(-0.5 * (o * o) / (sigma * sigma));
-+		acc += Tex2D[srcSrv].Load(int3(q, 0)).rgb * w;
++		acc += min(Irradiance(q), 64.0) * w;
 +		wsum += w;
 +	}
-+	UavTex[outUav][px] = float4(acc / wsum, c.a);
++	// mostly the original: the scatter only softens the light's edges
++	float3 blurred = acc / wsum * alb;
++	UavTex[outUav][px] = float4(lerp(c.rgb, blurred, 0.7), c.a);
 +}
 diff --git a/code/rd-katarn/katarn/shaders/taa.hlsl b/code/rd-katarn/katarn/shaders/taa.hlsl
 new file mode 100644
-index 00000000..cfa99a02
+index 00000000..cd76b81c
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/taa.hlsl
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,91 @@
 +// KatarnEngine - temporal anti-aliasing (Unreal-style): jittered frames, history reprojected from depth, the history
 +// clipped to the current neighbourhood's colour range in YCoCg (no ghosting from things without motion vectors), a
 +// luma-weighted blend in a tone-mapped space. The final sharpen happens in the tone map pass (taaParams.z).
@@ -32981,6 +33091,24 @@ index 00000000..cfa99a02
 +float3 YCoCgToRGB(float3 c) { return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
 +float3 Compress(float3 c) { return c / (1.0 + max(c.r, max(c.g, c.b))); }       // tone-map before blending (Karis)
 +float3 Expand(float3 c) { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4); }
++
++// history fetched with a Catmull-Rom filter (5 bilinear taps): bilinear would soften the image a little every frame
++float3 SampleHistory(float2 tuv)
++{
++	float2 ts = 1.0 / invTargetSize.xy;
++	float2 pos = tuv * ts, c = floor(pos - 0.5) + 0.5, f = pos - c;
++	float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
++	float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);
++	float2 w12 = w1 + w2, o12 = c + w2 / w12;
++	float2 p0 = (c - 1) * invTargetSize.xy, p3 = (c + 2) * invTargetSize.xy, p12 = o12 * invTargetSize.xy;
++	float3 r = Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p0.y), 0).rgb * (w12.x * w0.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p0.x, p12.y), 0).rgb * (w0.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, p12, 0).rgb * (w12.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p3.x, p12.y), 0).rgb * (w3.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p3.y), 0).rgb * (w12.x * w3.y);
++	float wt = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
++	return max(r / wt, 0);
++}
 +
 +[numthreads(8, 8, 1)]
 +void ResolveCS(uint3 id : SV_DispatchThreadID)
@@ -33017,7 +33145,7 @@ index 00000000..cfa99a02
 +		puv = cuv + (puv - vuv);
 +		if (all(puv >= 0) && all(puv <= 1)) {
 +			float2 tuv = (viewport.xy + puv * viewport.zw) * invTargetSize.xy;
-+			float3 h = RGBToYCoCg(Compress(max(Tex2D[histSrv].SampleLevel(sClamp, tuv, 0).rgb, 0)));
++			float3 h = RGBToYCoCg(Compress(max(SampleHistory(tuv), 0)));
 +			// clip the history to the neighbourhood's colour box (variance clipping)
 +			float3 bmin = m1 - sigma * 1.25, bmax = m1 + sigma * 1.25;
 +			float3 center = 0.5 * (bmax + bmin), ext = max(0.5 * (bmax - bmin), 1e-5);
@@ -56111,10 +56239,10 @@ index 00000000..275369b6
 +}
 diff --git a/code/rd-katarn/tr_shade.cpp b/code/rd-katarn/tr_shade.cpp
 new file mode 100644
-index 00000000..3998599b
+index 00000000..7ca390cf
 --- /dev/null
 +++ b/code/rd-katarn/tr_shade.cpp
-@@ -0,0 +1,2492 @@
+@@ -0,0 +1,2497 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -58187,6 +58315,11 @@ index 00000000..3998599b
 +		}
 +		kt::GL_SetStage(pStage, pStage->glow);
 +		kt::GL_SetScale(backEnd.currentEntity && backEnd.currentEntity->e.reType == RT_SABER_GLOW ? kt::SaberGlowBoost() : 1.0f);
++		{
++			// lightsaber blades (glow sprites, the core line) are composited after the tone map, as rend2 shows them
++			const int rt = backEnd.currentEntity ? backEnd.currentEntity->e.reType : -1;
++			kt::GL_SetSaber(rt == RT_SABER_GLOW || (rt == RT_LINE && tess.shader && Q_stristr(tess.shader->name, "saber")));
++		}
 +
 +		// Reject this stage if it's not a glow stage but we are doing a glow pass.
 +		if ( g_bRenderGlowingObjects && !pStage->glow )
@@ -94671,10 +94804,10 @@ index 00000000..1cbf23e0
 +} // namespace kt
 diff --git a/codemp/rd-katarn/katarn/kt_gl.cpp b/codemp/rd-katarn/katarn/kt_gl.cpp
 new file mode 100644
-index 00000000..296ed7a4
+index 00000000..694caa9e
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/kt_gl.cpp
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,653 @@
 +// KatarnEngine - fixed-function OpenGL 1.x translation for legacy content.
 +//
 +// The vanilla front end (menus, HUD, BSP maps, Ghoul2 characters, effects) still issues GL 1.x calls. They are
@@ -94805,6 +94938,7 @@ index 00000000..296ed7a4
 +	std::vector<IVert> imm;
 +	const void* stage = nullptr;
 +	bool glow = false;
++	bool saber = false;
 +	float scale = 1.0f;
 +} s;
 +
@@ -94820,9 +94954,11 @@ index 00000000..296ed7a4
 +	s.stack[0].assign(1, Mat()); MatIdentity(s.stack[0][0].m);
 +	s.stack[1].assign(1, Mat()); MatIdentity(s.stack[1][0].m);
 +	s.matrixMode = GL_MODELVIEW;
++	s.saber = false;
 +}
 +void GL_SetStage(const void* stage, bool glow) { s.stage = stage; s.glow = glow; }
 +void GL_SetScale(float v) { s.scale = v; }
++void GL_SetSaber(bool v) { s.saber = v; }
 +
 +// PSO bits (kt_render.cpp decodes these)
 +enum : uint32_t {
@@ -94889,6 +95025,7 @@ index 00000000..296ed7a4
 +		d.alphaRef = s.alphaRef;
 +	}
 +	if (s.glow) f |= LF_GLOW;
++	if (s.saber) f |= LF_SABER;
 +	d.flags = f;
 +
 +	// matrices
@@ -95326,10 +95463,10 @@ index 00000000..296ed7a4
 +void APIENTRY ktgl_UnlockArraysEXT(void) {}
 diff --git a/codemp/rd-katarn/katarn/kt_render.cpp b/codemp/rd-katarn/katarn/kt_render.cpp
 new file mode 100644
-index 00000000..91b9d4ad
+index 00000000..89bf90ed
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/kt_render.cpp
-@@ -0,0 +1,2103 @@
+@@ -0,0 +1,2132 @@
 +// KatarnEngine - the frame.
 +//
 +// Per 3D world view:
@@ -95522,18 +95659,18 @@ index 00000000..91b9d4ad
 +	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 +	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
 +	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
-+	kt_taa = KtCvar("kt_taa", "1", CVAR_ARCHIVE);
++	kt_taa = KtCvar("kt_taa", "0", CVAR_ARCHIVE);
 +	// volumetric fog (froxels): light from the sun, lamps and lightsabers scattered in the air
 +	kt_vfog = KtCvar("kt_vfog", "1", CVAR_ARCHIVE);
-+	kt_vfogDensity = KtCvar("kt_vfogDensity", "0.00005", CVAR_ARCHIVE);   // per unit (0.00005: 80% clear at 4000 units)
-+	kt_vfogLights = KtCvar("kt_vfogLights", "150", CVAR_ARCHIVE);        // how strongly lamps and sabers light the air
++	kt_vfogDensity = KtCvar("kt_vfogDensity", "0.000015", CVAR_ARCHIVE);   // per unit (0.000015: 94% clear at 4000 units)
++	kt_vfogLights = KtCvar("kt_vfogLights", "12", CVAR_ARCHIVE);         // how strongly lamps and sabers light the air
 +	kt_vfogSun = KtCvar("kt_vfogSun", "1", CVAR_ARCHIVE);
 +	kt_vfogFar = KtCvar("kt_vfogFar", "8000", CVAR_ARCHIVE);
 +	kt_vfogHeight = KtCvar("kt_vfogHeight", "0", CVAR_ARCHIVE);          // thinner with height (per unit above the floor)
-+	kt_vfogAmbient = KtCvar("kt_vfogAmbient", "0.25", CVAR_ARCHIVE);     // old maps: light already in the air
++	kt_vfogAmbient = KtCvar("kt_vfogAmbient", "0.08", CVAR_ARCHIVE);     // old maps: light already in the air
 +	kt_vfogColor = KtCvar("kt_vfogColor", "1 1 1", CVAR_ARCHIVE);
-+	kt_gi = KtCvar("kt_gi", "1", CVAR_ARCHIVE);
-+	kt_sss = KtCvar("kt_sss", "0.6", CVAR_ARCHIVE);               // skin subsurface scattering radius (units, 0 = off)
++	kt_gi = KtCvar("kt_gi", "0", CVAR_ARCHIVE);
++	kt_sss = KtCvar("kt_sss", "0.3", CVAR_ARCHIVE);               // skin subsurface scattering radius (units, 0 = off)
 +	// camera (for cinematics; off in play)
 +	kt_dof = KtCvar("kt_dof", "0", CVAR_ARCHIVE);                 // depth of field
 +	kt_dofFocus = KtCvar("kt_dofFocus", "0", 0);                  // focus distance in units, 0 = what is in the middle of the screen
@@ -95552,6 +95689,13 @@ index 00000000..91b9d4ad
 +		for (auto& r : reset) ri.Cvar_Set(r[0], r[1]);
 +		ri.Cvar_Set("kt_configVersion", "2");
 +		ri.Printf(PRINT_ALL, "KatarnEngine: bloom, glow and saber settings reset to the defaults\n");
++	}
++	if (ver->integer < 3) {
++		// r11's first settings were too heavy (soft TAA, costly bounced light, thick fog, strong skin blur)
++		const char* reset[][2] = { { "kt_taa", "0" }, { "kt_gi", "0" }, { "kt_vfogDensity", "0.000015" }, { "kt_vfogLights", "12" },
++			{ "kt_vfogAmbient", "0.08" }, { "kt_sss", "0.3" }, { "kt_saberLight", "1" } };
++		for (auto& r : reset) ri.Cvar_Set(r[0], r[1]);
++		ri.Cvar_Set("kt_configVersion", "3");
 +	}
 +}
 +
@@ -95633,6 +95777,7 @@ index 00000000..91b9d4ad
 +	// targets
 +	Texture screen, screenDepth, ldr;
 +	Texture hdr, depth, gb0, gb1, gb2, ao, aoTmp, shadow, skyLut;
++	Texture overlay;                 // lightsaber blades in display space: added after the tone map (rend2's look)
 +	Texture glow;                    // glow stages (saber blades, lights) drawn again here; blurred into the bloom (rend2 dynamic glow)
 +	Texture hdrPrev;                 // last frame's lit scene (screen-space reflections)
 +	bool hdrPrevValid = false;
@@ -95829,9 +95974,9 @@ index 00000000..91b9d4ad
 +	}
 +	if (bits & PSO_WIRE) d.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
 +	d.PrimitiveTopologyType = (bits & PSO_LINES) ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-+	d.NumRenderTargets = target == 1 ? 2 : 1;   // HDR: + the glow target (same blend)
++	d.NumRenderTargets = target == 1 ? 3 : 1;   // HDR: + the glow target and the saber overlay (same blend)
 +	d.RTVFormats[0] = target == 1 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
-+	if (target == 1) d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
++	if (target == 1) d.RTVFormats[1] = d.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 +	d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 +	ID3D12PipelineState* p = CreateGraphicsPSO(d, "legacy");
 +	R.psos[key] = p;
@@ -95968,7 +96113,7 @@ index 00000000..91b9d4ad
 +// ------------------------------------------------------------------------------------------------ targets
 +static void DestroyTargets()
 +{
-+	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
++	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.overlay, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
 +	for (Texture* t : all) DestroyTexture(*t);
 +	for (auto& t : R.bloomDown) DestroyTexture(t);
 +	for (auto& t : R.bloomUp) DestroyTexture(t);
@@ -95985,6 +96130,7 @@ index 00000000..91b9d4ad
 +	ok &= CreateTexture(R.ldr, w, h, 1, DXGI_FORMAT_R8G8B8A8_UNORM, TEX_RT, 1, black, "ldr");
 +	ok &= CreateTexture(R.hdr, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT | TEX_UAV, 1, black, "hdr");
 +	ok &= CreateTexture(R.glow, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "glow");
++	ok &= CreateTexture(R.overlay, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "saber overlay");
 +	ok &= CreateTexture(R.hdrPrev, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, nullptr, "hdr previous");
 +	R.hdrPrevValid = false;
 +	for (int i = 0; i < 2; i++) ok &= CreateTexture(R.taa[i], w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "taa history");
@@ -96138,8 +96284,9 @@ index 00000000..91b9d4ad
 +	Transition(cl, ds, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 +	if (target == 1) {
 +		Transition(cl, R.glow, D3D12_RESOURCE_STATE_RENDER_TARGET);
-+		D3D12_CPU_DESCRIPTOR_HANDLE two[2] = { rt.rtv[0], R.glow.rtv[0] };
-+		cl->OMSetRenderTargets(2, two, FALSE, &ds.dsv[0]);
++		Transition(cl, R.overlay, D3D12_RESOURCE_STATE_RENDER_TARGET);
++		D3D12_CPU_DESCRIPTOR_HANDLE three[3] = { rt.rtv[0], R.glow.rtv[0], R.overlay.rtv[0] };
++		cl->OMSetRenderTargets(3, three, FALSE, &ds.dsv[0]);
 +	}
 +	else cl->OMSetRenderTargets(1, &rt.rtv[0], FALSE, &ds.dsv[0]);
 +	if (target == 1) cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
@@ -96742,6 +96889,17 @@ index 00000000..91b9d4ad
 +			for (int q = 0; q < 3; q++) l.color[q] *= kt_saberLight->value;
 +			lights.push_back(l);
 +		}
++	// nearest first: the screen-space shadows go to the closest lights, and the fog only takes the first few
++	{
++		const float* o = v.origin;
++		auto key = [o](const GpuLight& l) {
++			float p[3] = { l.pos[0], l.pos[1], l.pos[2] };
++			if (l.type == 2.0f) for (int q = 0; q < 3; q++) p[q] += l.dir[q] * 0.5f;
++			float d = sqrtf((p[0] - o[0]) * (p[0] - o[0]) + (p[1] - o[1]) * (p[1] - o[1]) + (p[2] - o[2]) * (p[2] - o[2]));
++			return d - l.radius * 0.5f;
++		};
++		std::stable_sort(lights.begin(), lights.end(), [&](const GpuLight& a, const GpuLight& b) { return key(a) < key(b); });
++	}
 +	uint32_t nl = (uint32_t)lights.size();
 +	if (!nl) { GpuLight dummy = {}; lights.push_back(dummy); }
 +	UploadAlloc la = Upload(lights.size() * sizeof(GpuLight), 256);
@@ -96813,7 +96971,7 @@ index 00000000..91b9d4ad
 +	// ---- volumetric fog: light the froxels and integrate them (applied after the forward pass)
 +	if (c.vfogIdx[0]) {
 +		Transition(cl, R.froxIn, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-+		uint32_t k[8] = { R.froxIn.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, 0, (shadows ? 2u : 0u), 0, 0 };
++		uint32_t k[8] = { R.froxIn.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], Q_min(nl, 16u), 0, (shadows ? 2u : 0u), 0, 0 };
 +		Dispatch(cl, R.csFogInject, k, 8, (R.froxIn.width + 7) / 8, (R.froxIn.height + 7) / 8);
 +		Transition(cl, R.froxIn, srv);
 +		Transition(cl, R.froxOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -96843,9 +97001,12 @@ index 00000000..91b9d4ad
 +		const float zero4g[4] = { 0, 0, 0, 0 };
 +		Transition(cl, R.glow, D3D12_RESOURCE_STATE_RENDER_TARGET);
 +		cl->ClearRenderTargetView(R.glow.rtv[0], zero4g, 0, nullptr);
++		Transition(cl, R.overlay, D3D12_RESOURCE_STATE_RENDER_TARGET);
++		cl->ClearRenderTargetView(R.overlay.rtv[0], zero4g, 0, nullptr);
 +	}
 +	FlushStream(1);
 +	Transition(cl, R.glow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++	Transition(cl, R.overlay, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 +
 +	// ---- camera: exposure
 +	D3D12_RESOURCE_STATES srvAll = srv;
@@ -96983,7 +97144,7 @@ index 00000000..91b9d4ad
 +	Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
 +	Transition(cl, tmTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
 +	{
-+		uint32_t k[8] = { R.hdr.srv, 0, 0, bloomSrv, R.w, R.h, 0, 0 };
++		uint32_t k[8] = { R.hdr.srv, R.overlay.srv, 0, bloomSrv, R.w, R.h, 0, 0 };
 +		FullscreenPass(cl, R.tonemapPSO, tmTarget, k, 8);
 +	}
 +	if (fxaa) {
@@ -97002,14 +97163,19 @@ index 00000000..91b9d4ad
 +	if (!R.inView || length < 1.0f || R.tubes.size() >= 64) return;
 +	GpuLight l = {};
 +	for (int q = 0; q < 3; q++) { l.pos[q] = start[q]; l.dir[q] = dir[q] * length; }
-+	l.radius = 220.0f + length;
-+	// the blade colour, saturated (the glow sprites carry it), as radiance; intensity / d^2 from the nearest point
++	l.radius = 320.0f + length * 0.5f;
++	// Battlefront II (2017) style: the blade colour with a little of the white-hot core in it, a soft-cored inverse
++	// square from the nearest point of the blade (bright pools on floors and walls nearby, not a hard hot spot on
++	// whatever touches it) and a faint hum flicker
 +	float c[3] = { rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f };
 +	float mx = Q_max(c[0], Q_max(c[1], c[2]));
 +	if (mx < 0.01f) { c[0] = c[1] = c[2] = 1; mx = 1; }
-+	for (int q = 0; q < 3; q++) l.color[q] = powf(c[q] / mx, 2.2f) * 1.0f;
++	const float t = ri.Milliseconds() * 0.001f;
++	const float hum = 1.0f + 0.04f * sinf(t * 47.0f + start[0] * 0.05f) + 0.03f * sinf(t * 113.0f);
++	for (int q = 0; q < 3; q++) l.color[q] = (powf(c[q] / mx, 2.2f) * 0.85f + 0.15f) * hum;
 +	l.type = 2;
-+	l.invSquare = 220.0f;   // a soft fill, about what rend2's saber dynamic light gives
++	l.invSquare = 800.0f;
++	l.pad[0] = 32.0f * 32.0f;   // soft radius squared (lighting.hlsl Light.lp.x)
 +	R.tubes.push_back(l);
 +}
 +float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }
@@ -97435,10 +97601,10 @@ index 00000000..91b9d4ad
 +} // namespace kt
 diff --git a/codemp/rd-katarn/katarn/kt_render.h b/codemp/rd-katarn/katarn/kt_render.h
 new file mode 100644
-index 00000000..fda23474
+index 00000000..c6377942
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/kt_render.h
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,141 @@
 +// KatarnEngine - frame renderer interface (used by the vanilla back end and the GL translation layer)
 +#pragma once
 +#include "kt_device.h"
@@ -97455,6 +97621,7 @@ index 00000000..fda23474
 +	LF_ATEST_SHIFT = 8,          // 3 bits: 0 off, 1 >, 2 <, 3 >=, 4 <=, 5 ==, 6 !=
 +	LF_GLOW = 1u << 11,          // shader stage marked glow: boosted in HDR so bloom picks it up
 +	LF_ENV0_SHIFT = 12,          // 2 bits: unit 0 env (replace ignores vertex colour)
++	LF_SABER = 1u << 14,         // lightsaber blade / glow: composited after the tone map, the way rend2 shows it
 +};
 +
 +struct PsoKey {
@@ -97512,6 +97679,7 @@ index 00000000..fda23474
 +void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba, uint32_t glowTex, const uint8_t* vertexRgba, bool coreOnly);
 +void R_AddSaberCore(const float* start, const float* end, float radius, const uint8_t* rgba, uint32_t tex, bool alphaBlend);
 +void GL_SetStage(const void* stage, bool glow);
++void GL_SetSaber(bool v);   // the next draws are lightsaber blades (LF_SABER)
 +void GL_SetScale(float v);   // extra HDR brightness for the next draws (saber glow sprites)   // the shader stage being drawn (glow boost)
 +// projection to use for 3D views (D3D, reversed-Z infinite) - the GL translation layer swaps it in for the
 +// front end's GL projection
@@ -97580,10 +97748,10 @@ index 00000000..fda23474
 +} // namespace kt
 diff --git a/codemp/rd-katarn/katarn/kt_shaders_gen.h b/codemp/rd-katarn/katarn/kt_shaders_gen.h
 new file mode 100644
-index 00000000..f103d056
+index 00000000..94cd5dad
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/kt_shaders_gen.h
-@@ -0,0 +1,4408 @@
+@@ -0,0 +1,4457 @@
 +// generated by shaders/gen.py - do not edit
 +#pragma once
 +
@@ -98514,20 +98682,31 @@ index 00000000..f103d056
 +	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 +}
 +
-+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; };
-+float4 Shade(VsOut i);
++struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; };
++float4 Shade(VsOut i, out float4 display);
 +PsOut PS(VsOut i)
 +{
 +	PsOut o;
-+	o.c = Shade(i);
++	float4 display;
++	o.c = Shade(i, display);
 +	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
 +	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
++	o.overlay = float4(0, 0, 0, o.c.a);
++	if (drawTarget == 1 && (flags & (1u << 14))) {
++		// lightsaber blade: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added to the
++		// display after the tone map with the plain clamp rend2 has; a softer copy feeds the bloom
++		o.overlay = display;
++		o.glow = float4(o.c.rgb * 0.35, o.c.a);
++		o.c = float4(0, 0, 0, o.c.a);
++	}
 +	return o;
 +}
-+float4 Shade(VsOut i)
++float4 Shade(VsOut i, out float4 display)
 +{
 +	float4 c = i.color;
-+	if (drawTarget == 1) c.rgb = SrgbToLinear(c.rgb);
++	display = 0;
++	const bool saber = drawTarget == 1 && (flags & (1u << 14));
++	if (drawTarget == 1 && !saber) c.rgb = SrgbToLinear(c.rgb);
 +	if (flags & 1) {
 +		float4 t = SampleUnit(tex0, i.uv0, (flags & 4) != 0, (flags & 16) != 0);
 +		uint env0 = (flags >> 12) & 3;
@@ -98552,6 +98731,11 @@ index 00000000..f103d056
 +		else if (at == 6) keep = c.a != alphaRef;
 +		else keep = false;
 +		if (!keep) discard;
++	}
++	if (saber) {
++		// display-space colour (gamma, as authored), scaled by kt_saberGlowScale; the linear copy feeds the bloom
++		display = float4(c.rgb * (drawScale > 0 ? drawScale : 1.0), c.a);
++		c.rgb = SrgbToLinear(saturate(c.rgb));
 +	}
 +	if (drawTarget == 1) {
 +		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
@@ -99351,9 +99535,9 @@ index 00000000..f103d056
 +	else if (skin && sunColor.w > 0) {
 +		// wrapped diffuse with a warm scattered terminator (light bleeding through skin), GGX on top
 +		float nl = dot(N, L);
-+		float wrap = saturate((nl + 0.45) / 1.45);
++		float wrap = saturate((nl + 0.25) / 1.25);
 +		float sh = Shadow(P, N, viewZ);
-+		float3 scatter = lerp(float3(1.0, 0.35, 0.22), 1.0, saturate(nl * 2.0));
++		float3 scatter = lerp(float3(1.0, 0.62, 0.52), 1.0, saturate(nl * 3.0 + 0.3));
 +		Lo += diff / PI * wrap * scatter * sunColor.rgb * sunColor.w * lerp(0.35, 1.0, sh);
 +		if (nl > 0) Lo += (Brdf(N, V, L, 0, f0, rough)) * sunColor.rgb * sunColor.w * sh;
 +	}
@@ -99382,7 +99566,7 @@ index 00000000..f103d056
 +			float dd2 = dot(Cd, Cd);
 +			if (dd2 > l.radius * l.radius) continue;
 +			float wnd = saturate(1 - pow(dd2 / (l.radius * l.radius), 2)); wnd *= wnd;
-+			float att = wnd * l.invSquare / max(dd2, 400.0);
++			float att = wnd * l.invSquare / (dd2 + l.lp.x);   // pad[0]: the blade's soft radius squared
 +			float3 Rr = reflect(-V, N);
 +			float3 A0 = A - P;
 +			float rb = dot(Rr, Bv), ra = dot(Rr, A0);
@@ -99468,13 +99652,13 @@ index 00000000..f103d056
 +					float4 pp = mul(prevViewProj, float4(Q, 1));
 +					huv = pp.xy / pp.w * float2(0.5, -0.5) + 0.5;
 +					float2 e = saturate(min(huv, 1 - huv) * 10);
-+					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0.2);
++					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0)KTSRC",
++R"KTSRC(.2);
 +					break;
 +				}
 +			}
 +			if (hit > 0) {
-+				)KTSRC",
-+R"KTSRC(float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, (viewport.xy + huv * viewport.zw) * invTargetSize.xy, 0).rgb;
++				float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, (viewport.xy + huv * viewport.zw) * invTargetSize.xy, 0).rgb;
 +				sc = min(sc, 64.0);                              // no fireflies from the sun disc
 +				spec = lerp(spec, sc / max(skyParams.z, 1e-3), hit);
 +				ssrHit = hit;
@@ -99530,7 +99714,8 @@ index 00000000..f103d056
 +{
 +	uint3 dim = uint3(vfogIdx.y & 0xffff, vfogIdx.y >> 16, vfogIdx.w);
 +	if (id.x >= dim.x || id.y >= dim.y) return;
-+	float jit = frac(sin(dot(float2(id.xy) + projParams.w * 7.13, float2(12.9898, 78.233))) * 43758.5453);
++	// slice jitter: changes every frame only under TAA (which averages it); without TAA it stays put (no shimmer)
++	float jit = frac(sin(dot(float2(id.xy) + (taaParams.w > 0.5 ? projParams.w * 7.13 : 0.0), float2(12.9898, 78.233))) * 43758.5453);
 +	for (uint z = 0; z < dim.z; z++) {
 +		float viewZ = FroxelDepth(z + jit);
 +		float2 vuv = (float2(id.xy) + 0.5) / float2(dim.xy);
@@ -99558,7 +99743,7 @@ index 00000000..f103d056
 +			float d2 = dot(d, d);
 +			if (d2 > l.radius * l.radius) continue;
 +			float wnd = saturate(1 - pow(d2 / (l.radius * l.radius), 2)); wnd *= wnd;
-+			float att = l.invSquare > 0 ? wnd * l.invSquare / max(d2, 256.0) : wnd;
++			float att = l.invSquare > 0 ? wnd * l.invSquare / (d2 + (l.type == 2 ? l.lp.x : 256.0)) : wnd;
 +			if (l.type == 1) att *= smoothstep(l.spotCos, l.spotInner, dot(-normalize(d), l.dir));
 +			S += l.color * att / (4 * PI) * vfog1.y;
 +		}
@@ -99969,6 +100154,9 @@ index 00000000..f103d056
 +	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 +	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 +	c = LinearToSrgb(c);
++	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
++	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
++	if (dstUav) c = saturate(c + Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb));
 +	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 +	c += (n - 0.5) / 255.0;
 +	return float4(c, dot(c, float3(0.299, 0.587, 0.114)));
@@ -101284,6 +101472,14 @@ index 00000000..f103d056
 +	return w > 3.5 && w < 7.5;
 +}
 +
++// the lit colour divided by the albedo: what gets blurred is the light under the skin, never the texture (pores,
++// stubble, eyebrows stay sharp)
++float3 Irradiance(int2 p)
++{
++	float3 a = Tex2D[indices0.x].Load(int3(p, 0)).rgb;
++	return Tex2D[srcSrv].Load(int3(p, 0)).rgb / max(a, 0.04);
++}
++
 +[numthreads(8, 8, 1)]
 +void BlurCS(uint3 id : SV_DispatchThreadID)
 +{
@@ -101296,25 +101492,28 @@ index 00000000..f103d056
 +	float4 c = Tex2D[srcSrv].Load(int3(px, 0));
 +	// pixels per world unit at this depth
 +	float ppu = projParams.y * viewport.w * 0.5 / z;
-+	float stepPx = clamp(width * ppu / 3.0, 0.0, 6.0);
++	float stepPx = clamp(width * ppu / 3.0, 0.0, 2.5);
 +	if (stepPx < 0.3) { UavTex[outUav][px] = c; return; }
 +	int2 dir = dirY ? int2(0, 1) : int2(1, 0);
-+	// per-channel Gaussian (red scatters furthest)
-+	const float3 sigma = float3(1.0, 0.42, 0.28) * 1.6;
-+	float3 acc = c.rgb, wsum = 1;
++	float3 alb = max(Tex2D[indices0.x].Load(int3(px, 0)).rgb, 0.04);
++	// per-channel Gaussian (red scatters furthest, green and blue barely)
++	const float3 sigma = float3(1.0, 0.35, 0.22) * 1.4;
++	float3 acc = c.rgb / alb, wsum = 1;
 +	int2 lo = int2(viewport.xy), hi = int2(viewport.xy + viewport.zw) - 1;
-+	[unroll] for (int k = -6; k <= 6; k++) {
++	[unroll] for (int k = -4; k <= 4; k++) {
 +		if (k == 0) continue;
 +		float o = k * 0.5;
 +		int2 q = clamp(px + dir * (int)round(o * stepPx), lo, hi);
 +		if (!IsSkin(q)) continue;
 +		float dq = Tex2D[indices0.w].Load(int3(q, 0)).r;
-+		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.5) continue;
++		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.0) continue;
 +		float3 w = exp(-0.5 * (o * o) / (sigma * sigma));
-+		acc += Tex2D[srcSrv].Load(int3(q, 0)).rgb * w;
++		acc += min(Irradiance(q), 64.0) * w;
 +		wsum += w;
 +	}
-+	UavTex[outUav][px] = float4(acc / wsum, c.a);
++	// mostly the original: the scatter only softens the light's edges
++	float3 blurred = acc / wsum * alb;
++	UavTex[outUav][px] = float4(lerp(c.rgb, blurred, 0.7), c.a);
 +}
 +)KTSRC",
 +nullptr };
@@ -101487,6 +101686,24 @@ index 00000000..f103d056
 +float3 Compress(float3 c) { return c / (1.0 + max(c.r, max(c.g, c.b))); }       // tone-map before blending (Karis)
 +float3 Expand(float3 c) { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4); }
 +
++// history fetched with a Catmull-Rom filter (5 bilinear taps): bilinear would soften the image a little every frame
++float3 SampleHistory(float2 tuv)
++{
++	float2 ts = 1.0 / invTargetSize.xy;
++	float2 pos = tuv * ts, c = floor(pos - 0.5) + 0.5, f = pos - c;
++	float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
++	float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);
++	float2 w12 = w1 + w2, o12 = c + w2 / w12;
++	float2 p0 = (c - 1) * invTargetSize.xy, p3 = (c + 2) * invTargetSize.xy, p12 = o12 * invTargetSize.xy;
++	float3 r = Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p0.y), 0).rgb * (w12.x * w0.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p0.x, p12.y), 0).rgb * (w0.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, p12, 0).rgb * (w12.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p3.x, p12.y), 0).rgb * (w3.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p3.y), 0).rgb * (w12.x * w3.y);
++	float wt = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
++	return max(r / wt, 0);
++}
++
 +[numthreads(8, 8, 1)]
 +void ResolveCS(uint3 id : SV_DispatchThreadID)
 +{
@@ -101522,7 +101739,7 @@ index 00000000..f103d056
 +		puv = cuv + (puv - vuv);
 +		if (all(puv >= 0) && all(puv <= 1)) {
 +			float2 tuv = (viewport.xy + puv * viewport.zw) * invTargetSize.xy;
-+			float3 h = RGBToYCoCg(Compress(max(Tex2D[histSrv].SampleLevel(sClamp, tuv, 0).rgb, 0)));
++			float3 h = RGBToYCoCg(Compress(max(SampleHistory(tuv), 0)));
 +			// clip the history to the neighbourhood's colour box (variance clipping)
 +			float3 bmin = m1 - sigma * 1.25, bmax = m1 + sigma * 1.25;
 +			float3 center = 0.5 * (bmax + bmin), ext = max(0.5 * (bmax - bmin), 1e-5);
@@ -103193,10 +103410,10 @@ index 00000000..1edcbc41
 +}
 diff --git a/codemp/rd-katarn/katarn/shaders/legacy.hlsl b/codemp/rd-katarn/katarn/shaders/legacy.hlsl
 new file mode 100644
-index 00000000..02e004f3
+index 00000000..54b6db3a
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/shaders/legacy.hlsl
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,100 @@
 +// KatarnEngine - legacy fixed-function content (menus, HUD, BSP surfaces, effects) translated from GL 1.x
 +#include "common.hlsli"
 +
@@ -103233,20 +103450,31 @@ index 00000000..02e004f3
 +	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 +}
 +
-+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; };
-+float4 Shade(VsOut i);
++struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; };
++float4 Shade(VsOut i, out float4 display);
 +PsOut PS(VsOut i)
 +{
 +	PsOut o;
-+	o.c = Shade(i);
++	float4 display;
++	o.c = Shade(i, display);
 +	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
 +	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
++	o.overlay = float4(0, 0, 0, o.c.a);
++	if (drawTarget == 1 && (flags & (1u << 14))) {
++		// lightsaber blade: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added to the
++		// display after the tone map with the plain clamp rend2 has; a softer copy feeds the bloom
++		o.overlay = display;
++		o.glow = float4(o.c.rgb * 0.35, o.c.a);
++		o.c = float4(0, 0, 0, o.c.a);
++	}
 +	return o;
 +}
-+float4 Shade(VsOut i)
++float4 Shade(VsOut i, out float4 display)
 +{
 +	float4 c = i.color;
-+	if (drawTarget == 1) c.rgb = SrgbToLinear(c.rgb);
++	display = 0;
++	const bool saber = drawTarget == 1 && (flags & (1u << 14));
++	if (drawTarget == 1 && !saber) c.rgb = SrgbToLinear(c.rgb);
 +	if (flags & 1) {
 +		float4 t = SampleUnit(tex0, i.uv0, (flags & 4) != 0, (flags & 16) != 0);
 +		uint env0 = (flags >> 12) & 3;
@@ -103271,6 +103499,11 @@ index 00000000..02e004f3
 +		else if (at == 6) keep = c.a != alphaRef;
 +		else keep = false;
 +		if (!keep) discard;
++	}
++	if (saber) {
++		// display-space colour (gamma, as authored), scaled by kt_saberGlowScale; the linear copy feeds the bloom
++		display = float4(c.rgb * (drawScale > 0 ? drawScale : 1.0), c.a);
++		c.rgb = SrgbToLinear(saturate(c.rgb));
 +	}
 +	if (drawTarget == 1) {
 +		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
@@ -103496,10 +103729,10 @@ index 00000000..2633c30f
 +}
 diff --git a/codemp/rd-katarn/katarn/shaders/lighting.hlsl b/codemp/rd-katarn/katarn/shaders/lighting.hlsl
 new file mode 100644
-index 00000000..7ddf8481
+index 00000000..169ab555
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/shaders/lighting.hlsl
-@@ -0,0 +1,496 @@
+@@ -0,0 +1,497 @@
 +// KatarnEngine - deferred lighting: sun with cascaded shadows, local lights, sky ambient + reflections, height fog
 +#include "common.hlsli"
 +
@@ -103780,9 +104013,9 @@ index 00000000..7ddf8481
 +	else if (skin && sunColor.w > 0) {
 +		// wrapped diffuse with a warm scattered terminator (light bleeding through skin), GGX on top
 +		float nl = dot(N, L);
-+		float wrap = saturate((nl + 0.45) / 1.45);
++		float wrap = saturate((nl + 0.25) / 1.25);
 +		float sh = Shadow(P, N, viewZ);
-+		float3 scatter = lerp(float3(1.0, 0.35, 0.22), 1.0, saturate(nl * 2.0));
++		float3 scatter = lerp(float3(1.0, 0.62, 0.52), 1.0, saturate(nl * 3.0 + 0.3));
 +		Lo += diff / PI * wrap * scatter * sunColor.rgb * sunColor.w * lerp(0.35, 1.0, sh);
 +		if (nl > 0) Lo += (Brdf(N, V, L, 0, f0, rough)) * sunColor.rgb * sunColor.w * sh;
 +	}
@@ -103811,7 +104044,7 @@ index 00000000..7ddf8481
 +			float dd2 = dot(Cd, Cd);
 +			if (dd2 > l.radius * l.radius) continue;
 +			float wnd = saturate(1 - pow(dd2 / (l.radius * l.radius), 2)); wnd *= wnd;
-+			float att = wnd * l.invSquare / max(dd2, 400.0);
++			float att = wnd * l.invSquare / (dd2 + l.lp.x);   // pad[0]: the blade's soft radius squared
 +			float3 Rr = reflect(-V, N);
 +			float3 A0 = A - P;
 +			float rb = dot(Rr, Bv), ra = dot(Rr, A0);
@@ -103958,7 +104191,8 @@ index 00000000..7ddf8481
 +{
 +	uint3 dim = uint3(vfogIdx.y & 0xffff, vfogIdx.y >> 16, vfogIdx.w);
 +	if (id.x >= dim.x || id.y >= dim.y) return;
-+	float jit = frac(sin(dot(float2(id.xy) + projParams.w * 7.13, float2(12.9898, 78.233))) * 43758.5453);
++	// slice jitter: changes every frame only under TAA (which averages it); without TAA it stays put (no shimmer)
++	float jit = frac(sin(dot(float2(id.xy) + (taaParams.w > 0.5 ? projParams.w * 7.13 : 0.0), float2(12.9898, 78.233))) * 43758.5453);
 +	for (uint z = 0; z < dim.z; z++) {
 +		float viewZ = FroxelDepth(z + jit);
 +		float2 vuv = (float2(id.xy) + 0.5) / float2(dim.xy);
@@ -103986,7 +104220,7 @@ index 00000000..7ddf8481
 +			float d2 = dot(d, d);
 +			if (d2 > l.radius * l.radius) continue;
 +			float wnd = saturate(1 - pow(d2 / (l.radius * l.radius), 2)); wnd *= wnd;
-+			float att = l.invSquare > 0 ? wnd * l.invSquare / max(d2, 256.0) : wnd;
++			float att = l.invSquare > 0 ? wnd * l.invSquare / (d2 + (l.type == 2 ? l.lp.x : 256.0)) : wnd;
 +			if (l.type == 1) att *= smoothstep(l.spotCos, l.spotInner, dot(-normalize(d), l.dir));
 +			S += l.color * att / (4 * PI) * vfog1.y;
 +		}
@@ -103998,10 +104232,10 @@ index 00000000..7ddf8481
 +}
 diff --git a/codemp/rd-katarn/katarn/shaders/post.hlsl b/codemp/rd-katarn/katarn/shaders/post.hlsl
 new file mode 100644
-index 00000000..ab825e38
+index 00000000..e30b9173
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/shaders/post.hlsl
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,282 @@
 +// KatarnEngine - camera: auto exposure, bloom, filmic tone mapping, FXAA
 +#include "common.hlsli"
 +
@@ -104252,6 +104486,9 @@ index 00000000..ab825e38
 +	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 +	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 +	c = LinearToSrgb(c);
++	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
++	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
++	if (dstUav) c = saturate(c + Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb));
 +	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 +	c += (n - 0.5) / 255.0;
 +	return float4(c, dot(c, float3(0.299, 0.587, 0.114)));
@@ -104680,10 +104917,10 @@ index 00000000..cf1c3144
 +}
 diff --git a/codemp/rd-katarn/katarn/shaders/sss.hlsl b/codemp/rd-katarn/katarn/shaders/sss.hlsl
 new file mode 100644
-index 00000000..25040023
+index 00000000..d21859f2
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/shaders/sss.hlsl
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,62 @@
 +// KatarnEngine - skin subsurface scattering (screen space, Jimenez): the lit skin is blurred along the surface in two
 +// passes, red further than green and blue, so light bleeds softly under the skin the way it does in Unreal's
 +// subsurface profile. Only pixels with the skin flag, only from skin neighbours at about the same depth.
@@ -104703,6 +104940,14 @@ index 00000000..25040023
 +	return w > 3.5 && w < 7.5;
 +}
 +
++// the lit colour divided by the albedo: what gets blurred is the light under the skin, never the texture (pores,
++// stubble, eyebrows stay sharp)
++float3 Irradiance(int2 p)
++{
++	float3 a = Tex2D[indices0.x].Load(int3(p, 0)).rgb;
++	return Tex2D[srcSrv].Load(int3(p, 0)).rgb / max(a, 0.04);
++}
++
 +[numthreads(8, 8, 1)]
 +void BlurCS(uint3 id : SV_DispatchThreadID)
 +{
@@ -104715,32 +104960,35 @@ index 00000000..25040023
 +	float4 c = Tex2D[srcSrv].Load(int3(px, 0));
 +	// pixels per world unit at this depth
 +	float ppu = projParams.y * viewport.w * 0.5 / z;
-+	float stepPx = clamp(width * ppu / 3.0, 0.0, 6.0);
++	float stepPx = clamp(width * ppu / 3.0, 0.0, 2.5);
 +	if (stepPx < 0.3) { UavTex[outUav][px] = c; return; }
 +	int2 dir = dirY ? int2(0, 1) : int2(1, 0);
-+	// per-channel Gaussian (red scatters furthest)
-+	const float3 sigma = float3(1.0, 0.42, 0.28) * 1.6;
-+	float3 acc = c.rgb, wsum = 1;
++	float3 alb = max(Tex2D[indices0.x].Load(int3(px, 0)).rgb, 0.04);
++	// per-channel Gaussian (red scatters furthest, green and blue barely)
++	const float3 sigma = float3(1.0, 0.35, 0.22) * 1.4;
++	float3 acc = c.rgb / alb, wsum = 1;
 +	int2 lo = int2(viewport.xy), hi = int2(viewport.xy + viewport.zw) - 1;
-+	[unroll] for (int k = -6; k <= 6; k++) {
++	[unroll] for (int k = -4; k <= 4; k++) {
 +		if (k == 0) continue;
 +		float o = k * 0.5;
 +		int2 q = clamp(px + dir * (int)round(o * stepPx), lo, hi);
 +		if (!IsSkin(q)) continue;
 +		float dq = Tex2D[indices0.w].Load(int3(q, 0)).r;
-+		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.5) continue;
++		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.0) continue;
 +		float3 w = exp(-0.5 * (o * o) / (sigma * sigma));
-+		acc += Tex2D[srcSrv].Load(int3(q, 0)).rgb * w;
++		acc += min(Irradiance(q), 64.0) * w;
 +		wsum += w;
 +	}
-+	UavTex[outUav][px] = float4(acc / wsum, c.a);
++	// mostly the original: the scatter only softens the light's edges
++	float3 blurred = acc / wsum * alb;
++	UavTex[outUav][px] = float4(lerp(c.rgb, blurred, 0.7), c.a);
 +}
 diff --git a/codemp/rd-katarn/katarn/shaders/taa.hlsl b/codemp/rd-katarn/katarn/shaders/taa.hlsl
 new file mode 100644
-index 00000000..cfa99a02
+index 00000000..cd76b81c
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/shaders/taa.hlsl
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,91 @@
 +// KatarnEngine - temporal anti-aliasing (Unreal-style): jittered frames, history reprojected from depth, the history
 +// clipped to the current neighbourhood's colour range in YCoCg (no ghosting from things without motion vectors), a
 +// luma-weighted blend in a tone-mapped space. The final sharpen happens in the tone map pass (taaParams.z).
@@ -104761,6 +105009,24 @@ index 00000000..cfa99a02
 +float3 YCoCgToRGB(float3 c) { return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
 +float3 Compress(float3 c) { return c / (1.0 + max(c.r, max(c.g, c.b))); }       // tone-map before blending (Karis)
 +float3 Expand(float3 c) { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4); }
++
++// history fetched with a Catmull-Rom filter (5 bilinear taps): bilinear would soften the image a little every frame
++float3 SampleHistory(float2 tuv)
++{
++	float2 ts = 1.0 / invTargetSize.xy;
++	float2 pos = tuv * ts, c = floor(pos - 0.5) + 0.5, f = pos - c;
++	float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
++	float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);
++	float2 w12 = w1 + w2, o12 = c + w2 / w12;
++	float2 p0 = (c - 1) * invTargetSize.xy, p3 = (c + 2) * invTargetSize.xy, p12 = o12 * invTargetSize.xy;
++	float3 r = Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p0.y), 0).rgb * (w12.x * w0.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p0.x, p12.y), 0).rgb * (w0.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, p12, 0).rgb * (w12.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p3.x, p12.y), 0).rgb * (w3.x * w12.y)
++		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p3.y), 0).rgb * (w12.x * w3.y);
++	float wt = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
++	return max(r / wt, 0);
++}
 +
 +[numthreads(8, 8, 1)]
 +void ResolveCS(uint3 id : SV_DispatchThreadID)
@@ -104797,7 +105063,7 @@ index 00000000..cfa99a02
 +		puv = cuv + (puv - vuv);
 +		if (all(puv >= 0) && all(puv <= 1)) {
 +			float2 tuv = (viewport.xy + puv * viewport.zw) * invTargetSize.xy;
-+			float3 h = RGBToYCoCg(Compress(max(Tex2D[histSrv].SampleLevel(sClamp, tuv, 0).rgb, 0)));
++			float3 h = RGBToYCoCg(Compress(max(SampleHistory(tuv), 0)));
 +			// clip the history to the neighbourhood's colour box (variance clipping)
 +			float3 bmin = m1 - sigma * 1.25, bmax = m1 + sigma * 1.25;
 +			float3 center = 0.5 * (bmax + bmin), ext = max(0.5 * (bmax - bmin), 1e-5);
@@ -129570,10 +129836,10 @@ index 00000000..01c54a77
 +#endif
 diff --git a/codemp/rd-katarn/tr_shade.cpp b/codemp/rd-katarn/tr_shade.cpp
 new file mode 100644
-index 00000000..35baa9be
+index 00000000..517503bd
 --- /dev/null
 +++ b/codemp/rd-katarn/tr_shade.cpp
-@@ -0,0 +1,2207 @@
+@@ -0,0 +1,2212 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -131404,6 +131670,11 @@ index 00000000..35baa9be
 +		}
 +		kt::GL_SetStage(pStage, pStage->glow);
 +		kt::GL_SetScale(backEnd.currentEntity && backEnd.currentEntity->e.reType == RT_SABER_GLOW ? kt::SaberGlowBoost() : 1.0f);
++		{
++			// lightsaber blades (glow sprites, the core line) are composited after the tone map, as rend2 shows them
++			const int rt = backEnd.currentEntity ? backEnd.currentEntity->e.reType : -1;
++			kt::GL_SetSaber(rt == RT_SABER_GLOW || (rt == RT_LINE && tess.shader && Q_stristr(tess.shader->name, "saber")));
++		}
 +
 +		// Reject this stage if it's not a glow stage but we are doing a glow pass.
 +		if ( g_bRenderGlowingObjects && !pStage->glow )
