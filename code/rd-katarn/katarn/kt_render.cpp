@@ -183,7 +183,7 @@ static void RegisterCvars()
 	kt_volumetric = KtCvar("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
 	kt_saberLight = KtCvar("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
 	kt_saberGlow = KtCvar("kt_saberGlowScale", "1", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene (1 = as authored, like rend2)
-	kt_saberDraw = KtCvar("kt_saberDraw2", "1", CVAR_ARCHIVE);     // 1: Katarn's own Battlefront-style blades, 0: the game's glow sprites (rend2 look)
+	kt_saberDraw = KtCvar("kt_saberDraw2", "0", CVAR_ARCHIVE);     // 0: MD's own saber textures and trails (rend2 look), 1: Katarn's procedural blades
 	// HD worlds: the Frostbite / Unreal style picture - a punchier tone curve, a stronger sun against darker, bluer shade
 	kt_look = KtCvar("kt_look", "1", CVAR_ARCHIVE);               // 0 = Blender-neutral AgX, 1 = full, in between blends
 	kt_sunScale = KtCvar("kt_sunScale", "1.4", CVAR_ARCHIVE);     // sun brightness (HD worlds)
@@ -237,6 +237,10 @@ static void RegisterCvars()
 	if (ver->integer < 4) {
 		ri.Cvar_Set("kt_saberDraw2", "1"); ri.Cvar_Set("kt_saberGlowScale", "1"); ri.Cvar_Set("kt_saberLight", "1");
 		ri.Cvar_Set("kt_configVersion", "4");
+	}
+	if (ver->integer < 5) {
+		ri.Cvar_Set("kt_saberDraw2", "0");   // back to MD's saber textures and trails
+		ri.Cvar_Set("kt_configVersion", "5");
 	}
 }
 

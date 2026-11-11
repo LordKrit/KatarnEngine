@@ -417,8 +417,16 @@ void CS(uint3 id : SV_DispatchThreadID)
 			bakedL *= lerp(keep, 1.0, sunVis);
 		}
 		Lo += bakedL * ao;
-		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
-		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
+		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR.
+		// rend2 scales a cubemap reflection by the light at the surface over the cubemap's brightness, so a model in
+		// a dark corner does not mirror the bright room around it: the same here (against the probe's blurriest level)
+		float reflScale = 1.0;
+		if (probeW > 0 || ssrHit > 0) {
+			float pw2 = 0;
+			float3 around = probeParams.y ? SampleProbes(P, N, 1.0, pw2) * asfloat(probeParams.z) / max(skyParams.z, 1e-3) : spec;
+			reflScale = saturate(Luminance(g2) / max(Luminance(around) * 1.5, 1e-3));
+		}
+		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit)) * reflScale;
 	}
 	else {
 		// indirect diffuse: the sky, the reflection probes' surroundings (their blurriest level), bounced light

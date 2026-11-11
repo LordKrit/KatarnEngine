@@ -1272,14 +1272,22 @@ R"KTSRC(	if (gflags & 1) clip(a.a - alphaRef);
 	if (gflags & 32) a.rgb *= min(1.0 / max(tnz, 0.125), 8.0);
 	float rough = roughness, metal = metallic, matAO = 1;
 	if (rmoTex) {
+		// with a map, roughness / metallic carry rend2's specularScale multipliers
 		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;
 		if (rmoOrder == 1) r = r.gbr;     // orm -> rmo
-		rough = r.x; metal = r.y; matAO = r.z;
+		rough = lerp(0.01, 1.0, saturate(r.x * roughness)); metal = saturate(r.y * metallic); matAO = r.z;
 	}
 	if (specTex) {
-		// rend2 specularMap: rgb = specular colour, a = gloss
+		// rend2 specularMap: rgb = specular colour (F0), a = gloss; roughness = mix(1, 0.01, gloss)
 		float4 sp = Tex2D[NonUniformResourceIndex(specTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
-		rough = sp.a < 0.999 ? 1.0 - sp.a : saturate(1.0 - Luminance(sp.rgb) * 0.9);
+		float gloss = sp.a < 0.999 ? sp.a : saturate(Luminance(sp.rgb) * 0.9);
+		rough = lerp(1.0, 0.01, saturate(gloss * roughness));
+		// the specular colour as F0: brighter than 0.04 reads as metal (towards the albedo), darker than 0.04 as a
+		// duller surface (rougher, so the highlight spreads and fades) - the gbuffer has no F0 channel
+		float ls = Luminance(SrgbToLinear(saturate(sp.rgb))) * metallic;
+		float la = Luminance(a.rgb);
+		metal = ls > 0.04 ? saturate((ls - 0.04) / max(la - 0.04, 0.08)) : 0.0;
+		if (ls < 0.04) rough = lerp(1.0, rough, saturate(ls / 0.04));
 	}
 	// models without PBR maps are flagged (metal + 2) so the lighting keeps their reflections soft, like rend2
 	// (no specular / gloss data: a dull dielectric, not a coated one)
@@ -1327,7 +1335,7 @@ R"KTSRC(	if (gflags & 1) clip(a.a - alphaRef);
 		float3 f0 = lerp(authored ? 0.04 : 0.012, a.rgb, saturate(metal));
 		float3 F = f0 + (1 - f0) * pow(1 - saturate(dot(H, V)), 5);
 		float3 spec = D * G * F / max(4 * saturate(nl) * nv, 1e-3) * saturate(nl) * SrgbToLinear(saturate(dirc));
-		if (gflags & 64) spec = HairSpec(HairStrand(n), n, V, L, a.rgb, rough) * SrgbToLinear(saturate(dirc)) * 3.0;   // hair
+		if (gflags & 64) spec = HairSpec(HairStrand(n), n, V, L, a.rgb, rough) * SrgbToLinear(saturate(dirc)) * 1.0;   // hair
 		lit += spec + f0 * SrgbToLinear(saturate(amb)) * 0.5;   // a dim ambient reflection
 		gridLit = lit;
 		hasBaked = true;
@@ -1921,8 +1929,16 @@ R"KTSRC(.2);
 			bakedL *= lerp(keep, 1.0, sunVis);
 		}
 		Lo += bakedL * ao;
-		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
-		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
+		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR.
+		// rend2 scales a cubemap reflection by the light at the surface over the cubemap's brightness, so a model in
+		// a dark corner does not mirror the bright room around it: the same here (against the probe's blurriest level)
+		float reflScale = 1.0;
+		if (probeW > 0 || ssrHit > 0) {
+			float pw2 = 0;
+			float3 around = probeParams.y ? SampleProbes(P, N, 1.0, pw2) * asfloat(probeParams.z) / max(skyParams.z, 1e-3) : spec;
+			reflScale = saturate(Luminance(g2) / max(Luminance(around) * 1.5, 1e-3));
+		}
+		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit)) * reflScale;
 	}
 	else {
 		// indirect diffuse: the sky, the reflection probes' surroundings (their blurriest level), bounced light

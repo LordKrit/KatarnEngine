@@ -393,6 +393,8 @@ using shaderStage_t = struct shaderStage_t {
 	int				ktRmoOrder;     // 0 r=rough g=metal b=ao (rmo), 1 r=ao g=rough b=metal (orm)
 	image_t* ktSpec;
 	float			ktSkin;         // rend2 skin keyword: subsurface strength (0 = none)
+	float			ktSpecScale[4]; // rend2 specularScale / gloss / roughness keywords (rend2 layout)
+	bool			ktSpecScaleSet;
 	float			ktParallax;     // parallax depth (uv units) from the normal map's alpha height, 0 = none
 };
 

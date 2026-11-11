@@ -1686,7 +1686,34 @@ static qboolean ParseStage(shaderStage_t* stage, const char** text)
 			if (token[0]) stage->ktParallax = Q_max(0.0f, Q_min(0.25f, (float)atof(token)));
 			SkipRestOfLine(text);
 		}
-		else if (!Q_stricmp(token, "normalScale") || !Q_stricmp(token, "specularScale")
+		// rend2's specular tuning: specularScale <rgb|metal> <gloss|spec> [..] [gloss], gloss, roughness,
+		// specularReflectance, specularExponent - same layout as rend2's stage->specularScale
+		else if (!Q_stricmp(token, "specularScale") || !Q_stricmp(token, "gloss") || !Q_stricmp(token, "roughness")
+			|| !Q_stricmp(token, "specularReflectance") || !Q_stricmp(token, "specularExponent"))
+		{
+			char kw[32];
+			Q_strncpyz(kw, token, sizeof(kw));
+			if (!stage->ktSpecScaleSet) {
+				// rend2's defaults: rmo (1, 0.5, 1, 1), specular map (1, 1, 1, 0)
+				const bool sg = stage->ktSpec != nullptr;
+				stage->ktSpecScale[0] = 1; stage->ktSpecScale[1] = sg ? 1.0f : 0.5f; stage->ktSpecScale[2] = 1; stage->ktSpecScale[3] = sg ? 0.0f : 1.0f;
+			}
+			float v[4]; int n = 0;
+			for (; n < 4; n++) { token = COM_ParseExt(text, qfalse); if (!token[0]) break; v[n] = (float)atof(token); }
+			if (n > 0) {
+				stage->ktSpecScaleSet = true;
+				float* sc = stage->ktSpecScale;
+				if (!Q_stricmp(kw, "gloss")) sc[3] = 1.0f - v[0];
+				else if (!Q_stricmp(kw, "roughness")) sc[3] = v[0];
+				else if (!Q_stricmp(kw, "specularReflectance")) sc[0] = sc[1] = sc[2] = Q_max(0.0f, Q_min(1.0f, v[0]));
+				else if (!Q_stricmp(kw, "specularExponent")) sc[3] = 1.0f - logf(Q_max(1.0f, Q_min(8192.0f, v[0]))) / logf(8192.0f);
+				else if (n == 1) sc[0] = v[0];
+				else if (n == 2) { sc[3] = 1.0f - v[1]; sc[0] = sc[1] = sc[2] = v[0]; }
+				else { sc[0] = v[0]; sc[1] = v[1]; sc[2] = v[2]; if (n == 4) sc[3] = 1.0f - v[3]; }
+			}
+			SkipRestOfLine(text);
+		}
+		else if (!Q_stricmp(token, "normalScale")
 			|| !Q_stricmp(token, "gloss") || !Q_stricmp(token, "roughness") || !Q_stricmp(token, "specularReflectance") || !Q_stricmp(token, "specularExponent")
 			|| !Q_stricmp(token, "cubeMapScale") || !Q_stricmp(token, "parallaxBias") || !Q_stricmp(token, "metallic") || !Q_stricmp(token, "emissiveScale"))
 		{

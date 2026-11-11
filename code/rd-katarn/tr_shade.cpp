@@ -1994,6 +1994,16 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	d.flags = flags;
 	d.roughness = world ? 0.7f : 0.78f;   // characters: cloth / skin (0.55 read as plastic)
 	d.metallic = 0.0f;
+	if (st->ktRmo) {
+		// rend2: roughness x specularScale.w, metalness x specularScale.x
+		d.roughness = st->ktSpecScaleSet ? st->ktSpecScale[3] : 1.0f;
+		d.metallic = st->ktSpecScaleSet ? st->ktSpecScale[0] : 1.0f;
+	}
+	else if (st->ktSpec) {
+		// rend2 spec/gloss: gloss x (1 - specularScale.w), specular colour x specularScale.rgb
+		d.roughness = st->ktSpecScaleSet ? 1.0f - st->ktSpecScale[3] : 1.0f;
+		d.metallic = st->ktSpecScaleSet ? (st->ktSpecScale[0] + st->ktSpecScale[1] + st->ktSpecScale[2]) / 3.0f : 1.0f;
+	}
 	d.bakedScale = 1.0f;
 	memcpy(d.tint, tint, sizeof(tint));
 	// cull exactly as GL_Cull would
@@ -2097,7 +2107,10 @@ static void RB_IterateStagesGeneric(const shaderCommands_t* input)
 		{
 			// lightsaber blades (glow sprites, the core line) are composited after the tone map, as rend2 shows them
 			const int rt = backEnd.currentEntity ? backEnd.currentEntity->e.reType : -1;
-			kt::GL_SetSaber(rt == RT_SABER_GLOW || (rt == RT_LINE && tess.shader && Q_stristr(tess.shader->name, "saber")));
+			// ... and MD's saber trails / blur (additive or blended "saber" shaders; hilts are opaque and stay out)
+			const bool saberName = tess.shader && Q_stristr(tess.shader->name, "saber");
+			const bool blended = (p_stage->stateBits & GLS_DSTBLEND_BITS) != 0 && (p_stage->stateBits & GLS_DSTBLEND_BITS) != GLS_DSTBLEND_ZERO;
+			kt::GL_SetSaber(rt == RT_SABER_GLOW || (rt == RT_LINE && saberName) || (saberName && blended));
 		}
 
 		// Reject this stage if it's not a glow stage but we are doing a glow pass.
