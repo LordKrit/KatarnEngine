@@ -388,6 +388,7 @@ using shaderStage_t = struct shaderStage_t {
 
 	// KatarnEngine: PBR maps from rend2-style stages (normalMap / rmoMap / ormMap / specularMap)
 	image_t* ktNormal;
+	bool		ktNormalGen;    // ktNormal was generated from the texture (rend2 r_genNormalMaps)
 	image_t* ktRmo;
 	int				ktRmoOrder;     // 0 r=rough g=metal b=ao (rmo), 1 r=ao g=rough b=metal (orm)
 	image_t* ktSpec;
@@ -448,6 +449,8 @@ using shader_t = struct shader_s {
 
 	skyParms_t* sky;
 	fogParms_t* fogParms;
+	bool		ktHasSun;               // KatarnEngine: this (sky) shader set the sun (q3map_sun / q3map_sunExt / q3gl2_sun)
+	float		ktSunDir[3];
 
 	float		portalRange;			// distance to fog out at
 

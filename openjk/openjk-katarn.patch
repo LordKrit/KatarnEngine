@@ -23545,10 +23545,10 @@ index 00000000..296ed7a4
 +void APIENTRY ktgl_UnlockArraysEXT(void) {}
 diff --git a/code/rd-katarn/katarn/kt_render.cpp b/code/rd-katarn/katarn/kt_render.cpp
 new file mode 100644
-index 00000000..243c7c11
+index 00000000..7449291d
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_render.cpp
-@@ -0,0 +1,1653 @@
+@@ -0,0 +1,1870 @@
 +// KatarnEngine - the frame.
 +//
 +// Per 3D world view:
@@ -23592,10 +23592,114 @@ index 00000000..243c7c11
 +static cvar_t* kt_fogScale = nullptr;
 +static cvar_t* kt_dynGlow, * kt_contactShadows, * kt_lightShadows;
 +static cvar_t* kt_probes = nullptr, * kt_probeScale = nullptr, * kt_parallax = nullptr, * kt_wind = nullptr;
++static cvar_t* kt_bspSun = nullptr, * kt_bspSunAmbient = nullptr, * kt_bspSunDist = nullptr;
 +static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
++
++// ------------------------------------------------------------------------------------------------ rend2 colour grade
++// rend2's tr_grade: r_grade* cvars, maps/<map>.grade files ("<cvar> <value>" lines, "preset <name>"), the "grade"
++// command (save / load / reset / preset). Same names and files as rend2, so a map's grade carries over.
++struct GradeVar { const char* name; const char* def; cvar_t* cv; };
++static GradeVar s_grade[] = {
++	{ "r_grade", "0", nullptr }, { "r_gradeCurve", "1", nullptr }, { "r_gradeExposure", "0", nullptr }, { "r_gradeContrast", "1.12", nullptr },
++	{ "r_gradeSaturation", "0.92", nullptr }, { "r_gradeTemperature", "0", nullptr }, { "r_gradeTint", "0", nullptr },
++	{ "r_gradeShadows", "1 1 1", nullptr }, { "r_gradeHighlights", "1 1 1", nullptr }, { "r_gradeBlack", "0", nullptr },
++	{ "r_gradeVignette", "0.25", nullptr },
++	{ "r_ssrStrength", "1", nullptr }, { "r_ssrGloss", "1", nullptr }, { "r_ssrRough", "1", nullptr },
++	{ "r_atmosDensity", "0", nullptr }, { "r_atmosFalloff", "0.0012", nullptr }, { "r_atmosStart", "256", nullptr },
++	{ "r_atmosColor", "0.55 0.6 0.7", nullptr }, { "r_atmosShafts", "0.6", nullptr },
++};
++static const int kNumGrade = (int)(sizeof(s_grade) / sizeof(s_grade[0]));
++static cvar_t* r_atmosCv = nullptr;
++struct GradePreset { const char* name; const char* v[10]; };
++static const GradePreset s_gradePresets[] = {
++	{ "default",  { "1", "0",    "1.12", "0.92", "0",     "0",     "1 1 1",          "1 1 1",          "0",    "0.25" } },
++	{ "interior", { "1", "-0.1", "1.22", "0.78", "-0.25", "0",     "0.92 0.97 1.08", "1.02 1.01 0.98", "0.02", "0.30" } },
++	{ "sunset",   { "2", "0.1",  "1.15", "1.05", "0.55",  "0.05",  "0.95 0.92 1.05", "1.10 1.00 0.86", "0.01", "0.30" } },
++	{ "daylight", { "2", "0",    "1.10", "0.95", "0.15",  "-0.05", "0.96 1.00 1.04", "1.04 1.02 0.96", "0.01", "0.20" } },
++	{ "space",    { "1", "0",    "1.25", "0.90", "0.20",  "0",     "0.90 0.95 1.10", "1.08 1.03 0.92", "0.03", "0.35" } },
++	{ "noir",     { "1", "0",    "1.30", "0.15", "0",     "0",     "1 1 1",          "1 1 1",          "0.03", "0.45" } },
++};
++
++static void GradeVec3(const char* s, float* o)
++{
++	o[0] = o[1] = o[2] = 1.0f;
++	if (sscanf(s, "%f %f %f", &o[0], &o[1], &o[2]) == 1) o[1] = o[2] = o[0];
++}
++
++static void GradeReset() { for (auto& g : s_grade) ri.Cvar_Set(g.name, g.def); }
++static void GradePreset(const GradePreset& p) { for (int i = 0; i < 10; i++) ri.Cvar_Set(s_grade[i + 1].name, p.v[i]); }
++
++static void GradePath(char* out, int size)
++{
++	char base[MAX_QPATH];
++	Q_strncpyz(base, COM_SkipPath(tr.world ? tr.world->name : (char*)"nomap"), sizeof(base));
++	COM_StripExtension(base, base, sizeof(base));
++	Com_sprintf(out, size, "maps/%s.grade", base);
++}
++
++static void GradeLoadForMap()
++{
++	if (!s_grade[0].cv) return;
++	char path[MAX_QPATH];
++	GradePath(path, sizeof(path));
++	GradeReset();
++	char* buf = nullptr;
++	if (ri.FS_ReadFile(path, (void**)&buf) <= 0 || !buf) return;
++	const char* p = buf;
++	int set = 0;
++	while (*p) {
++		char line[256]; int n = 0;
++		while (*p && *p != '\n' && n < 255) line[n++] = *p++;
++		line[n] = 0;
++		if (*p) p++;
++		if (char* cm = strstr(line, "//")) *cm = 0;
++		char key[64], val[192];
++		if (sscanf(line, " %63s %191[^\r\n]", key, val) != 2) continue;
++		char* v = val; while (*v == ' ' || *v == '"') v++;
++		for (char* e = v + strlen(v) - 1; e >= v && (*e == ' ' || *e == '"'); e--) *e = 0;
++		if (!Q_stricmp(key, "preset")) { for (const auto& pr : s_gradePresets) if (!Q_stricmp(v, pr.name)) { GradePreset(pr); set++; } continue; }
++		for (auto& g : s_grade) if (!Q_stricmp(key, g.name)) { ri.Cvar_Set(g.name, v); set++; }
++	}
++	ri.FS_FreeFile(buf);
++	ri.Printf(PRINT_ALL, "grade: loaded %s (%d settings)\n", path, set);
++}
++
++static void Grade_f()
++{
++	const char* cmd = ri.Cmd_Argc() > 1 ? ri.Cmd_Argv(1) : "";
++	char path[MAX_QPATH];
++	GradePath(path, sizeof(path));
++	if (!Q_stricmp(cmd, "save")) {
++		char out[2048]; int len = 0;
++		len += Com_sprintf(out + len, sizeof(out) - len, "// colour grade for %s (written by \"grade save\")\n", path);
++		for (int i = 1; i < kNumGrade; i++) len += Com_sprintf(out + len, sizeof(out) - len, "%s \"%s\"\n", s_grade[i].name, s_grade[i].cv->string);
++		ri.FS_WriteFile(path, out, len);
++		ri.Printf(PRINT_ALL, "grade: saved %s\n", path);
++	}
++	else if (!Q_stricmp(cmd, "reset")) { GradeReset(); ri.Printf(PRINT_ALL, "grade: defaults restored\n"); }
++	else if (!Q_stricmp(cmd, "load")) GradeLoadForMap();
++	else if (!Q_stricmp(cmd, "preset")) {
++		const char* n = ri.Cmd_Argc() > 2 ? ri.Cmd_Argv(2) : "";
++		for (const auto& pr : s_gradePresets) if (!Q_stricmp(n, pr.name)) { GradePreset(pr); ri.Printf(PRINT_ALL, "grade: preset %s\n", pr.name); return; }
++		ri.Printf(PRINT_ALL, "grade preset <name>:");
++		for (const auto& pr : s_gradePresets) ri.Printf(PRINT_ALL, " %s", pr.name);
++		ri.Printf(PRINT_ALL, "\n");
++	}
++	else {
++		ri.Printf(PRINT_ALL, "grade save | load | reset | preset <name>   (map file: %s)\n", path);
++		for (auto& g : s_grade) ri.Printf(PRINT_ALL, "  %-20s %s\n", g.name, g.cv->string);
++	}
++}
 +
 +static void RegisterCvars()
 +{
++	for (auto& gv : s_grade) gv.cv = KtCvar(gv.name, gv.def, CVAR_ARCHIVE);
++	r_atmosCv = KtCvar("r_atmos", "1", CVAR_ARCHIVE);
++#ifdef KT_MP
++	ri.Cmd_AddCommand("grade", Grade_f, "colour grade: save | load | reset | preset <name>");
++#else
++	ri.Cmd_AddCommand("grade", Grade_f);
++#endif
 +	kt_debug = KtCvar("kt_debug", "0", CVAR_LATCH);
 +	kt_ssao = KtCvar("kt_ssao", "1", CVAR_ARCHIVE);
 +	kt_shadows = KtCvar("kt_shadows", "1", CVAR_ARCHIVE);
@@ -23629,7 +23733,12 @@ index 00000000..243c7c11
 +	kt_probes = KtCvar("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
 +	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 +	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
-+	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)   // 1: Katarn draws its own procedural blades instead of the game's
++	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)
++	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
++	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
++	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
++	kt_bspSunAmbient = KtCvar("kt_bspSunAmbient", "0.5", CVAR_ARCHIVE);
++	kt_bspSunDist = KtCvar("kt_bspSunDist", "3072", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
 +
 +	// settings saved by older builds (tuning experiments) are put back to the current defaults once
 +	cvar_t* ver = KtCvar("kt_configVersion", "0", CVAR_ARCHIVE);
@@ -23692,6 +23801,10 @@ index 00000000..243c7c11
 +	float extraParams[4];      // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 +	float viewProjNoJitter[16];   // this frame's view-projection without the TAA jitter
 +	uint32_t probeParams[4];      // x reflection probe buffer, y probe count, z strength (float)
++	float bspSun[4];              // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float grade0[4], grade1[4], grade2[4], grade3[4];   // rend2 colour grade (r_grade*), grade3.w 1 = on
++	float atmos0[4], atmos1[4], atmos2[4];             // rend2 atmosphere (r_atmos*): haze rgb + density; sun uv, visible, shafts; sun rgb + falloff
++	float atmos3[4];                                    // x haze start, y 1 = on
 +};
 +
 +struct LVert { float pos[3]; float normal[3]; float uv[2]; float lmuv[2]; uint32_t color; };
@@ -23753,6 +23866,9 @@ index 00000000..243c7c11
 +	bool capture = false;            // this view is a probe capture
 +	int capProbe = 0, capFace = 0;
 +	float capSavedVP[16] = {};
++	// old BSP maps: static sun-shadow caster mesh
++	Buffer bspVB, bspIB, bspCB;
++	uint32_t bspIndexCount = 0, bspVertCount = 0;
 +} R;
 +static constexpr uint32_t kProbeSize = 128, kProbeMips = 8, kMaxProbes = 64;
 +
@@ -24071,12 +24187,16 @@ index 00000000..243c7c11
 +void R_Shutdown()
 +{
 +	if (!g.dev) return;
++	ri.Cmd_RemoveCommand("grade");
 +	if (R.cl) { SubmitList(R.cl); R.cl = nullptr; }
 +	WaitIdle();
 +	World_Shutdown();
 +	GL_ShutdownTextures();
 +	DestroyTargets();
 +	ProbesDestroy();
++	if (R.bspVB.res) DestroyBuffer(R.bspVB);
++	if (R.bspIB.res) DestroyBuffer(R.bspIB);
++	if (R.bspCB.res) DestroyBuffer(R.bspCB);
 +	DestroyBuffer(R.exposure);
 +	DestroyBuffer(R.sh);
 +	for (auto& kv : R.psos) if (kv.second) kv.second->Release();
@@ -24324,9 +24444,59 @@ index 00000000..243c7c11
 +	}
 +	if (!World_Active()) c.postParams[2] = 1.0f;   // legacy maps: fixed exposure (their content is display-referred)
 +
++	// old BSP maps: rend2's forced sun - the sky shader's q3map_sun direction (or rend2's default), shadows only
++	bool bspSun = v.world && !World_Active() && kt_bspSun->integer && kt_shadows->integer && R.bspIndexCount && tr.world;
++	if (bspSun) {
++		sd[0] = tr.sunDirection[0]; sd[1] = tr.sunDirection[1]; sd[2] = tr.sunDirection[2];
++		Norm3(sd);
++		if (sd[2] < 0.05f) bspSun = false;
++		c.sunDir[0] = sd[0]; c.sunDir[1] = sd[1]; c.sunDir[2] = sd[2];
++		c.bspSun[0] = bspSun ? 1.0f : 0.0f;
++		c.bspSun[1] = Q_max(0.0f, Q_min(1.0f, kt_bspSunAmbient->value));
++	}
++
++	// rend2 colour grade (any map) and atmosphere (old BSP maps: haze + screen-space sun shafts)
++	if (s_grade[0].cv && s_grade[0].cv->integer && !R.capture) {
++		float sh[3], hi[3];
++		GradeVec3(s_grade[7].cv->string, sh); GradeVec3(s_grade[8].cv->string, hi);
++		c.grade0[0] = powf(2.0f, s_grade[2].cv->value); c.grade0[1] = s_grade[3].cv->value; c.grade0[2] = s_grade[4].cv->value;
++		c.grade0[3] = Q_max(0.0f, Q_min(1.0f, s_grade[10].cv->value));
++		c.grade1[0] = sh[0]; c.grade1[1] = sh[1]; c.grade1[2] = sh[2]; c.grade1[3] = (float)s_grade[1].cv->integer;
++		c.grade2[0] = hi[0]; c.grade2[1] = hi[1]; c.grade2[2] = hi[2]; c.grade2[3] = Q_max(0.0f, Q_min(0.2f, s_grade[9].cv->value));
++		float t = Q_max(-1.0f, Q_min(1.0f, s_grade[5].cv->value)), m = Q_max(-1.0f, Q_min(1.0f, s_grade[6].cv->value));
++		c.grade3[0] = 1.0f + 0.18f * t + 0.06f * m; c.grade3[1] = 1.0f - 0.12f * m; c.grade3[2] = 1.0f - 0.18f * t + 0.06f * m;
++		float lum = 0.2126f * c.grade3[0] + 0.7152f * c.grade3[1] + 0.0722f * c.grade3[2];
++		c.grade3[0] /= lum; c.grade3[1] /= lum; c.grade3[2] /= lum;
++		c.grade3[3] = 1.0f;
++	}
++	if (v.world && !World_Active() && !R.capture && !v.skyPortal && r_atmosCv && r_atmosCv->integer && tr.world
++		&& (s_grade[14].cv->value > 0 || s_grade[18].cv->value > 0)) {
++		float col[3] = { 0.55f, 0.6f, 0.7f };
++		sscanf(s_grade[17].cv->string, "%f %f %f", &col[0], &col[1], &col[2]);
++		float sun[3] = { tr.sunDirection[0], tr.sunDirection[1], tr.sunDirection[2] };
++		Norm3(sun);
++		// the sun on screen
++		float sunPt[4] = { v.origin[0] + sun[0] * 1e5f, v.origin[1] + sun[1] * 1e5f, v.origin[2] + sun[2] * 1e5f, 1 }, cp[4];
++		for (int r = 0; r < 4; r++) cp[r] = R.viewProj[r] * sunPt[0] + R.viewProj[4 + r] * sunPt[1] + R.viewProj[8 + r] * sunPt[2] + R.viewProj[12 + r];
++		float vis = 0, su = 0.5f, sv = 0.5f;
++		if (cp[3] > 0) {
++			su = cp[0] / cp[3] * 0.5f + 0.5f; sv = -cp[1] / cp[3] * 0.5f + 0.5f;
++			float off = Q_max(fabsf(su - 0.5f), fabsf(sv - 0.5f));
++			vis = Q_max(0.0f, Q_min(1.0f, (1.2f - off) / 0.5f));
++		}
++		float smax = Q_max(tr.sunLight[0], Q_max(tr.sunLight[1], tr.sunLight[2]));
++		float scol[3] = { 1, 0.95f, 0.85f };
++		if (smax > 0) for (int k = 0; k < 3; k++) scol[k] = tr.sunLight[k] / smax;
++		c.atmos0[0] = col[0]; c.atmos0[1] = col[1]; c.atmos0[2] = col[2]; c.atmos0[3] = Q_max(0.0f, s_grade[14].cv->value);
++		c.atmos1[0] = su; c.atmos1[1] = sv; c.atmos1[2] = vis; c.atmos1[3] = Q_max(0.0f, s_grade[18].cv->value);
++		c.atmos2[0] = scol[0]; c.atmos2[1] = scol[1]; c.atmos2[2] = scol[2]; c.atmos2[3] = Q_max(1e-5f, s_grade[15].cv->value);
++		c.atmos3[0] = s_grade[16].cv->value; c.atmos3[1] = 1.0f;
++		c.sunDir[0] = sun[0]; c.sunDir[1] = sun[1]; c.sunDir[2] = sun[2];
++	}
++
 +	// sun cascades
-+	float shadowDist = Q_max(500.0f, kt_shadowDist->value);
-+	bool shadows = v.world && kt_shadows->integer && World_Active() && c.sunColor[3] > 0 && sd[2] > -0.05f;
++	float shadowDist = bspSun ? Q_max(500.0f, kt_bspSunDist->value) : Q_max(500.0f, kt_shadowDist->value);
++	bool shadows = v.world && kt_shadows->integer && ((World_Active() && c.sunColor[3] > 0) || bspSun) && sd[2] > -0.05f;
 +	if (shadows) {
 +		float n = Q_max(4.0f, v.zNear), f = shadowDist;
 +		float splits[5] = { n };
@@ -24497,6 +24667,51 @@ index 00000000..243c7c11
 +	cl->DrawInstanced(3, 1, 0, 0);
 +}
 +
++// old BSP maps: the static world into one sun cascade (the legacy shadow pipeline, an identity object matrix)
++static void DrawBspShadow(ID3D12GraphicsCommandList* cl, int cascade)
++{
++	if (!R.bspIndexCount || !R.lgShadowPSO) return;
++	cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++	uint32_t rc[2] = { (uint32_t)cascade, 1u };
++	cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 2, rc, 0);
++	cl->SetPipelineState(R.lgShadowPSO);
++	cl->SetGraphicsRootConstantBufferView(RP_EXTRA_CBV, R.bspCB.res->GetGPUVirtualAddress());
++	D3D12_VERTEX_BUFFER_VIEW vbv = { R.bspVB.res->GetGPUVirtualAddress(), R.bspVertCount * (UINT)sizeof(LVert), sizeof(LVert) };
++	D3D12_INDEX_BUFFER_VIEW ibv = { R.bspIB.res->GetGPUVirtualAddress(), R.bspIndexCount * 4, DXGI_FORMAT_R32_UINT };
++	cl->IASetVertexBuffers(0, 1, &vbv);
++	cl->IASetIndexBuffer(&ibv);
++	cl->DrawIndexedInstanced(R.bspIndexCount, 1, 0, 0, 0);
++	cl->SetGraphicsRootConstantBufferView(RP_EXTRA_CBV, R.viewCB);
++}
++
++bool R_BspShadowMesh() { return R.bspIndexCount > 0; }
++
++void R_SetBspShadowMesh(const float* pos, uint32_t numVerts, const uint32_t* idx, uint32_t numIdx)
++{
++	if (R.bspVB.res) DestroyBuffer(R.bspVB);
++	if (R.bspIB.res) DestroyBuffer(R.bspIB);
++	R.bspIndexCount = R.bspVertCount = 0;
++	if (!R.ready || !numVerts || !numIdx) return;
++	std::vector<LVert> v(numVerts);
++	for (uint32_t i = 0; i < numVerts; i++) {
++		memset(&v[i], 0, sizeof(LVert));
++		v[i].pos[0] = pos[i * 3]; v[i].pos[1] = pos[i * 3 + 1]; v[i].pos[2] = pos[i * 3 + 2];
++		v[i].normal[2] = 1.0f;
++	}
++	if (!CreateBuffer(R.bspVB, (uint64_t)numVerts * sizeof(LVert), false, "bsp shadow vb") || !CreateBuffer(R.bspIB, (uint64_t)numIdx * 4, false, "bsp shadow ib"))
++		return;
++	UploadBuffer(R.bspVB, 0, v.data(), (uint64_t)numVerts * sizeof(LVert));
++	UploadBuffer(R.bspIB, 0, idx, (uint64_t)numIdx * 4);
++	if (!R.bspCB.res && CreateBuffer(R.bspCB, 256, false, "bsp shadow cb")) {
++		float cb[64] = {};
++		cb[16] = 1; cb[21] = 1; cb[26] = 1;   // objRow0..2 = identity (after the 4x4 gMvp)
++		UploadBuffer(R.bspCB, 0, cb, 256);
++	}
++	R.bspVertCount = numVerts;
++	R.bspIndexCount = numIdx;
++	Log("KatarnEngine: sun shadow mesh %u triangles\n", numIdx / 3);
++}
++
 +static void ProbeCaptureFace(ID3D12GraphicsCommandList* cl);
 +static void RenderWorldView()
 +{
@@ -24554,6 +24769,7 @@ index 00000000..243c7c11
 +			cl->RSSetScissorRects(1, &src);
 +			if (R.capture && ci < 3) continue;   // probe capture: only the last cascade is used
 +			World_DrawShadow(cl, ci, c.cascadeViewProj[ci], R.cascadeTexel[ci]);
++			if (!hd && c.bspSun[0] > 0) DrawBspShadow(cl, ci);
 +			if (!R.deferred.empty()) DrawDeferredList(cl, true, ci);
 +		}
 +	}
@@ -25046,6 +25262,7 @@ index 00000000..243c7c11
 +		PF.list.push_back(pr);
 +	}
 +	ProbesSync();
++	GradeLoadForMap();   // rend2: maps/<map>.grade
 +	ri.Printf(PRINT_DEVELOPER, "KatarnEngine: %d reflection probes (%s)\n", (int)PF.list.size(), authored ? "misc_cubemap" : "from entities");
 +}
 +
@@ -25204,10 +25421,10 @@ index 00000000..243c7c11
 +} // namespace kt
 diff --git a/code/rd-katarn/katarn/kt_render.h b/code/rd-katarn/katarn/kt_render.h
 new file mode 100644
-index 00000000..8074e542
+index 00000000..fda23474
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_render.h
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,139 @@
 +// KatarnEngine - frame renderer interface (used by the vanilla back end and the GL translation layer)
 +#pragma once
 +#include "kt_device.h"
@@ -25338,16 +25555,21 @@ index 00000000..8074e542
 +void Probes_BeginFrame();                           // RE_BeginFrame: queues this frame's capture views
 +void Probes_NoteScene(const void* refdef);          // RE_RenderScene: the game drew a world view (refdef_t*)
 +
++// sun shadows on old BSP maps (rend2 r_forceSun / r_sunlightMode 1): the static opaque world, drawn into the sun
++// cascades from one buffer (casters behind the camera too); positions only, world space
++void R_SetBspShadowMesh(const float* pos, uint32_t numVerts, const uint32_t* idx, uint32_t numIdx);
++bool R_BspShadowMesh();
++
 +void R_GfxInfo();
 +extern void (*g_logCallback)(const char* msg);
 +
 +} // namespace kt
 diff --git a/code/rd-katarn/katarn/kt_shaders_gen.h b/code/rd-katarn/katarn/kt_shaders_gen.h
 new file mode 100644
-index 00000000..860a21ae
+index 00000000..f6f12829
 --- /dev/null
 +++ b/code/rd-katarn/katarn/kt_shaders_gen.h
-@@ -0,0 +1,2775 @@
+@@ -0,0 +1,2945 @@
 +// generated by shaders/gen.py - do not edit
 +#pragma once
 +
@@ -25413,6 +25635,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -25618,6 +25849,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -25789,12 +26029,17 @@ index 00000000..860a21ae
 +	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
 +	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
 +	if (gflags & 1) clip(a.a - alphaRef);
++	float tnz = 1;
 +	if (normalTex) {
 +		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).xyz * 2 - 1;
 +		tn.z = sqrt(saturate(1 - dot(tn.xy, tn.xy)));
++		tnz = tn.z;
 +		float3 nm = normalize(T * invmax * tn.x - B * invmax * tn.y + n * tn.z);   // uv v runs down: flip the bitangent
 +		if (all(isfinite(nm))) n = nm;
 +	}
++	// rend2 r_genNormalMaps: a normal map made from the texture's brightness; the texture is brightened by 1 / n.z
++	// to make up for the light the bumps take away (rend2 does this to the texture when it is loaded)
++	if (gflags & 32) a.rgb *= min(1.0 / max(tnz, 0.125), 8.0);
 +	float rough = roughness, metal = metallic, matAO = 1;
 +	if (rmoTex) {
 +		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;
@@ -25808,7 +26053,8 @@ index 00000000..860a21ae
 +	}
 +	// models without PBR maps are flagged (metal + 2) so the lighting keeps their reflections soft, like rend2
 +	// (no specular / gloss data: a dull dielectric, not a coated one)
-+	bool authored = rmoTex != 0 || specTex != 0;
++	bool author)KTSRC",
++R"KTSRC(ed = rmoTex != 0 || specTex != 0;
 +	float3 baked = 0;
 +	bool hasBaked = false;
 +	float3 bakedSpec = 0;
@@ -25827,8 +26073,7 @@ index 00000000..860a21ae
 +				float shade = clamp(saturate(dot(n, L)) / n0l, 0.0, 2.0);
 +				baked *= lerp(1.0, shade, dirAmt);
 +				float3 f0s = lerp((rmoTex != 0 || specTex != 0) ? 0.04 : 0.012, a.rgb, saturate(metal));
-+				bakedSpec = min(SpecGGX(n,)KTSRC",
-+R"KTSRC( V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
++				bakedSpec = min(SpecGGX(n, V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
 +			}
 +		}
 +		else if (normalTex) baked *= saturate(dot(n, n0));   // no direction known: the bumps shade against the surface
@@ -25937,6 +26182,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -26162,7 +26416,8 @@ index 00000000..860a21ae
 +		float sd = Tex2D[indices0.w].Load(int3(viewport.xy + suv * viewport.zw, 0)).r;
 +		if (sd <= 0) continue;
 +		float dz = ViewDepth(cp.z / cp.w) - ViewDepth(sd);
-+		if (dz > 0.4 && dz < thick) { occ = max(occ, saturate(1 - (float)i / steps) * 0.5 + 0.5); if (occ > 0.99) break; }
++		if (dz > 0.4 )KTSRC",
++R"KTSRC(&& dz < thick) { occ = max(occ, saturate(1 - (float)i / steps) * 0.5 + 0.5); if (occ > 0.99) break; }
 +	}
 +	return 1 - occ;
 +}
@@ -26179,8 +26434,7 @@ index 00000000..860a21ae
 +	return Tex2DArray[indices1.x].SampleCmpLevelZero(sShadow, float3(suv, c), sc.z - shadowParams.y * 2);
 +}
 +
-+float3 ApplyFog(float3 col, float3 P, float3 V,)KTSRC",
-+R"KTSRC( float dist)
++float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 +{
 +	if (fogParams.x <= 0) return col;
 +	float rayLen = max(dist - fogParams.w, 0);
@@ -26196,7 +26450,7 @@ index 00000000..860a21ae
 +	// smear into streaks running up the whole screen
 +	float3 inscatter = (indices2.x ? SkyRadianceLod(hd, max(SkyMips() - 4, 0)) : SkyRadiance(hd)) * fogColor.rgb;
 +	float sunVis = 1;
-+	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0) {
++	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0 && sunColor.w > 0) {
 +		// volumetric: how much of the view ray inside the shadow range sees the sun (shafts through the fog)
 +		float maxD = min(dist, cascadeSplits[3]);
 +		float jitter = frac(52.9829189 * frac(dot(P.xy * 0.37 + indices2.w * 0.618, float2(0.06711056, 0.00583715))));
@@ -26393,7 +26647,15 @@ index 00000000..860a21ae
 +		}
 +	}
 +	if (baked) {
-+		Lo += g2 * ao;
++		float3 bakedL = g2;
++		if (bspSun.x > 0) {
++			// rend2's forced sun (r_sunlightMode 1): the map's light stays where the sun reaches; in its shadow and on
++			// surfaces turned away from it the light is scaled down (old models get half of that)
++			float sunVis = Shadow(P, N, viewZ) * saturate(dot(N, sunDir.xyz));
++			float keep = plainLegacy ? lerp(bspSun.y, 1.0, 0.5) : bspSun.y;
++			bakedL *= lerp(keep, 1.0, sunVis);
++		}
++		Lo += bakedL * ao;
 +		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
 +		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 +	}
@@ -26474,6 +26736,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -26676,7 +26947,8 @@ index 00000000..860a21ae
 +{
 +	const float3x3 inset = float3x3(0.842479062253094, 0.0784335999999992, 0.0792237451477643,
 +	                                0.0423282422610123, 0.878468636469772, 0.0791661274605434,
-+	                                0.0423756549057051, 0.0784336, 0.879142973793104);
++	                  )KTSRC",
++R"KTSRC(              0.0423756549057051, 0.0784336, 0.879142973793104);
 +	const float3x3 outset = float3x3(1.19687900512017, -0.0980208811401368, -0.0990297440797205,
 +	                                 -0.0528968517574562, 1.15190312990417, -0.0989611768448433,
 +	                                 -0.0529716355144438, -0.0980434501171241, 1.15107367264116);
@@ -26688,21 +26960,87 @@ index 00000000..860a21ae
 +	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
 +}
 +
-+float4 Ton)KTSRC",
-+R"KTSRC(emapPS(FsOut i) : SV_Target0
++// rend2 atmosphere (r_atmos): distance + height haze lit by the sun and screen-space sun shafts, on the HDR scene
++float3 Atmosphere(float3 c, float2 vuv, int2 px)
++{
++	float d = Tex2D[indices0.w].Load(int3(px, 0)).r;
++	bool sky = d <= 0.0;
++	float2 ndc = vuv * float2(2, -2) + float2(-1, 1);
++	float4 wp = mul(invViewProj, float4(ndc, sky ? 1e-6 : d, 1));
++	float3 P = wp.xyz / wp.w;
++	float3 dv = P - camPos.xyz;
++	float dist = length(dv);
++	float3 V = dv / max(dist, 1e-3);
++	float hide = 0;
++	if (atmos0.w > 0 && !sky) {
++		float falloff = max(atmos2.w, 1e-5), rayUp = V.z, travel = max(dist - atmos3.x, 0.0), h0 = 64.0;
++		float amt = abs(rayUp) > 1e-3 ? atmos0.w * exp(-falloff * h0) * (1.0 - exp(-falloff * rayUp * travel)) / (falloff * rayUp)
++			: atmos0.w * exp(-falloff * h0) * travel;
++		hide = clamp(1.0 - exp(-amt), 0.0, 0.85);
++	}
++	float cosSun = dot(V, normalize(sunDir.xyz));
++	float g = 0.6;
++	float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosSun, 1.5) * 0.08;
++	float3 haze = atmos0.rgb + atmos2.rgb * hg;
++	float3 shafts = 0;
++	if (atmos1.w > 0 && atmos1.z > 0) {
++		float2 stepUV = (atmos1.xy - vuv) / 40.0 * 0.9;
++		float2 s = vuv;
++		float decay = 1.0, acc = 0.0;
++		[loop] for (int k = 0; k < 40; k++) {
++			s += stepUV;
++			if (any(s < 0) || any(s > 1)) break;
++			int2 sp = int2(viewport.xy + s * viewport.zw);
++			float sd = Tex2D[indices0.w].Load(int3(sp, 0)).r;
++			float lum = dot(Tex2D[srcSrv].Load(int3(sp, 0)).rgb, float3(0.2126, 0.7152, 0.0722));
++			acc += (sd <= 0.0 ? min(lum, 1.5) : 0.0) * decay;
++			decay *= 0.96;
++		}
++		shafts = atmos2.rgb * acc / 40.0 * atmos1.w * smoothstep(-0.1, 0.6, cosSun) * atmos1.z;
++	}
++	if (sky) shafts *= 0.25;
++	return c * (1 - hide) + haze * hide + shafts;
++}
++
++// rend2 colour grade (r_grade 1): white balance, exposure, contrast around middle grey, saturation, split toning
++float3 GradePre(float3 c)
++{
++	const float3 LUM = float3(0.2126, 0.7152, 0.0722);
++	c *= grade0.x * grade3.rgb;
++	const float grey = 0.18;
++	c = grey * pow(max(c, 1e-6) / grey, grade0.y);
++	float y = dot(c, LUM);
++	c = max(0, lerp(y, c, grade0.z));
++	float t = smoothstep(0.0, 1.0, saturate(log2(max(y, 1e-6) / grey) * 0.25 + 0.5));
++	return c * lerp(grade1.rgb, grade2.rgb, t);
++}
++
++// black crush and vignette (display-referred)
++float3 GradePost(float3 c, float2 vuv)
++{
++	c = max(0, c - grade2.w) / (1.0 - grade2.w);
++	float2 v = vuv - 0.5;
++	return c * (1.0 - grade0.w * smoothstep(0.15, 0.75, dot(v, v) * 2.0));
++}
++
++float4 TonemapPS(FsOut i) : SV_Target0
 +{
 +	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
 +	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
 +	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 +	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
-+	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
++	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb);
++	if (atmos3.y > 0.5) c = Atmosphere(c, i.uv, int2(i.pos.xy));
++	c *= Exposure();
 +	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
++	if (grade3.w > 0.5) c = GradePre(c);
 +	if (skyParams.w > 0.5) {
 +		c = extraParams.y > 0.5 ? AgX(c) : ACESFitted(c * 1.4);
 +		float2 v = i.uv - 0.5;
-+		c *= 1 - dot(v, v) * 0.2;
++		if (grade3.w <= 0.5) c *= 1 - dot(v, v) * 0.2;
 +	}
 +	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
++	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 +	c = LinearToSrgb(c);
 +	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 +	c += (n - 0.5) / 255.0;
@@ -26797,6 +27135,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -26935,6 +27282,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -27111,6 +27467,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -27312,6 +27677,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -27562,6 +27936,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -27764,6 +28147,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -27989,7 +28381,8 @@ index 00000000..860a21ae
 +	float3 em = m.emissive;
 +	if (m.emissiveTex) em *= Tex2D[NonUniformResourceIndex(m.emissiveTex)].Sample(sWrap, i.uv).rgb;
 +	GBufferOut o;
-+	o.albedo = float4(albedo.rgb, ao);
++	o.albedo = fl)KTSRC",
++R"KTSRC(oat4(albedo.rgb, ao);
 +	// foliage (Blender Translucent BSDF): +8 in the metal channel, the lighting pass lets sun through the leaves
 +	o.normal = float4(EncodeNormal(n), clamp(rough, 0.045, 1.0), saturate(metal) + ((m.mflags & 128) ? 8.0 : 0.0));
 +	o.emissive = float4(em, 0);
@@ -28005,8 +28398,7 @@ index 00000000..860a21ae
 +	clip(a - m.alphaCutoff);
 +}
 +
-+// ---- FX pass: water and flowing water, drawn into the lit )KTSRC",
-+R"KTSRC(HDR scene (blend: rgb + dst * a)
++// ---- FX pass: water and flowing water, drawn into the lit HDR scene (blend: rgb + dst * a)
 +float3 FxSky(float3 d, float lod)
 +{
 +	if (indices2.x) {
@@ -28835,10 +29227,10 @@ index 00000000..5313fd9c
 +#pragma pack(pop)
 diff --git a/code/rd-katarn/katarn/shaders/common.hlsli b/code/rd-katarn/katarn/shaders/common.hlsli
 new file mode 100644
-index 00000000..6f15173a
+index 00000000..ea250f2f
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/common.hlsli
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,126 @@
 +// KatarnEngine - shared HLSL (shader model 5.1, bindless descriptor tables)
 +#ifndef KT_COMMON
 +#define KT_COMMON
@@ -28899,6 +29291,15 @@ index 00000000..6f15173a
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -29074,10 +29475,10 @@ index 00000000..02e004f3
 +}
 diff --git a/code/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl b/code/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl
 new file mode 100644
-index 00000000..9a0ebca0
+index 00000000..3d3c2e21
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,204 @@
 +// KatarnEngine - legacy opaque surfaces (Ghoul2 characters, BSP world, MD3 models) written into the GBuffer, so they
 +// get Katarn's sun, shadows, lights, sky ambient and AO like the HD world does.
 +#include "common.hlsli"
@@ -29194,12 +29595,17 @@ index 00000000..9a0ebca0
 +	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
 +	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
 +	if (gflags & 1) clip(a.a - alphaRef);
++	float tnz = 1;
 +	if (normalTex) {
 +		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).xyz * 2 - 1;
 +		tn.z = sqrt(saturate(1 - dot(tn.xy, tn.xy)));
++		tnz = tn.z;
 +		float3 nm = normalize(T * invmax * tn.x - B * invmax * tn.y + n * tn.z);   // uv v runs down: flip the bitangent
 +		if (all(isfinite(nm))) n = nm;
 +	}
++	// rend2 r_genNormalMaps: a normal map made from the texture's brightness; the texture is brightened by 1 / n.z
++	// to make up for the light the bumps take away (rend2 does this to the texture when it is loaded)
++	if (gflags & 32) a.rgb *= min(1.0 / max(tnz, 0.125), 8.0);
 +	float rough = roughness, metal = metallic, matAO = 1;
 +	if (rmoTex) {
 +		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;
@@ -29279,10 +29685,10 @@ index 00000000..9a0ebca0
 +}
 diff --git a/code/rd-katarn/katarn/shaders/lighting.hlsl b/code/rd-katarn/katarn/shaders/lighting.hlsl
 new file mode 100644
-index 00000000..da7f5fbe
+index 00000000..64375633
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/lighting.hlsl
-@@ -0,0 +1,416 @@
+@@ -0,0 +1,424 @@
 +// KatarnEngine - deferred lighting: sun with cascaded shadows, local lights, sky ambient + reflections, height fog
 +#include "common.hlsli"
 +
@@ -29485,7 +29891,7 @@ index 00000000..da7f5fbe
 +	// smear into streaks running up the whole screen
 +	float3 inscatter = (indices2.x ? SkyRadianceLod(hd, max(SkyMips() - 4, 0)) : SkyRadiance(hd)) * fogColor.rgb;
 +	float sunVis = 1;
-+	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0) {
++	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0 && sunColor.w > 0) {
 +		// volumetric: how much of the view ray inside the shadow range sees the sun (shafts through the fog)
 +		float maxD = min(dist, cascadeSplits[3]);
 +		float jitter = frac(52.9829189 * frac(dot(P.xy * 0.37 + indices2.w * 0.618, float2(0.06711056, 0.00583715))));
@@ -29682,7 +30088,15 @@ index 00000000..da7f5fbe
 +		}
 +	}
 +	if (baked) {
-+		Lo += g2 * ao;
++		float3 bakedL = g2;
++		if (bspSun.x > 0) {
++			// rend2's forced sun (r_sunlightMode 1): the map's light stays where the sun reaches; in its shadow and on
++			// surfaces turned away from it the light is scaled down (old models get half of that)
++			float sunVis = Shadow(P, N, viewZ) * saturate(dot(N, sunDir.xyz));
++			float keep = plainLegacy ? lerp(bspSun.y, 1.0, 0.5) : bspSun.y;
++			bakedL *= lerp(keep, 1.0, sunVis);
++		}
++		Lo += bakedL * ao;
 +		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
 +		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 +	}
@@ -29701,10 +30115,10 @@ index 00000000..da7f5fbe
 +}
 diff --git a/code/rd-katarn/katarn/shaders/post.hlsl b/code/rd-katarn/katarn/shaders/post.hlsl
 new file mode 100644
-index 00000000..0d95fb78
+index 00000000..4ec9657a
 --- /dev/null
 +++ b/code/rd-katarn/katarn/shaders/post.hlsl
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,269 @@
 +// KatarnEngine - camera: auto exposure, bloom, filmic tone mapping, FXAA
 +#include "common.hlsli"
 +
@@ -29863,20 +30277,87 @@ index 00000000..0d95fb78
 +	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
 +}
 +
++// rend2 atmosphere (r_atmos): distance + height haze lit by the sun and screen-space sun shafts, on the HDR scene
++float3 Atmosphere(float3 c, float2 vuv, int2 px)
++{
++	float d = Tex2D[indices0.w].Load(int3(px, 0)).r;
++	bool sky = d <= 0.0;
++	float2 ndc = vuv * float2(2, -2) + float2(-1, 1);
++	float4 wp = mul(invViewProj, float4(ndc, sky ? 1e-6 : d, 1));
++	float3 P = wp.xyz / wp.w;
++	float3 dv = P - camPos.xyz;
++	float dist = length(dv);
++	float3 V = dv / max(dist, 1e-3);
++	float hide = 0;
++	if (atmos0.w > 0 && !sky) {
++		float falloff = max(atmos2.w, 1e-5), rayUp = V.z, travel = max(dist - atmos3.x, 0.0), h0 = 64.0;
++		float amt = abs(rayUp) > 1e-3 ? atmos0.w * exp(-falloff * h0) * (1.0 - exp(-falloff * rayUp * travel)) / (falloff * rayUp)
++			: atmos0.w * exp(-falloff * h0) * travel;
++		hide = clamp(1.0 - exp(-amt), 0.0, 0.85);
++	}
++	float cosSun = dot(V, normalize(sunDir.xyz));
++	float g = 0.6;
++	float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosSun, 1.5) * 0.08;
++	float3 haze = atmos0.rgb + atmos2.rgb * hg;
++	float3 shafts = 0;
++	if (atmos1.w > 0 && atmos1.z > 0) {
++		float2 stepUV = (atmos1.xy - vuv) / 40.0 * 0.9;
++		float2 s = vuv;
++		float decay = 1.0, acc = 0.0;
++		[loop] for (int k = 0; k < 40; k++) {
++			s += stepUV;
++			if (any(s < 0) || any(s > 1)) break;
++			int2 sp = int2(viewport.xy + s * viewport.zw);
++			float sd = Tex2D[indices0.w].Load(int3(sp, 0)).r;
++			float lum = dot(Tex2D[srcSrv].Load(int3(sp, 0)).rgb, float3(0.2126, 0.7152, 0.0722));
++			acc += (sd <= 0.0 ? min(lum, 1.5) : 0.0) * decay;
++			decay *= 0.96;
++		}
++		shafts = atmos2.rgb * acc / 40.0 * atmos1.w * smoothstep(-0.1, 0.6, cosSun) * atmos1.z;
++	}
++	if (sky) shafts *= 0.25;
++	return c * (1 - hide) + haze * hide + shafts;
++}
++
++// rend2 colour grade (r_grade 1): white balance, exposure, contrast around middle grey, saturation, split toning
++float3 GradePre(float3 c)
++{
++	const float3 LUM = float3(0.2126, 0.7152, 0.0722);
++	c *= grade0.x * grade3.rgb;
++	const float grey = 0.18;
++	c = grey * pow(max(c, 1e-6) / grey, grade0.y);
++	float y = dot(c, LUM);
++	c = max(0, lerp(y, c, grade0.z));
++	float t = smoothstep(0.0, 1.0, saturate(log2(max(y, 1e-6) / grey) * 0.25 + 0.5));
++	return c * lerp(grade1.rgb, grade2.rgb, t);
++}
++
++// black crush and vignette (display-referred)
++float3 GradePost(float3 c, float2 vuv)
++{
++	c = max(0, c - grade2.w) / (1.0 - grade2.w);
++	float2 v = vuv - 0.5;
++	return c * (1.0 - grade0.w * smoothstep(0.15, 0.75, dot(v, v) * 2.0));
++}
++
 +float4 TonemapPS(FsOut i) : SV_Target0
 +{
 +	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
 +	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
 +	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 +	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
-+	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
++	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb);
++	if (atmos3.y > 0.5) c = Atmosphere(c, i.uv, int2(i.pos.xy));
++	c *= Exposure();
 +	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
++	if (grade3.w > 0.5) c = GradePre(c);
 +	if (skyParams.w > 0.5) {
 +		c = extraParams.y > 0.5 ? AgX(c) : ACESFitted(c * 1.4);
 +		float2 v = i.uv - 0.5;
-+		c *= 1 - dot(v, v) * 0.2;
++		if (grade3.w <= 0.5) c *= 1 - dot(v, v) * 0.2;
 +	}
 +	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
++	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 +	c = LinearToSrgb(c);
 +	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 +	c += (n - 0.5) / 255.0;
@@ -35381,10 +35862,10 @@ index 00000000..250f277f
 +}
 diff --git a/code/rd-katarn/tr_bsp.cpp b/code/rd-katarn/tr_bsp.cpp
 new file mode 100644
-index 00000000..c58f4375
+index 00000000..cbfbf1fc
 --- /dev/null
 +++ b/code/rd-katarn/tr_bsp.cpp
-@@ -0,0 +1,1503 @@
+@@ -0,0 +1,1563 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -35570,6 +36051,63 @@ index 00000000..c58f4375
 +	if (at == std::string::npos) return false;
 +	at = ents.find('"', at + 15);
 +	return at != std::string::npos && at + 1 < ents.size() && ents[at + 1] == '1';
++}
++
++// KatarnEngine: map surfaces that go into the static sun-shadow mesh: opaque, not alpha tested, not deformed
++bool KT_ShadowCaster(const shader_t* sh)
++{
++	if (!sh || sh->defaultShader || sh->sky || sh->sort != SS_OPAQUE || sh->numDeforms || !sh->stages || !sh->stages[0].active) return false;
++	if (sh->surfaceFlags & (SURF_NODRAW | SURF_SKY)) return false;
++	if (sh->contentFlags & CONTENTS_FOG) return false;
++	for (int i = 0; i < MAX_SHADER_STAGES && sh->stages[i].active; i++)
++		if (sh->stages[i].stateBits & GLS_ATEST_BITS) return false;
++	return true;
++}
++
++static void KT_WorldSunAndShadows(world_t& w)
++{
++	if (!w.bmodels || !w.numsurfaces) return;
++	const bmodel_t& bm = w.bmodels[0];
++	// a sky shader that carries the sun
++	for (int i = 0; i < bm.numSurfaces; i++) {
++		const shader_t* sh = bm.firstSurface[i].shader;
++		if (sh && sh->ktHasSun) { VectorCopy(sh->ktSunDir, tr.sunDirection); break; }
++	}
++	std::vector<float> pos;
++	std::vector<uint32_t> idx;
++	for (int i = 0; i < bm.numSurfaces; i++) {
++		const msurface_t& s = bm.firstSurface[i];
++		if (!s.data || !KT_ShadowCaster(s.shader)) continue;
++		const uint32_t base = (uint32_t)(pos.size() / 3);
++		switch (*s.data) {
++		case SF_FACE: {
++			const srfSurfaceFace_t* f = (const srfSurfaceFace_t*)s.data;
++			const int* ind = (const int*)((const byte*)f + f->ofsIndices);
++			for (int v = 0; v < f->numPoints; v++) { pos.push_back(f->points[v][0]); pos.push_back(f->points[v][1]); pos.push_back(f->points[v][2]); }
++			for (int k = 0; k < f->numIndices; k++) idx.push_back(base + (uint32_t)ind[k]);
++			break;
++		}
++		case SF_TRIANGLES: {
++			const srfTriangles_t* t = (const srfTriangles_t*)s.data;
++			for (int v = 0; v < t->numVerts; v++) { pos.push_back(t->verts[v].xyz[0]); pos.push_back(t->verts[v].xyz[1]); pos.push_back(t->verts[v].xyz[2]); }
++			for (int k = 0; k < t->numIndexes; k++) idx.push_back(base + (uint32_t)t->indexes[k]);
++			break;
++		}
++		case SF_GRID: {
++			const srfGridMesh_t* gm = (const srfGridMesh_t*)s.data;
++			for (int v = 0; v < gm->width * gm->height; v++) { pos.push_back(gm->verts[v].xyz[0]); pos.push_back(gm->verts[v].xyz[1]); pos.push_back(gm->verts[v].xyz[2]); }
++			for (int y = 0; y + 1 < gm->height; y++)
++				for (int x = 0; x + 1 < gm->width; x++) {
++					uint32_t a = base + y * gm->width + x, b = a + gm->width;
++					idx.push_back(a); idx.push_back(b); idx.push_back(a + 1);
++					idx.push_back(b); idx.push_back(b + 1); idx.push_back(a + 1);
++				}
++			break;
++		}
++		default: break;
++		}
++	}
++	kt::R_SetBspShadowMesh(pos.data(), (uint32_t)(pos.size() / 3), idx.data(), (uint32_t)idx.size());
 +}
 +
 +static	void R_LoadLightmaps( lump_t *l, const char *psMapName, world_t &worldData )
@@ -36850,6 +37388,9 @@ index 00000000..c58f4375
 +	if (kt::World_Load(base))
 +		ri.Printf(PRINT_ALL, "KatarnEngine: HD world maps/%s.kworld loaded\n", base);
 +		tr.world = &worldData;
++
++		// KatarnEngine: the sun of a cached sky shader (not parsed again), and the sun shadow caster mesh
++		KT_WorldSunAndShadows(worldData);
 +
 +		// KatarnEngine: reflection probe positions from the entities (needs tr.world for the clusters)
 +		{
@@ -42989,10 +43530,10 @@ index 00000000..5062daf5
 +
 diff --git a/code/rd-katarn/tr_image.cpp b/code/rd-katarn/tr_image.cpp
 new file mode 100644
-index 00000000..cb6f6e7b
+index 00000000..81eece33
 --- /dev/null
 +++ b/code/rd-katarn/tr_image.cpp
-@@ -0,0 +1,1495 @@
+@@ -0,0 +1,1540 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -43975,6 +44516,51 @@ index 00000000..cb6f6e7b
 +================
 +*/
 +image_t *R_CreateImage( const char *name, const byte *pic, int width, int height,
++	GLenum format, qboolean mipmap, qboolean allowPicmip, qboolean allowTC, int glWrapClampMode);
++// KatarnEngine: rend2's r_genNormalMaps - a tangent-space normal map from the texture's brightness (Sobel over the
++// luma as height, levelled out; alpha keeps the height), cached as <texture>_kgn
++image_t* KT_GenerateNormalMap(const char* diffuseName, qboolean mip, qboolean picmip, bool clamp)
++{
++	char name[MAX_QPATH];
++	COM_StripExtension(diffuseName, name, sizeof(name));
++	Q_strcat(name, sizeof(name), "_kgn");
++	if (image_t* cached = R_FindImageFile_NoLoad(name, mip, picmip, qfalse, clamp ? GL_CLAMP : GL_REPEAT)) return cached;
++	byte* pic = nullptr;
++	int w = 0, h = 0;
++	R_LoadImage(diffuseName, &pic, &w, &h);
++	if (!pic || w < 4 || h < 4) { if (pic) R_Free(pic); return nullptr; }
++	byte* out = (byte*)R_Malloc(w * h * 4, TAG_TEMP_WORKSPACE, qfalse);
++	int mx = 1;
++	for (int i = 0; i < w * h; i++) {
++		const byte* in = pic + i * 4;
++		int v = (in[0] >> 2) + (in[1] >> 1) + (in[2] >> 2);
++		v = v * v / 255;   // make linear
++		out[i * 4 + 3] = (byte)v;
++		mx = Q_max(mx, v);
++	}
++	for (int i = 0; i < w * h; i++) out[i * 4 + 3] = (byte)(out[i * 4 + 3] + (255 - mx));   // level out heights
++	for (int y = 0; y < h; y++)
++		for (int x = 0; x < w; x++) {
++			int s[9], k = 0;
++			for (int y2 = -1; y2 <= 1; y2++)
++				for (int x2 = -1; x2 <= 1; x2++) {
++					int sy = clamp ? Q_max(0, Q_min(h - 1, y + y2)) : (y + y2 + h) % h;
++					int sx = clamp ? Q_max(0, Q_min(w - 1, x + x2)) : (x + x2 + w) % w;
++					s[k++] = out[(sy * w + sx) * 4 + 3];
++				}
++			float n[3] = { (float)(s[0] - s[2] + 2 * s[3] - 2 * s[5] + s[6] - s[8]), (float)(s[0] + 2 * s[1] + s[2] - s[6] - 2 * s[7] - s[8]), (float)(s[4] * 4) };
++			float l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
++			if (l < 1e-6f) { n[0] = n[1] = 0; n[2] = 1; } else { n[0] /= l; n[1] /= l; n[2] /= l; }
++			byte* o = out + (y * w + x) * 4;
++			for (int c = 0; c < 3; c++) o[c] = (byte)Q_max(0, Q_min(255, (int)((n[c] * 0.5f + 0.5f) * 255.0f + 0.5f)));
++		}
++	R_Free(pic);
++	image_t* img = R_CreateImage(name, out, w, h, GL_RGBA, mip, picmip, qfalse, clamp ? GL_CLAMP : GL_REPEAT);
++	R_Free(out);
++	return img;
++}
++
++image_t *R_CreateImage( const char *name, const byte *pic, int width, int height,
 +					   GLenum format, qboolean mipmap, qboolean allowPicmip, qboolean allowTC, int glWrapClampMode)
 +{
 +	image_t		*image;
@@ -44490,10 +45076,10 @@ index 00000000..cb6f6e7b
 +
 diff --git a/code/rd-katarn/tr_init.cpp b/code/rd-katarn/tr_init.cpp
 new file mode 100644
-index 00000000..128ba43f
+index 00000000..f224e67d
 --- /dev/null
 +++ b/code/rd-katarn/tr_init.cpp
-@@ -0,0 +1,1941 @@
+@@ -0,0 +1,1943 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -44588,6 +45174,7 @@ index 00000000..128ba43f
 +cvar_t	*r_ext_compiled_vertex_array;
 +cvar_t	*r_ext_texture_env_add;
 +cvar_t	*r_ext_texture_filter_anisotropic;
++cvar_t	*r_genNormalMaps;   // KatarnEngine: rend2's normal maps made from textures that have none
 +
 +cvar_t	*r_DynamicGlow;
 +cvar_t	*r_DynamicGlowPasses;
@@ -45769,6 +46356,7 @@ index 00000000..128ba43f
 +	r_ext_compiled_vertex_array = ri.Cvar_Get( "r_ext_compiled_vertex_array", "1", CVAR_ARCHIVE_ND | CVAR_LATCH);
 +	r_ext_texture_env_add = ri.Cvar_Get( "r_ext_texture_env_add", "1", CVAR_ARCHIVE_ND | CVAR_LATCH);
 +	r_ext_texture_filter_anisotropic = ri.Cvar_Get( "r_ext_texture_filter_anisotropic", "16", CVAR_ARCHIVE_ND );
++	r_genNormalMaps = ri.Cvar_Get( "r_genNormalMaps", "1", CVAR_ARCHIVE | CVAR_LATCH );
 +
 +	r_DynamicGlow = ri.Cvar_Get( "r_DynamicGlow", "0", CVAR_ARCHIVE_ND );
 +	r_DynamicGlowPasses = ri.Cvar_Get( "r_DynamicGlowPasses", "5", CVAR_ARCHIVE_ND );
@@ -46978,10 +47566,10 @@ index 00000000..f9285afd
 +}
 diff --git a/code/rd-katarn/tr_local.h b/code/rd-katarn/tr_local.h
 new file mode 100644
-index 00000000..bb0f898c
+index 00000000..bca3c08c
 --- /dev/null
 +++ b/code/rd-katarn/tr_local.h
-@@ -0,0 +1,1852 @@
+@@ -0,0 +1,1855 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -47372,6 +47960,7 @@ index 00000000..bb0f898c
 +
 +	// KatarnEngine: PBR maps from rend2-style stages (normalMap / rmoMap / ormMap / specularMap)
 +	image_t* ktNormal;
++	bool		ktNormalGen;    // ktNormal was generated from the texture (rend2 r_genNormalMaps)
 +	image_t* ktRmo;
 +	int				ktRmoOrder;     // 0 r=rough g=metal b=ao (rmo), 1 r=ao g=rough b=metal (orm)
 +	image_t* ktSpec;
@@ -47445,6 +48034,8 @@ index 00000000..bb0f898c
 +
 +	skyParms_t	*sky;
 +	fogParms_t	*fogParms;
++	bool		ktHasSun;               // KatarnEngine: this (sky) shader set the sun (q3map_sun / q3map_sunExt / q3gl2_sun)
++	float		ktSunDir[3];
 +
 +	float		portalRange;			// distance to fog out at
 +
@@ -53271,10 +53862,10 @@ index 00000000..275369b6
 +}
 diff --git a/code/rd-katarn/tr_shade.cpp b/code/rd-katarn/tr_shade.cpp
 new file mode 100644
-index 00000000..053ef285
+index 00000000..0bb0b79a
 --- /dev/null
 +++ b/code/rd-katarn/tr_shade.cpp
-@@ -0,0 +1,2484 @@
+@@ -0,0 +1,2487 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -53308,6 +53899,7 @@ index 00000000..053ef285
 +#include <string>
 +#include "katarn/kt_render.h"
 +extern int kt_worldDeluxe;   // tr_bsp.cpp
++bool KT_ShadowCaster(const shader_t* sh);   // tr_bsp.cpp
 +
 +/*
 +
@@ -55235,6 +55827,7 @@ index 00000000..053ef285
 +	d.skin = st->ktSkin;
 +	d.specTex = st->ktSpec ? st->ktSpec->texnum : 0;
 +	d.parallax = st->ktParallax;
++	if (st->ktNormal && st->ktNormalGen) flags |= 32;
 +	d.flags = flags;
 +	d.roughness = world ? 0.7f : 0.78f;   // characters: cloth / skin (0.55 read as plastic)
 +	d.metallic = 0.0f;
@@ -55244,7 +55837,8 @@ index 00000000..053ef285
 +	if (sh->cullType == CT_TWO_SIDED) d.cull = 0;
 +	else if (sh->cullType == CT_BACK_SIDED) d.cull = backEnd.viewParms.isMirror ? 1 : 2;
 +	else d.cull = backEnd.viewParms.isMirror ? 2 : 1;
-+	d.castShadow = world || !(ent->e.renderfx & RF_NOSHADOW);
++	// map surfaces in the static sun-shadow mesh are drawn from there (casters off screen too)
++	d.castShadow = world ? !(bspMode && kt::R_BspShadowMesh() && KT_ShadowCaster(sh)) : !(ent->e.renderfx & RF_NOSHADOW);
 +	if (bspMode && !world) {
 +		// light grid (as rend2 / the old renderer light models): ambient + one directed light, in world space
 +		for (int k = 0; k < 3; k++) {
@@ -57149,10 +57743,10 @@ index 00000000..5df2dbef
 +}
 diff --git a/code/rd-katarn/tr_shader.cpp b/code/rd-katarn/tr_shader.cpp
 new file mode 100644
-index 00000000..429ff8ac
+index 00000000..51dbf2d0
 --- /dev/null
 +++ b/code/rd-katarn/tr_shader.cpp
-@@ -0,0 +1,4008 @@
+@@ -0,0 +1,4019 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -59423,7 +60017,7 @@ index 00000000..429ff8ac
 +			ParseMaterial( text );
 +		}
 +		// sun parms
-+		else if ( !Q_stricmp( token, "sun" ) || !Q_stricmp( token, "q3map_sun" ) || !Q_stricmp( token, "q3map_sunExt" ) )
++		else if ( !Q_stricmp( token, "sun" ) || !Q_stricmp( token, "q3map_sun" ) || !Q_stricmp( token, "q3map_sunExt" ) || !Q_stricmp( token, "q3gl2_sun" ) )
 +		{
 +			token = COM_ParseExt( text, qfalse );
 +			tr.sunLight[0] = atof( token );
@@ -59449,6 +60043,9 @@ index 00000000..429ff8ac
 +			tr.sunDirection[0] = cos( a ) * cos( b );
 +			tr.sunDirection[1] = sin( a ) * cos( b );
 +			tr.sunDirection[2] = sin( b );
++			// kept with the shader too: a cached sky shader is not parsed again on the next map
++			shader.ktHasSun = true;
++			VectorCopy( tr.sunDirection, shader.ktSunDir );
 +
 +			SkipRestOfLine( text );
 +			continue;
@@ -60171,6 +60768,9 @@ index 00000000..429ff8ac
 +*/
 +// KatarnEngine: rend2's automatic material maps. A lit model stage with no normal / material maps of its own looks
 +// for <diffuse>_nh / _n next to its texture, then <diffuse>_rmo / _orm / _specGloss (as rend2 does).
++image_t* KT_GenerateNormalMap( const char* diffuseName, qboolean mip, qboolean picmip, bool clamp );   // tr_image.cpp
++extern cvar_t* r_genNormalMaps;
++
 +static void KT_AutoMaterialMaps( void )
 +{
 +	if ( shader.sky ) return;
@@ -60199,6 +60799,11 @@ index 00000000..429ff8ac
 +			st->ktNormal = R_FindImageFile( name, mip, pic, qfalse, GL_REPEAT );
 +			if ( st->ktNormal && !st->ktParallax ) st->ktParallax = 0.05f;   // normal + height
 +			if ( !st->ktNormal ) { Com_sprintf( name, sizeof( name ), "%s_n", base ); st->ktNormal = R_FindImageFile( name, mip, pic, qfalse, GL_REPEAT ); }
++			// none: made from the texture, like rend2's r_genNormalMaps
++			if ( !st->ktNormal && r_genNormalMaps && r_genNormalMaps->integer ) {
++				st->ktNormal = KT_GenerateNormalMap( diffuse->imgName, mip, pic, diffuse->wrapClampMode != GL_REPEAT );
++				st->ktNormalGen = st->ktNormal != nullptr;
++			}
 +		}
 +		if ( !st->ktRmo && !st->ktSpec ) {
 +			Com_sprintf( name, sizeof( name ), "%s_rmo", base );
@@ -92466,10 +93071,10 @@ index 00000000..296ed7a4
 +void APIENTRY ktgl_UnlockArraysEXT(void) {}
 diff --git a/codemp/rd-katarn/katarn/kt_render.cpp b/codemp/rd-katarn/katarn/kt_render.cpp
 new file mode 100644
-index 00000000..243c7c11
+index 00000000..7449291d
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/kt_render.cpp
-@@ -0,0 +1,1653 @@
+@@ -0,0 +1,1870 @@
 +// KatarnEngine - the frame.
 +//
 +// Per 3D world view:
@@ -92513,10 +93118,114 @@ index 00000000..243c7c11
 +static cvar_t* kt_fogScale = nullptr;
 +static cvar_t* kt_dynGlow, * kt_contactShadows, * kt_lightShadows;
 +static cvar_t* kt_probes = nullptr, * kt_probeScale = nullptr, * kt_parallax = nullptr, * kt_wind = nullptr;
++static cvar_t* kt_bspSun = nullptr, * kt_bspSunAmbient = nullptr, * kt_bspSunDist = nullptr;
 +static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
++
++// ------------------------------------------------------------------------------------------------ rend2 colour grade
++// rend2's tr_grade: r_grade* cvars, maps/<map>.grade files ("<cvar> <value>" lines, "preset <name>"), the "grade"
++// command (save / load / reset / preset). Same names and files as rend2, so a map's grade carries over.
++struct GradeVar { const char* name; const char* def; cvar_t* cv; };
++static GradeVar s_grade[] = {
++	{ "r_grade", "0", nullptr }, { "r_gradeCurve", "1", nullptr }, { "r_gradeExposure", "0", nullptr }, { "r_gradeContrast", "1.12", nullptr },
++	{ "r_gradeSaturation", "0.92", nullptr }, { "r_gradeTemperature", "0", nullptr }, { "r_gradeTint", "0", nullptr },
++	{ "r_gradeShadows", "1 1 1", nullptr }, { "r_gradeHighlights", "1 1 1", nullptr }, { "r_gradeBlack", "0", nullptr },
++	{ "r_gradeVignette", "0.25", nullptr },
++	{ "r_ssrStrength", "1", nullptr }, { "r_ssrGloss", "1", nullptr }, { "r_ssrRough", "1", nullptr },
++	{ "r_atmosDensity", "0", nullptr }, { "r_atmosFalloff", "0.0012", nullptr }, { "r_atmosStart", "256", nullptr },
++	{ "r_atmosColor", "0.55 0.6 0.7", nullptr }, { "r_atmosShafts", "0.6", nullptr },
++};
++static const int kNumGrade = (int)(sizeof(s_grade) / sizeof(s_grade[0]));
++static cvar_t* r_atmosCv = nullptr;
++struct GradePreset { const char* name; const char* v[10]; };
++static const GradePreset s_gradePresets[] = {
++	{ "default",  { "1", "0",    "1.12", "0.92", "0",     "0",     "1 1 1",          "1 1 1",          "0",    "0.25" } },
++	{ "interior", { "1", "-0.1", "1.22", "0.78", "-0.25", "0",     "0.92 0.97 1.08", "1.02 1.01 0.98", "0.02", "0.30" } },
++	{ "sunset",   { "2", "0.1",  "1.15", "1.05", "0.55",  "0.05",  "0.95 0.92 1.05", "1.10 1.00 0.86", "0.01", "0.30" } },
++	{ "daylight", { "2", "0",    "1.10", "0.95", "0.15",  "-0.05", "0.96 1.00 1.04", "1.04 1.02 0.96", "0.01", "0.20" } },
++	{ "space",    { "1", "0",    "1.25", "0.90", "0.20",  "0",     "0.90 0.95 1.10", "1.08 1.03 0.92", "0.03", "0.35" } },
++	{ "noir",     { "1", "0",    "1.30", "0.15", "0",     "0",     "1 1 1",          "1 1 1",          "0.03", "0.45" } },
++};
++
++static void GradeVec3(const char* s, float* o)
++{
++	o[0] = o[1] = o[2] = 1.0f;
++	if (sscanf(s, "%f %f %f", &o[0], &o[1], &o[2]) == 1) o[1] = o[2] = o[0];
++}
++
++static void GradeReset() { for (auto& g : s_grade) ri.Cvar_Set(g.name, g.def); }
++static void GradePreset(const GradePreset& p) { for (int i = 0; i < 10; i++) ri.Cvar_Set(s_grade[i + 1].name, p.v[i]); }
++
++static void GradePath(char* out, int size)
++{
++	char base[MAX_QPATH];
++	Q_strncpyz(base, COM_SkipPath(tr.world ? tr.world->name : (char*)"nomap"), sizeof(base));
++	COM_StripExtension(base, base, sizeof(base));
++	Com_sprintf(out, size, "maps/%s.grade", base);
++}
++
++static void GradeLoadForMap()
++{
++	if (!s_grade[0].cv) return;
++	char path[MAX_QPATH];
++	GradePath(path, sizeof(path));
++	GradeReset();
++	char* buf = nullptr;
++	if (ri.FS_ReadFile(path, (void**)&buf) <= 0 || !buf) return;
++	const char* p = buf;
++	int set = 0;
++	while (*p) {
++		char line[256]; int n = 0;
++		while (*p && *p != '\n' && n < 255) line[n++] = *p++;
++		line[n] = 0;
++		if (*p) p++;
++		if (char* cm = strstr(line, "//")) *cm = 0;
++		char key[64], val[192];
++		if (sscanf(line, " %63s %191[^\r\n]", key, val) != 2) continue;
++		char* v = val; while (*v == ' ' || *v == '"') v++;
++		for (char* e = v + strlen(v) - 1; e >= v && (*e == ' ' || *e == '"'); e--) *e = 0;
++		if (!Q_stricmp(key, "preset")) { for (const auto& pr : s_gradePresets) if (!Q_stricmp(v, pr.name)) { GradePreset(pr); set++; } continue; }
++		for (auto& g : s_grade) if (!Q_stricmp(key, g.name)) { ri.Cvar_Set(g.name, v); set++; }
++	}
++	ri.FS_FreeFile(buf);
++	ri.Printf(PRINT_ALL, "grade: loaded %s (%d settings)\n", path, set);
++}
++
++static void Grade_f()
++{
++	const char* cmd = ri.Cmd_Argc() > 1 ? ri.Cmd_Argv(1) : "";
++	char path[MAX_QPATH];
++	GradePath(path, sizeof(path));
++	if (!Q_stricmp(cmd, "save")) {
++		char out[2048]; int len = 0;
++		len += Com_sprintf(out + len, sizeof(out) - len, "// colour grade for %s (written by \"grade save\")\n", path);
++		for (int i = 1; i < kNumGrade; i++) len += Com_sprintf(out + len, sizeof(out) - len, "%s \"%s\"\n", s_grade[i].name, s_grade[i].cv->string);
++		ri.FS_WriteFile(path, out, len);
++		ri.Printf(PRINT_ALL, "grade: saved %s\n", path);
++	}
++	else if (!Q_stricmp(cmd, "reset")) { GradeReset(); ri.Printf(PRINT_ALL, "grade: defaults restored\n"); }
++	else if (!Q_stricmp(cmd, "load")) GradeLoadForMap();
++	else if (!Q_stricmp(cmd, "preset")) {
++		const char* n = ri.Cmd_Argc() > 2 ? ri.Cmd_Argv(2) : "";
++		for (const auto& pr : s_gradePresets) if (!Q_stricmp(n, pr.name)) { GradePreset(pr); ri.Printf(PRINT_ALL, "grade: preset %s\n", pr.name); return; }
++		ri.Printf(PRINT_ALL, "grade preset <name>:");
++		for (const auto& pr : s_gradePresets) ri.Printf(PRINT_ALL, " %s", pr.name);
++		ri.Printf(PRINT_ALL, "\n");
++	}
++	else {
++		ri.Printf(PRINT_ALL, "grade save | load | reset | preset <name>   (map file: %s)\n", path);
++		for (auto& g : s_grade) ri.Printf(PRINT_ALL, "  %-20s %s\n", g.name, g.cv->string);
++	}
++}
 +
 +static void RegisterCvars()
 +{
++	for (auto& gv : s_grade) gv.cv = KtCvar(gv.name, gv.def, CVAR_ARCHIVE);
++	r_atmosCv = KtCvar("r_atmos", "1", CVAR_ARCHIVE);
++#ifdef KT_MP
++	ri.Cmd_AddCommand("grade", Grade_f, "colour grade: save | load | reset | preset <name>");
++#else
++	ri.Cmd_AddCommand("grade", Grade_f);
++#endif
 +	kt_debug = KtCvar("kt_debug", "0", CVAR_LATCH);
 +	kt_ssao = KtCvar("kt_ssao", "1", CVAR_ARCHIVE);
 +	kt_shadows = KtCvar("kt_shadows", "1", CVAR_ARCHIVE);
@@ -92550,7 +93259,12 @@ index 00000000..243c7c11
 +	kt_probes = KtCvar("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
 +	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 +	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
-+	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)   // 1: Katarn draws its own procedural blades instead of the game's
++	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)
++	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
++	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
++	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
++	kt_bspSunAmbient = KtCvar("kt_bspSunAmbient", "0.5", CVAR_ARCHIVE);
++	kt_bspSunDist = KtCvar("kt_bspSunDist", "3072", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
 +
 +	// settings saved by older builds (tuning experiments) are put back to the current defaults once
 +	cvar_t* ver = KtCvar("kt_configVersion", "0", CVAR_ARCHIVE);
@@ -92613,6 +93327,10 @@ index 00000000..243c7c11
 +	float extraParams[4];      // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 +	float viewProjNoJitter[16];   // this frame's view-projection without the TAA jitter
 +	uint32_t probeParams[4];      // x reflection probe buffer, y probe count, z strength (float)
++	float bspSun[4];              // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float grade0[4], grade1[4], grade2[4], grade3[4];   // rend2 colour grade (r_grade*), grade3.w 1 = on
++	float atmos0[4], atmos1[4], atmos2[4];             // rend2 atmosphere (r_atmos*): haze rgb + density; sun uv, visible, shafts; sun rgb + falloff
++	float atmos3[4];                                    // x haze start, y 1 = on
 +};
 +
 +struct LVert { float pos[3]; float normal[3]; float uv[2]; float lmuv[2]; uint32_t color; };
@@ -92674,6 +93392,9 @@ index 00000000..243c7c11
 +	bool capture = false;            // this view is a probe capture
 +	int capProbe = 0, capFace = 0;
 +	float capSavedVP[16] = {};
++	// old BSP maps: static sun-shadow caster mesh
++	Buffer bspVB, bspIB, bspCB;
++	uint32_t bspIndexCount = 0, bspVertCount = 0;
 +} R;
 +static constexpr uint32_t kProbeSize = 128, kProbeMips = 8, kMaxProbes = 64;
 +
@@ -92992,12 +93713,16 @@ index 00000000..243c7c11
 +void R_Shutdown()
 +{
 +	if (!g.dev) return;
++	ri.Cmd_RemoveCommand("grade");
 +	if (R.cl) { SubmitList(R.cl); R.cl = nullptr; }
 +	WaitIdle();
 +	World_Shutdown();
 +	GL_ShutdownTextures();
 +	DestroyTargets();
 +	ProbesDestroy();
++	if (R.bspVB.res) DestroyBuffer(R.bspVB);
++	if (R.bspIB.res) DestroyBuffer(R.bspIB);
++	if (R.bspCB.res) DestroyBuffer(R.bspCB);
 +	DestroyBuffer(R.exposure);
 +	DestroyBuffer(R.sh);
 +	for (auto& kv : R.psos) if (kv.second) kv.second->Release();
@@ -93245,9 +93970,59 @@ index 00000000..243c7c11
 +	}
 +	if (!World_Active()) c.postParams[2] = 1.0f;   // legacy maps: fixed exposure (their content is display-referred)
 +
++	// old BSP maps: rend2's forced sun - the sky shader's q3map_sun direction (or rend2's default), shadows only
++	bool bspSun = v.world && !World_Active() && kt_bspSun->integer && kt_shadows->integer && R.bspIndexCount && tr.world;
++	if (bspSun) {
++		sd[0] = tr.sunDirection[0]; sd[1] = tr.sunDirection[1]; sd[2] = tr.sunDirection[2];
++		Norm3(sd);
++		if (sd[2] < 0.05f) bspSun = false;
++		c.sunDir[0] = sd[0]; c.sunDir[1] = sd[1]; c.sunDir[2] = sd[2];
++		c.bspSun[0] = bspSun ? 1.0f : 0.0f;
++		c.bspSun[1] = Q_max(0.0f, Q_min(1.0f, kt_bspSunAmbient->value));
++	}
++
++	// rend2 colour grade (any map) and atmosphere (old BSP maps: haze + screen-space sun shafts)
++	if (s_grade[0].cv && s_grade[0].cv->integer && !R.capture) {
++		float sh[3], hi[3];
++		GradeVec3(s_grade[7].cv->string, sh); GradeVec3(s_grade[8].cv->string, hi);
++		c.grade0[0] = powf(2.0f, s_grade[2].cv->value); c.grade0[1] = s_grade[3].cv->value; c.grade0[2] = s_grade[4].cv->value;
++		c.grade0[3] = Q_max(0.0f, Q_min(1.0f, s_grade[10].cv->value));
++		c.grade1[0] = sh[0]; c.grade1[1] = sh[1]; c.grade1[2] = sh[2]; c.grade1[3] = (float)s_grade[1].cv->integer;
++		c.grade2[0] = hi[0]; c.grade2[1] = hi[1]; c.grade2[2] = hi[2]; c.grade2[3] = Q_max(0.0f, Q_min(0.2f, s_grade[9].cv->value));
++		float t = Q_max(-1.0f, Q_min(1.0f, s_grade[5].cv->value)), m = Q_max(-1.0f, Q_min(1.0f, s_grade[6].cv->value));
++		c.grade3[0] = 1.0f + 0.18f * t + 0.06f * m; c.grade3[1] = 1.0f - 0.12f * m; c.grade3[2] = 1.0f - 0.18f * t + 0.06f * m;
++		float lum = 0.2126f * c.grade3[0] + 0.7152f * c.grade3[1] + 0.0722f * c.grade3[2];
++		c.grade3[0] /= lum; c.grade3[1] /= lum; c.grade3[2] /= lum;
++		c.grade3[3] = 1.0f;
++	}
++	if (v.world && !World_Active() && !R.capture && !v.skyPortal && r_atmosCv && r_atmosCv->integer && tr.world
++		&& (s_grade[14].cv->value > 0 || s_grade[18].cv->value > 0)) {
++		float col[3] = { 0.55f, 0.6f, 0.7f };
++		sscanf(s_grade[17].cv->string, "%f %f %f", &col[0], &col[1], &col[2]);
++		float sun[3] = { tr.sunDirection[0], tr.sunDirection[1], tr.sunDirection[2] };
++		Norm3(sun);
++		// the sun on screen
++		float sunPt[4] = { v.origin[0] + sun[0] * 1e5f, v.origin[1] + sun[1] * 1e5f, v.origin[2] + sun[2] * 1e5f, 1 }, cp[4];
++		for (int r = 0; r < 4; r++) cp[r] = R.viewProj[r] * sunPt[0] + R.viewProj[4 + r] * sunPt[1] + R.viewProj[8 + r] * sunPt[2] + R.viewProj[12 + r];
++		float vis = 0, su = 0.5f, sv = 0.5f;
++		if (cp[3] > 0) {
++			su = cp[0] / cp[3] * 0.5f + 0.5f; sv = -cp[1] / cp[3] * 0.5f + 0.5f;
++			float off = Q_max(fabsf(su - 0.5f), fabsf(sv - 0.5f));
++			vis = Q_max(0.0f, Q_min(1.0f, (1.2f - off) / 0.5f));
++		}
++		float smax = Q_max(tr.sunLight[0], Q_max(tr.sunLight[1], tr.sunLight[2]));
++		float scol[3] = { 1, 0.95f, 0.85f };
++		if (smax > 0) for (int k = 0; k < 3; k++) scol[k] = tr.sunLight[k] / smax;
++		c.atmos0[0] = col[0]; c.atmos0[1] = col[1]; c.atmos0[2] = col[2]; c.atmos0[3] = Q_max(0.0f, s_grade[14].cv->value);
++		c.atmos1[0] = su; c.atmos1[1] = sv; c.atmos1[2] = vis; c.atmos1[3] = Q_max(0.0f, s_grade[18].cv->value);
++		c.atmos2[0] = scol[0]; c.atmos2[1] = scol[1]; c.atmos2[2] = scol[2]; c.atmos2[3] = Q_max(1e-5f, s_grade[15].cv->value);
++		c.atmos3[0] = s_grade[16].cv->value; c.atmos3[1] = 1.0f;
++		c.sunDir[0] = sun[0]; c.sunDir[1] = sun[1]; c.sunDir[2] = sun[2];
++	}
++
 +	// sun cascades
-+	float shadowDist = Q_max(500.0f, kt_shadowDist->value);
-+	bool shadows = v.world && kt_shadows->integer && World_Active() && c.sunColor[3] > 0 && sd[2] > -0.05f;
++	float shadowDist = bspSun ? Q_max(500.0f, kt_bspSunDist->value) : Q_max(500.0f, kt_shadowDist->value);
++	bool shadows = v.world && kt_shadows->integer && ((World_Active() && c.sunColor[3] > 0) || bspSun) && sd[2] > -0.05f;
 +	if (shadows) {
 +		float n = Q_max(4.0f, v.zNear), f = shadowDist;
 +		float splits[5] = { n };
@@ -93418,6 +94193,51 @@ index 00000000..243c7c11
 +	cl->DrawInstanced(3, 1, 0, 0);
 +}
 +
++// old BSP maps: the static world into one sun cascade (the legacy shadow pipeline, an identity object matrix)
++static void DrawBspShadow(ID3D12GraphicsCommandList* cl, int cascade)
++{
++	if (!R.bspIndexCount || !R.lgShadowPSO) return;
++	cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++	uint32_t rc[2] = { (uint32_t)cascade, 1u };
++	cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 2, rc, 0);
++	cl->SetPipelineState(R.lgShadowPSO);
++	cl->SetGraphicsRootConstantBufferView(RP_EXTRA_CBV, R.bspCB.res->GetGPUVirtualAddress());
++	D3D12_VERTEX_BUFFER_VIEW vbv = { R.bspVB.res->GetGPUVirtualAddress(), R.bspVertCount * (UINT)sizeof(LVert), sizeof(LVert) };
++	D3D12_INDEX_BUFFER_VIEW ibv = { R.bspIB.res->GetGPUVirtualAddress(), R.bspIndexCount * 4, DXGI_FORMAT_R32_UINT };
++	cl->IASetVertexBuffers(0, 1, &vbv);
++	cl->IASetIndexBuffer(&ibv);
++	cl->DrawIndexedInstanced(R.bspIndexCount, 1, 0, 0, 0);
++	cl->SetGraphicsRootConstantBufferView(RP_EXTRA_CBV, R.viewCB);
++}
++
++bool R_BspShadowMesh() { return R.bspIndexCount > 0; }
++
++void R_SetBspShadowMesh(const float* pos, uint32_t numVerts, const uint32_t* idx, uint32_t numIdx)
++{
++	if (R.bspVB.res) DestroyBuffer(R.bspVB);
++	if (R.bspIB.res) DestroyBuffer(R.bspIB);
++	R.bspIndexCount = R.bspVertCount = 0;
++	if (!R.ready || !numVerts || !numIdx) return;
++	std::vector<LVert> v(numVerts);
++	for (uint32_t i = 0; i < numVerts; i++) {
++		memset(&v[i], 0, sizeof(LVert));
++		v[i].pos[0] = pos[i * 3]; v[i].pos[1] = pos[i * 3 + 1]; v[i].pos[2] = pos[i * 3 + 2];
++		v[i].normal[2] = 1.0f;
++	}
++	if (!CreateBuffer(R.bspVB, (uint64_t)numVerts * sizeof(LVert), false, "bsp shadow vb") || !CreateBuffer(R.bspIB, (uint64_t)numIdx * 4, false, "bsp shadow ib"))
++		return;
++	UploadBuffer(R.bspVB, 0, v.data(), (uint64_t)numVerts * sizeof(LVert));
++	UploadBuffer(R.bspIB, 0, idx, (uint64_t)numIdx * 4);
++	if (!R.bspCB.res && CreateBuffer(R.bspCB, 256, false, "bsp shadow cb")) {
++		float cb[64] = {};
++		cb[16] = 1; cb[21] = 1; cb[26] = 1;   // objRow0..2 = identity (after the 4x4 gMvp)
++		UploadBuffer(R.bspCB, 0, cb, 256);
++	}
++	R.bspVertCount = numVerts;
++	R.bspIndexCount = numIdx;
++	Log("KatarnEngine: sun shadow mesh %u triangles\n", numIdx / 3);
++}
++
 +static void ProbeCaptureFace(ID3D12GraphicsCommandList* cl);
 +static void RenderWorldView()
 +{
@@ -93475,6 +94295,7 @@ index 00000000..243c7c11
 +			cl->RSSetScissorRects(1, &src);
 +			if (R.capture && ci < 3) continue;   // probe capture: only the last cascade is used
 +			World_DrawShadow(cl, ci, c.cascadeViewProj[ci], R.cascadeTexel[ci]);
++			if (!hd && c.bspSun[0] > 0) DrawBspShadow(cl, ci);
 +			if (!R.deferred.empty()) DrawDeferredList(cl, true, ci);
 +		}
 +	}
@@ -93967,6 +94788,7 @@ index 00000000..243c7c11
 +		PF.list.push_back(pr);
 +	}
 +	ProbesSync();
++	GradeLoadForMap();   // rend2: maps/<map>.grade
 +	ri.Printf(PRINT_DEVELOPER, "KatarnEngine: %d reflection probes (%s)\n", (int)PF.list.size(), authored ? "misc_cubemap" : "from entities");
 +}
 +
@@ -94125,10 +94947,10 @@ index 00000000..243c7c11
 +} // namespace kt
 diff --git a/codemp/rd-katarn/katarn/kt_render.h b/codemp/rd-katarn/katarn/kt_render.h
 new file mode 100644
-index 00000000..8074e542
+index 00000000..fda23474
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/kt_render.h
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,139 @@
 +// KatarnEngine - frame renderer interface (used by the vanilla back end and the GL translation layer)
 +#pragma once
 +#include "kt_device.h"
@@ -94259,16 +95081,21 @@ index 00000000..8074e542
 +void Probes_BeginFrame();                           // RE_BeginFrame: queues this frame's capture views
 +void Probes_NoteScene(const void* refdef);          // RE_RenderScene: the game drew a world view (refdef_t*)
 +
++// sun shadows on old BSP maps (rend2 r_forceSun / r_sunlightMode 1): the static opaque world, drawn into the sun
++// cascades from one buffer (casters behind the camera too); positions only, world space
++void R_SetBspShadowMesh(const float* pos, uint32_t numVerts, const uint32_t* idx, uint32_t numIdx);
++bool R_BspShadowMesh();
++
 +void R_GfxInfo();
 +extern void (*g_logCallback)(const char* msg);
 +
 +} // namespace kt
 diff --git a/codemp/rd-katarn/katarn/kt_shaders_gen.h b/codemp/rd-katarn/katarn/kt_shaders_gen.h
 new file mode 100644
-index 00000000..860a21ae
+index 00000000..f6f12829
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/kt_shaders_gen.h
-@@ -0,0 +1,2775 @@
+@@ -0,0 +1,2945 @@
 +// generated by shaders/gen.py - do not edit
 +#pragma once
 +
@@ -94334,6 +95161,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -94539,6 +95375,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -94710,12 +95555,17 @@ index 00000000..860a21ae
 +	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
 +	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
 +	if (gflags & 1) clip(a.a - alphaRef);
++	float tnz = 1;
 +	if (normalTex) {
 +		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).xyz * 2 - 1;
 +		tn.z = sqrt(saturate(1 - dot(tn.xy, tn.xy)));
++		tnz = tn.z;
 +		float3 nm = normalize(T * invmax * tn.x - B * invmax * tn.y + n * tn.z);   // uv v runs down: flip the bitangent
 +		if (all(isfinite(nm))) n = nm;
 +	}
++	// rend2 r_genNormalMaps: a normal map made from the texture's brightness; the texture is brightened by 1 / n.z
++	// to make up for the light the bumps take away (rend2 does this to the texture when it is loaded)
++	if (gflags & 32) a.rgb *= min(1.0 / max(tnz, 0.125), 8.0);
 +	float rough = roughness, metal = metallic, matAO = 1;
 +	if (rmoTex) {
 +		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;
@@ -94729,7 +95579,8 @@ index 00000000..860a21ae
 +	}
 +	// models without PBR maps are flagged (metal + 2) so the lighting keeps their reflections soft, like rend2
 +	// (no specular / gloss data: a dull dielectric, not a coated one)
-+	bool authored = rmoTex != 0 || specTex != 0;
++	bool author)KTSRC",
++R"KTSRC(ed = rmoTex != 0 || specTex != 0;
 +	float3 baked = 0;
 +	bool hasBaked = false;
 +	float3 bakedSpec = 0;
@@ -94748,8 +95599,7 @@ index 00000000..860a21ae
 +				float shade = clamp(saturate(dot(n, L)) / n0l, 0.0, 2.0);
 +				baked *= lerp(1.0, shade, dirAmt);
 +				float3 f0s = lerp((rmoTex != 0 || specTex != 0) ? 0.04 : 0.012, a.rgb, saturate(metal));
-+				bakedSpec = min(SpecGGX(n,)KTSRC",
-+R"KTSRC( V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
++				bakedSpec = min(SpecGGX(n, V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
 +			}
 +		}
 +		else if (normalTex) baked *= saturate(dot(n, n0));   // no direction known: the bumps shade against the surface
@@ -94858,6 +95708,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -95083,7 +95942,8 @@ index 00000000..860a21ae
 +		float sd = Tex2D[indices0.w].Load(int3(viewport.xy + suv * viewport.zw, 0)).r;
 +		if (sd <= 0) continue;
 +		float dz = ViewDepth(cp.z / cp.w) - ViewDepth(sd);
-+		if (dz > 0.4 && dz < thick) { occ = max(occ, saturate(1 - (float)i / steps) * 0.5 + 0.5); if (occ > 0.99) break; }
++		if (dz > 0.4 )KTSRC",
++R"KTSRC(&& dz < thick) { occ = max(occ, saturate(1 - (float)i / steps) * 0.5 + 0.5); if (occ > 0.99) break; }
 +	}
 +	return 1 - occ;
 +}
@@ -95100,8 +95960,7 @@ index 00000000..860a21ae
 +	return Tex2DArray[indices1.x].SampleCmpLevelZero(sShadow, float3(suv, c), sc.z - shadowParams.y * 2);
 +}
 +
-+float3 ApplyFog(float3 col, float3 P, float3 V,)KTSRC",
-+R"KTSRC( float dist)
++float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 +{
 +	if (fogParams.x <= 0) return col;
 +	float rayLen = max(dist - fogParams.w, 0);
@@ -95117,7 +95976,7 @@ index 00000000..860a21ae
 +	// smear into streaks running up the whole screen
 +	float3 inscatter = (indices2.x ? SkyRadianceLod(hd, max(SkyMips() - 4, 0)) : SkyRadiance(hd)) * fogColor.rgb;
 +	float sunVis = 1;
-+	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0) {
++	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0 && sunColor.w > 0) {
 +		// volumetric: how much of the view ray inside the shadow range sees the sun (shafts through the fog)
 +		float maxD = min(dist, cascadeSplits[3]);
 +		float jitter = frac(52.9829189 * frac(dot(P.xy * 0.37 + indices2.w * 0.618, float2(0.06711056, 0.00583715))));
@@ -95314,7 +96173,15 @@ index 00000000..860a21ae
 +		}
 +	}
 +	if (baked) {
-+		Lo += g2 * ao;
++		float3 bakedL = g2;
++		if (bspSun.x > 0) {
++			// rend2's forced sun (r_sunlightMode 1): the map's light stays where the sun reaches; in its shadow and on
++			// surfaces turned away from it the light is scaled down (old models get half of that)
++			float sunVis = Shadow(P, N, viewZ) * saturate(dot(N, sunDir.xyz));
++			float keep = plainLegacy ? lerp(bspSun.y, 1.0, 0.5) : bspSun.y;
++			bakedL *= lerp(keep, 1.0, sunVis);
++		}
++		Lo += bakedL * ao;
 +		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
 +		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 +	}
@@ -95395,6 +96262,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -95597,7 +96473,8 @@ index 00000000..860a21ae
 +{
 +	const float3x3 inset = float3x3(0.842479062253094, 0.0784335999999992, 0.0792237451477643,
 +	                                0.0423282422610123, 0.878468636469772, 0.0791661274605434,
-+	                                0.0423756549057051, 0.0784336, 0.879142973793104);
++	                  )KTSRC",
++R"KTSRC(              0.0423756549057051, 0.0784336, 0.879142973793104);
 +	const float3x3 outset = float3x3(1.19687900512017, -0.0980208811401368, -0.0990297440797205,
 +	                                 -0.0528968517574562, 1.15190312990417, -0.0989611768448433,
 +	                                 -0.0529716355144438, -0.0980434501171241, 1.15107367264116);
@@ -95609,21 +96486,87 @@ index 00000000..860a21ae
 +	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
 +}
 +
-+float4 Ton)KTSRC",
-+R"KTSRC(emapPS(FsOut i) : SV_Target0
++// rend2 atmosphere (r_atmos): distance + height haze lit by the sun and screen-space sun shafts, on the HDR scene
++float3 Atmosphere(float3 c, float2 vuv, int2 px)
++{
++	float d = Tex2D[indices0.w].Load(int3(px, 0)).r;
++	bool sky = d <= 0.0;
++	float2 ndc = vuv * float2(2, -2) + float2(-1, 1);
++	float4 wp = mul(invViewProj, float4(ndc, sky ? 1e-6 : d, 1));
++	float3 P = wp.xyz / wp.w;
++	float3 dv = P - camPos.xyz;
++	float dist = length(dv);
++	float3 V = dv / max(dist, 1e-3);
++	float hide = 0;
++	if (atmos0.w > 0 && !sky) {
++		float falloff = max(atmos2.w, 1e-5), rayUp = V.z, travel = max(dist - atmos3.x, 0.0), h0 = 64.0;
++		float amt = abs(rayUp) > 1e-3 ? atmos0.w * exp(-falloff * h0) * (1.0 - exp(-falloff * rayUp * travel)) / (falloff * rayUp)
++			: atmos0.w * exp(-falloff * h0) * travel;
++		hide = clamp(1.0 - exp(-amt), 0.0, 0.85);
++	}
++	float cosSun = dot(V, normalize(sunDir.xyz));
++	float g = 0.6;
++	float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosSun, 1.5) * 0.08;
++	float3 haze = atmos0.rgb + atmos2.rgb * hg;
++	float3 shafts = 0;
++	if (atmos1.w > 0 && atmos1.z > 0) {
++		float2 stepUV = (atmos1.xy - vuv) / 40.0 * 0.9;
++		float2 s = vuv;
++		float decay = 1.0, acc = 0.0;
++		[loop] for (int k = 0; k < 40; k++) {
++			s += stepUV;
++			if (any(s < 0) || any(s > 1)) break;
++			int2 sp = int2(viewport.xy + s * viewport.zw);
++			float sd = Tex2D[indices0.w].Load(int3(sp, 0)).r;
++			float lum = dot(Tex2D[srcSrv].Load(int3(sp, 0)).rgb, float3(0.2126, 0.7152, 0.0722));
++			acc += (sd <= 0.0 ? min(lum, 1.5) : 0.0) * decay;
++			decay *= 0.96;
++		}
++		shafts = atmos2.rgb * acc / 40.0 * atmos1.w * smoothstep(-0.1, 0.6, cosSun) * atmos1.z;
++	}
++	if (sky) shafts *= 0.25;
++	return c * (1 - hide) + haze * hide + shafts;
++}
++
++// rend2 colour grade (r_grade 1): white balance, exposure, contrast around middle grey, saturation, split toning
++float3 GradePre(float3 c)
++{
++	const float3 LUM = float3(0.2126, 0.7152, 0.0722);
++	c *= grade0.x * grade3.rgb;
++	const float grey = 0.18;
++	c = grey * pow(max(c, 1e-6) / grey, grade0.y);
++	float y = dot(c, LUM);
++	c = max(0, lerp(y, c, grade0.z));
++	float t = smoothstep(0.0, 1.0, saturate(log2(max(y, 1e-6) / grey) * 0.25 + 0.5));
++	return c * lerp(grade1.rgb, grade2.rgb, t);
++}
++
++// black crush and vignette (display-referred)
++float3 GradePost(float3 c, float2 vuv)
++{
++	c = max(0, c - grade2.w) / (1.0 - grade2.w);
++	float2 v = vuv - 0.5;
++	return c * (1.0 - grade0.w * smoothstep(0.15, 0.75, dot(v, v) * 2.0));
++}
++
++float4 TonemapPS(FsOut i) : SV_Target0
 +{
 +	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
 +	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
 +	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 +	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
-+	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
++	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb);
++	if (atmos3.y > 0.5) c = Atmosphere(c, i.uv, int2(i.pos.xy));
++	c *= Exposure();
 +	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
++	if (grade3.w > 0.5) c = GradePre(c);
 +	if (skyParams.w > 0.5) {
 +		c = extraParams.y > 0.5 ? AgX(c) : ACESFitted(c * 1.4);
 +		float2 v = i.uv - 0.5;
-+		c *= 1 - dot(v, v) * 0.2;
++		if (grade3.w <= 0.5) c *= 1 - dot(v, v) * 0.2;
 +	}
 +	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
++	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 +	c = LinearToSrgb(c);
 +	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 +	c += (n - 0.5) / 255.0;
@@ -95718,6 +96661,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -95856,6 +96808,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -96032,6 +96993,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -96233,6 +97203,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -96483,6 +97462,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -96685,6 +97673,15 @@ index 00000000..860a21ae
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -96910,7 +97907,8 @@ index 00000000..860a21ae
 +	float3 em = m.emissive;
 +	if (m.emissiveTex) em *= Tex2D[NonUniformResourceIndex(m.emissiveTex)].Sample(sWrap, i.uv).rgb;
 +	GBufferOut o;
-+	o.albedo = float4(albedo.rgb, ao);
++	o.albedo = fl)KTSRC",
++R"KTSRC(oat4(albedo.rgb, ao);
 +	// foliage (Blender Translucent BSDF): +8 in the metal channel, the lighting pass lets sun through the leaves
 +	o.normal = float4(EncodeNormal(n), clamp(rough, 0.045, 1.0), saturate(metal) + ((m.mflags & 128) ? 8.0 : 0.0));
 +	o.emissive = float4(em, 0);
@@ -96926,8 +97924,7 @@ index 00000000..860a21ae
 +	clip(a - m.alphaCutoff);
 +}
 +
-+// ---- FX pass: water and flowing water, drawn into the lit )KTSRC",
-+R"KTSRC(HDR scene (blend: rgb + dst * a)
++// ---- FX pass: water and flowing water, drawn into the lit HDR scene (blend: rgb + dst * a)
 +float3 FxSky(float3 d, float lod)
 +{
 +	if (indices2.x) {
@@ -97756,10 +98753,10 @@ index 00000000..5313fd9c
 +#pragma pack(pop)
 diff --git a/codemp/rd-katarn/katarn/shaders/common.hlsli b/codemp/rd-katarn/katarn/shaders/common.hlsli
 new file mode 100644
-index 00000000..6f15173a
+index 00000000..ea250f2f
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/shaders/common.hlsli
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,126 @@
 +// KatarnEngine - shared HLSL (shader model 5.1, bindless descriptor tables)
 +#ifndef KT_COMMON
 +#define KT_COMMON
@@ -97820,6 +98817,15 @@ index 00000000..6f15173a
 +	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 +	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 +	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
++	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
++	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
++	float4 grade1;             // shadow tint rgb, curve
++	float4 grade2;             // highlight tint rgb, black crush
++	float4 grade3;             // white balance rgb, w 1 = on
++	float4 atmos0;             // rend2 atmosphere: haze rgb, density
++	float4 atmos1;             // sun screen uv, sun visible, shaft strength
++	float4 atmos2;             // sun rgb, height falloff
++	float4 atmos3;             // x haze start, y 1 = on
 +};
 +float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 +float Overbright() { return max(extraParams.x, 1.0); }
@@ -97995,10 +99001,10 @@ index 00000000..02e004f3
 +}
 diff --git a/codemp/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl b/codemp/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl
 new file mode 100644
-index 00000000..9a0ebca0
+index 00000000..3d3c2e21
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/shaders/legacy_gbuffer.hlsl
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,204 @@
 +// KatarnEngine - legacy opaque surfaces (Ghoul2 characters, BSP world, MD3 models) written into the GBuffer, so they
 +// get Katarn's sun, shadows, lights, sky ambient and AO like the HD world does.
 +#include "common.hlsli"
@@ -98115,12 +99121,17 @@ index 00000000..9a0ebca0
 +	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
 +	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
 +	if (gflags & 1) clip(a.a - alphaRef);
++	float tnz = 1;
 +	if (normalTex) {
 +		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).xyz * 2 - 1;
 +		tn.z = sqrt(saturate(1 - dot(tn.xy, tn.xy)));
++		tnz = tn.z;
 +		float3 nm = normalize(T * invmax * tn.x - B * invmax * tn.y + n * tn.z);   // uv v runs down: flip the bitangent
 +		if (all(isfinite(nm))) n = nm;
 +	}
++	// rend2 r_genNormalMaps: a normal map made from the texture's brightness; the texture is brightened by 1 / n.z
++	// to make up for the light the bumps take away (rend2 does this to the texture when it is loaded)
++	if (gflags & 32) a.rgb *= min(1.0 / max(tnz, 0.125), 8.0);
 +	float rough = roughness, metal = metallic, matAO = 1;
 +	if (rmoTex) {
 +		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;
@@ -98200,10 +99211,10 @@ index 00000000..9a0ebca0
 +}
 diff --git a/codemp/rd-katarn/katarn/shaders/lighting.hlsl b/codemp/rd-katarn/katarn/shaders/lighting.hlsl
 new file mode 100644
-index 00000000..da7f5fbe
+index 00000000..64375633
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/shaders/lighting.hlsl
-@@ -0,0 +1,416 @@
+@@ -0,0 +1,424 @@
 +// KatarnEngine - deferred lighting: sun with cascaded shadows, local lights, sky ambient + reflections, height fog
 +#include "common.hlsli"
 +
@@ -98406,7 +99417,7 @@ index 00000000..da7f5fbe
 +	// smear into streaks running up the whole screen
 +	float3 inscatter = (indices2.x ? SkyRadianceLod(hd, max(SkyMips() - 4, 0)) : SkyRadiance(hd)) * fogColor.rgb;
 +	float sunVis = 1;
-+	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0) {
++	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0 && sunColor.w > 0) {
 +		// volumetric: how much of the view ray inside the shadow range sees the sun (shafts through the fog)
 +		float maxD = min(dist, cascadeSplits[3]);
 +		float jitter = frac(52.9829189 * frac(dot(P.xy * 0.37 + indices2.w * 0.618, float2(0.06711056, 0.00583715))));
@@ -98603,7 +99614,15 @@ index 00000000..da7f5fbe
 +		}
 +	}
 +	if (baked) {
-+		Lo += g2 * ao;
++		float3 bakedL = g2;
++		if (bspSun.x > 0) {
++			// rend2's forced sun (r_sunlightMode 1): the map's light stays where the sun reaches; in its shadow and on
++			// surfaces turned away from it the light is scaled down (old models get half of that)
++			float sunVis = Shadow(P, N, viewZ) * saturate(dot(N, sunDir.xyz));
++			float keep = plainLegacy ? lerp(bspSun.y, 1.0, 0.5) : bspSun.y;
++			bakedL *= lerp(keep, 1.0, sunVis);
++		}
++		Lo += bakedL * ao;
 +		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
 +		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 +	}
@@ -98622,10 +99641,10 @@ index 00000000..da7f5fbe
 +}
 diff --git a/codemp/rd-katarn/katarn/shaders/post.hlsl b/codemp/rd-katarn/katarn/shaders/post.hlsl
 new file mode 100644
-index 00000000..0d95fb78
+index 00000000..4ec9657a
 --- /dev/null
 +++ b/codemp/rd-katarn/katarn/shaders/post.hlsl
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,269 @@
 +// KatarnEngine - camera: auto exposure, bloom, filmic tone mapping, FXAA
 +#include "common.hlsli"
 +
@@ -98784,20 +99803,87 @@ index 00000000..0d95fb78
 +	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
 +}
 +
++// rend2 atmosphere (r_atmos): distance + height haze lit by the sun and screen-space sun shafts, on the HDR scene
++float3 Atmosphere(float3 c, float2 vuv, int2 px)
++{
++	float d = Tex2D[indices0.w].Load(int3(px, 0)).r;
++	bool sky = d <= 0.0;
++	float2 ndc = vuv * float2(2, -2) + float2(-1, 1);
++	float4 wp = mul(invViewProj, float4(ndc, sky ? 1e-6 : d, 1));
++	float3 P = wp.xyz / wp.w;
++	float3 dv = P - camPos.xyz;
++	float dist = length(dv);
++	float3 V = dv / max(dist, 1e-3);
++	float hide = 0;
++	if (atmos0.w > 0 && !sky) {
++		float falloff = max(atmos2.w, 1e-5), rayUp = V.z, travel = max(dist - atmos3.x, 0.0), h0 = 64.0;
++		float amt = abs(rayUp) > 1e-3 ? atmos0.w * exp(-falloff * h0) * (1.0 - exp(-falloff * rayUp * travel)) / (falloff * rayUp)
++			: atmos0.w * exp(-falloff * h0) * travel;
++		hide = clamp(1.0 - exp(-amt), 0.0, 0.85);
++	}
++	float cosSun = dot(V, normalize(sunDir.xyz));
++	float g = 0.6;
++	float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosSun, 1.5) * 0.08;
++	float3 haze = atmos0.rgb + atmos2.rgb * hg;
++	float3 shafts = 0;
++	if (atmos1.w > 0 && atmos1.z > 0) {
++		float2 stepUV = (atmos1.xy - vuv) / 40.0 * 0.9;
++		float2 s = vuv;
++		float decay = 1.0, acc = 0.0;
++		[loop] for (int k = 0; k < 40; k++) {
++			s += stepUV;
++			if (any(s < 0) || any(s > 1)) break;
++			int2 sp = int2(viewport.xy + s * viewport.zw);
++			float sd = Tex2D[indices0.w].Load(int3(sp, 0)).r;
++			float lum = dot(Tex2D[srcSrv].Load(int3(sp, 0)).rgb, float3(0.2126, 0.7152, 0.0722));
++			acc += (sd <= 0.0 ? min(lum, 1.5) : 0.0) * decay;
++			decay *= 0.96;
++		}
++		shafts = atmos2.rgb * acc / 40.0 * atmos1.w * smoothstep(-0.1, 0.6, cosSun) * atmos1.z;
++	}
++	if (sky) shafts *= 0.25;
++	return c * (1 - hide) + haze * hide + shafts;
++}
++
++// rend2 colour grade (r_grade 1): white balance, exposure, contrast around middle grey, saturation, split toning
++float3 GradePre(float3 c)
++{
++	const float3 LUM = float3(0.2126, 0.7152, 0.0722);
++	c *= grade0.x * grade3.rgb;
++	const float grey = 0.18;
++	c = grey * pow(max(c, 1e-6) / grey, grade0.y);
++	float y = dot(c, LUM);
++	c = max(0, lerp(y, c, grade0.z));
++	float t = smoothstep(0.0, 1.0, saturate(log2(max(y, 1e-6) / grey) * 0.25 + 0.5));
++	return c * lerp(grade1.rgb, grade2.rgb, t);
++}
++
++// black crush and vignette (display-referred)
++float3 GradePost(float3 c, float2 vuv)
++{
++	c = max(0, c - grade2.w) / (1.0 - grade2.w);
++	float2 v = vuv - 0.5;
++	return c * (1.0 - grade0.w * smoothstep(0.15, 0.75, dot(v, v) * 2.0));
++}
++
 +float4 TonemapPS(FsOut i) : SV_Target0
 +{
 +	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
 +	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
 +	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 +	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
-+	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
++	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb);
++	if (atmos3.y > 0.5) c = Atmosphere(c, i.uv, int2(i.pos.xy));
++	c *= Exposure();
 +	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
++	if (grade3.w > 0.5) c = GradePre(c);
 +	if (skyParams.w > 0.5) {
 +		c = extraParams.y > 0.5 ? AgX(c) : ACESFitted(c * 1.4);
 +		float2 v = i.uv - 0.5;
-+		c *= 1 - dot(v, v) * 0.2;
++		if (grade3.w <= 0.5) c *= 1 - dot(v, v) * 0.2;
 +	}
 +	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
++	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 +	c = LinearToSrgb(c);
 +	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 +	c += (n - 0.5) / 255.0;
@@ -104403,10 +105489,10 @@ index 00000000..dbb1d664
 +}
 diff --git a/codemp/rd-katarn/tr_bsp.cpp b/codemp/rd-katarn/tr_bsp.cpp
 new file mode 100644
-index 00000000..2a6cd706
+index 00000000..21f869b7
 --- /dev/null
 +++ b/codemp/rd-katarn/tr_bsp.cpp
-@@ -0,0 +1,2155 @@
+@@ -0,0 +1,2215 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -104587,6 +105673,63 @@ index 00000000..2a6cd706
 +	if (at == std::string::npos) return false;
 +	at = ents.find('"', at + 15);
 +	return at != std::string::npos && at + 1 < ents.size() && ents[at + 1] == '1';
++}
++
++// KatarnEngine: map surfaces that go into the static sun-shadow mesh: opaque, not alpha tested, not deformed
++bool KT_ShadowCaster(const shader_t* sh)
++{
++	if (!sh || sh->defaultShader || sh->sky || sh->sort != SS_OPAQUE || sh->numDeforms || !sh->stages || !sh->stages[0].active) return false;
++	if (sh->surfaceFlags & (SURF_NODRAW | SURF_SKY)) return false;
++	if (sh->contentFlags & CONTENTS_FOG) return false;
++	for (int i = 0; i < MAX_SHADER_STAGES && sh->stages[i].active; i++)
++		if (sh->stages[i].stateBits & GLS_ATEST_BITS) return false;
++	return true;
++}
++
++static void KT_WorldSunAndShadows(world_t& w)
++{
++	if (!w.bmodels || !w.numsurfaces) return;
++	const bmodel_t& bm = w.bmodels[0];
++	// a sky shader that carries the sun
++	for (int i = 0; i < bm.numSurfaces; i++) {
++		const shader_t* sh = bm.firstSurface[i].shader;
++		if (sh && sh->ktHasSun) { VectorCopy(sh->ktSunDir, tr.sunDirection); break; }
++	}
++	std::vector<float> pos;
++	std::vector<uint32_t> idx;
++	for (int i = 0; i < bm.numSurfaces; i++) {
++		const msurface_t& s = bm.firstSurface[i];
++		if (!s.data || !KT_ShadowCaster(s.shader)) continue;
++		const uint32_t base = (uint32_t)(pos.size() / 3);
++		switch (*s.data) {
++		case SF_FACE: {
++			const srfSurfaceFace_t* f = (const srfSurfaceFace_t*)s.data;
++			const int* ind = (const int*)((const byte*)f + f->ofsIndices);
++			for (int v = 0; v < f->numPoints; v++) { pos.push_back(f->points[v][0]); pos.push_back(f->points[v][1]); pos.push_back(f->points[v][2]); }
++			for (int k = 0; k < f->numIndices; k++) idx.push_back(base + (uint32_t)ind[k]);
++			break;
++		}
++		case SF_TRIANGLES: {
++			const srfTriangles_t* t = (const srfTriangles_t*)s.data;
++			for (int v = 0; v < t->numVerts; v++) { pos.push_back(t->verts[v].xyz[0]); pos.push_back(t->verts[v].xyz[1]); pos.push_back(t->verts[v].xyz[2]); }
++			for (int k = 0; k < t->numIndexes; k++) idx.push_back(base + (uint32_t)t->indexes[k]);
++			break;
++		}
++		case SF_GRID: {
++			const srfGridMesh_t* gm = (const srfGridMesh_t*)s.data;
++			for (int v = 0; v < gm->width * gm->height; v++) { pos.push_back(gm->verts[v].xyz[0]); pos.push_back(gm->verts[v].xyz[1]); pos.push_back(gm->verts[v].xyz[2]); }
++			for (int y = 0; y + 1 < gm->height; y++)
++				for (int x = 0; x + 1 < gm->width; x++) {
++					uint32_t a = base + y * gm->width + x, b = a + gm->width;
++					idx.push_back(a); idx.push_back(b); idx.push_back(a + 1);
++					idx.push_back(b); idx.push_back(b + 1); idx.push_back(a + 1);
++				}
++			break;
++		}
++		default: break;
++		}
++	}
++	kt::R_SetBspShadowMesh(pos.data(), (uint32_t)(pos.size() / 3), idx.data(), (uint32_t)idx.size());
 +}
 +
 +static	void R_LoadLightmaps( lump_t *l, const char *psMapName, world_t &worldData ) {
@@ -106533,6 +107676,9 @@ index 00000000..2a6cd706
 +	if (kt::World_Load(base))
 +		ri.Printf(PRINT_ALL, "KatarnEngine: HD world maps/%s.kworld loaded\n", base);
 +		tr.world = &worldData;
++
++		// KatarnEngine: the sun of a cached sky shader (not parsed again), and the sun shadow caster mesh
++		KT_WorldSunAndShadows(worldData);
 +
 +		// KatarnEngine: reflection probe positions from the entities (needs tr.world for the clusters)
 +		{
@@ -112956,10 +114102,10 @@ index 00000000..f4ca58b8
 +
 diff --git a/codemp/rd-katarn/tr_image.cpp b/codemp/rd-katarn/tr_image.cpp
 new file mode 100644
-index 00000000..75dabf5d
+index 00000000..83210468
 --- /dev/null
 +++ b/codemp/rd-katarn/tr_image.cpp
-@@ -0,0 +1,1548 @@
+@@ -0,0 +1,1593 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -113939,6 +115085,51 @@ index 00000000..75dabf5d
 +================
 +*/
 +image_t *R_CreateImage( const char *name, const byte *pic, int width, int height,
++	GLenum format, qboolean mipmap, qboolean allowPicmip, qboolean allowTC, int glWrapClampMode, bool bRectangle);
++// KatarnEngine: rend2's r_genNormalMaps - a tangent-space normal map from the texture's brightness (Sobel over the
++// luma as height, levelled out; alpha keeps the height), cached as <texture>_kgn
++image_t* KT_GenerateNormalMap(const char* diffuseName, qboolean mip, qboolean picmip, bool clamp)
++{
++	char name[MAX_QPATH];
++	COM_StripExtension(diffuseName, name, sizeof(name));
++	Q_strcat(name, sizeof(name), "_kgn");
++	if (image_t* cached = R_FindImageFile_NoLoad(name, mip, picmip, qfalse, clamp ? GL_CLAMP : GL_REPEAT)) return cached;
++	byte* pic = nullptr;
++	int w = 0, h = 0;
++	R_LoadImage(diffuseName, &pic, &w, &h);
++	if (!pic || w < 4 || h < 4) { if (pic) Z_Free(pic); return nullptr; }
++	byte* out = (byte*)Z_Malloc(w * h * 4, TAG_TEMP_WORKSPACE, qfalse);
++	int mx = 1;
++	for (int i = 0; i < w * h; i++) {
++		const byte* in = pic + i * 4;
++		int v = (in[0] >> 2) + (in[1] >> 1) + (in[2] >> 2);
++		v = v * v / 255;   // make linear
++		out[i * 4 + 3] = (byte)v;
++		mx = Q_max(mx, v);
++	}
++	for (int i = 0; i < w * h; i++) out[i * 4 + 3] = (byte)(out[i * 4 + 3] + (255 - mx));   // level out heights
++	for (int y = 0; y < h; y++)
++		for (int x = 0; x < w; x++) {
++			int s[9], k = 0;
++			for (int y2 = -1; y2 <= 1; y2++)
++				for (int x2 = -1; x2 <= 1; x2++) {
++					int sy = clamp ? Q_max(0, Q_min(h - 1, y + y2)) : (y + y2 + h) % h;
++					int sx = clamp ? Q_max(0, Q_min(w - 1, x + x2)) : (x + x2 + w) % w;
++					s[k++] = out[(sy * w + sx) * 4 + 3];
++				}
++			float n[3] = { (float)(s[0] - s[2] + 2 * s[3] - 2 * s[5] + s[6] - s[8]), (float)(s[0] + 2 * s[1] + s[2] - s[6] - 2 * s[7] - s[8]), (float)(s[4] * 4) };
++			float l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
++			if (l < 1e-6f) { n[0] = n[1] = 0; n[2] = 1; } else { n[0] /= l; n[1] /= l; n[2] /= l; }
++			byte* o = out + (y * w + x) * 4;
++			for (int c = 0; c < 3; c++) o[c] = (byte)Q_max(0, Q_min(255, (int)((n[c] * 0.5f + 0.5f) * 255.0f + 0.5f)));
++		}
++	Z_Free(pic);
++	image_t* img = R_CreateImage(name, out, w, h, GL_RGBA, mip, picmip, qfalse, clamp ? GL_CLAMP : GL_REPEAT, false);
++	Z_Free(out);
++	return img;
++}
++
++image_t *R_CreateImage( const char *name, const byte *pic, int width, int height,
 +					   GLenum format, qboolean mipmap, qboolean allowPicmip, qboolean allowTC, int glWrapClampMode, bool bRectangle )
 +{
 +	image_t		*image;
@@ -114510,10 +115701,10 @@ index 00000000..75dabf5d
 +
 diff --git a/codemp/rd-katarn/tr_init.cpp b/codemp/rd-katarn/tr_init.cpp
 new file mode 100644
-index 00000000..c212fc7f
+index 00000000..d4d129d3
 --- /dev/null
 +++ b/codemp/rd-katarn/tr_init.cpp
-@@ -0,0 +1,1905 @@
+@@ -0,0 +1,1907 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -114617,6 +115808,7 @@ index 00000000..c212fc7f
 +cvar_t	*r_ext_compiled_vertex_array;
 +cvar_t	*r_ext_texture_env_add;
 +cvar_t	*r_ext_texture_filter_anisotropic;
++cvar_t	*r_genNormalMaps;   // KatarnEngine: rend2's normal maps made from textures that have none
 +cvar_t	*r_gammaShaders;
 +
 +cvar_t	*r_environmentMapping;
@@ -115827,6 +117019,7 @@ index 00000000..c212fc7f
 +	r_ext_compiled_vertex_array			= ri.Cvar_Get( "r_ext_compiled_vertex_array",		"1",						CVAR_ARCHIVE_ND|CVAR_LATCH, "" );
 +	r_ext_texture_env_add				= ri.Cvar_Get( "r_ext_texture_env_add",			"1",						CVAR_ARCHIVE_ND|CVAR_LATCH, "" );
 +	r_ext_texture_filter_anisotropic	= ri.Cvar_Get( "r_ext_texture_filter_anisotropic",	"16",						CVAR_ARCHIVE_ND, "" );
++	r_genNormalMaps = ri.Cvar_Get( "r_genNormalMaps", "1", CVAR_ARCHIVE | CVAR_LATCH, "rend2: normal maps made from textures that have none" );
 +	r_gammaShaders						= ri.Cvar_Get( "r_gammaShaders",					"0",						CVAR_ARCHIVE_ND|CVAR_LATCH, "" );
 +	r_environmentMapping				= ri.Cvar_Get( "r_environmentMapping",				"1",						CVAR_ARCHIVE_ND, "" );
 +	r_DynamicGlow						= ri.Cvar_Get( "r_DynamicGlow",					"0",						CVAR_ARCHIVE_ND, "" );
@@ -116876,10 +118069,10 @@ index 00000000..486eecc0
 +}
 diff --git a/codemp/rd-katarn/tr_local.h b/codemp/rd-katarn/tr_local.h
 new file mode 100644
-index 00000000..274bfaa3
+index 00000000..d929f1a5
 --- /dev/null
 +++ b/codemp/rd-katarn/tr_local.h
-@@ -0,0 +1,1916 @@
+@@ -0,0 +1,1919 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -117300,6 +118493,7 @@ index 00000000..274bfaa3
 +
 +	// KatarnEngine: PBR maps from rend2-style stages (normalMap / rmoMap / ormMap / specularMap)
 +	image_t* ktNormal;
++	bool		ktNormalGen;    // ktNormal was generated from the texture (rend2 r_genNormalMaps)
 +	image_t* ktRmo;
 +	int				ktRmoOrder;     // 0 r=rough g=metal b=ao (rmo), 1 r=ao g=rough b=metal (orm)
 +	image_t* ktSpec;
@@ -117372,6 +118566,8 @@ index 00000000..274bfaa3
 +
 +	skyParms_t	*sky;
 +	fogParms_t	*fogParms;
++	bool		ktHasSun;               // KatarnEngine: this (sky) shader set the sun (q3map_sun / q3map_sunExt / q3gl2_sun)
++	float		ktSunDir[3];
 +
 +	float		portalRange;			// distance to fog out at
 +
@@ -123871,10 +125067,10 @@ index 00000000..01c54a77
 +#endif
 diff --git a/codemp/rd-katarn/tr_shade.cpp b/codemp/rd-katarn/tr_shade.cpp
 new file mode 100644
-index 00000000..c0125194
+index 00000000..449c9fb5
 --- /dev/null
 +++ b/codemp/rd-katarn/tr_shade.cpp
-@@ -0,0 +1,2199 @@
+@@ -0,0 +1,2202 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -123907,6 +125103,7 @@ index 00000000..c0125194
 +#include <string>
 +#include "katarn/kt_render.h"
 +extern int kt_worldDeluxe;   // tr_bsp.cpp
++bool KT_ShadowCaster(const shader_t* sh);   // tr_bsp.cpp
 +
 +/*
 +  THIS ENTIRE FILE IS BACK END
@@ -125600,6 +126797,7 @@ index 00000000..c0125194
 +	d.skin = st->ktSkin;
 +	d.specTex = st->ktSpec ? st->ktSpec->texnum : 0;
 +	d.parallax = st->ktParallax;
++	if (st->ktNormal && st->ktNormalGen) flags |= 32;
 +	d.flags = flags;
 +	d.roughness = world ? 0.7f : 0.78f;   // characters: cloth / skin (0.55 read as plastic)
 +	d.metallic = 0.0f;
@@ -125609,7 +126807,8 @@ index 00000000..c0125194
 +	if (sh->cullType == CT_TWO_SIDED) d.cull = 0;
 +	else if (sh->cullType == CT_BACK_SIDED) d.cull = backEnd.viewParms.isMirror ? 1 : 2;
 +	else d.cull = backEnd.viewParms.isMirror ? 2 : 1;
-+	d.castShadow = world || !(ent->e.renderfx & RF_NOSHADOW);
++	// map surfaces in the static sun-shadow mesh are drawn from there (casters off screen too)
++	d.castShadow = world ? !(bspMode && kt::R_BspShadowMesh() && KT_ShadowCaster(sh)) : !(ent->e.renderfx & RF_NOSHADOW);
 +	if (bspMode && !world) {
 +		// light grid (as rend2 / the old renderer light models): ambient + one directed light, in world space
 +		for (int k = 0; k < 3; k++) {
@@ -127471,10 +128670,10 @@ index 00000000..254bdddf
 +}
 diff --git a/codemp/rd-katarn/tr_shader.cpp b/codemp/rd-katarn/tr_shader.cpp
 new file mode 100644
-index 00000000..cb872616
+index 00000000..0dd8ad29
 --- /dev/null
 +++ b/codemp/rd-katarn/tr_shader.cpp
-@@ -0,0 +1,4302 @@
+@@ -0,0 +1,4313 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -129672,7 +130871,7 @@ index 00000000..cb872616
 +			ParseMaterial( text );
 +		}
 +		// sun parms
-+		else if ( !Q_stricmp( token, "sun" ) || !Q_stricmp( token, "q3map_sun" ) || !Q_stricmp( token, "q3map_sunExt" ) )
++		else if ( !Q_stricmp( token, "sun" ) || !Q_stricmp( token, "q3map_sun" ) || !Q_stricmp( token, "q3map_sunExt" ) || !Q_stricmp( token, "q3gl2_sun" ) )
 +		{
 +			token = COM_ParseExt( text, qfalse );
 +			tr.sunLight[0] = atof( token );
@@ -129698,6 +130897,9 @@ index 00000000..cb872616
 +			tr.sunDirection[0] = cos( a ) * cos( b );
 +			tr.sunDirection[1] = sin( a ) * cos( b );
 +			tr.sunDirection[2] = sin( b );
++			// kept with the shader too: a cached sky shader is not parsed again on the next map
++			shader.ktHasSun = true;
++			VectorCopy( tr.sunDirection, shader.ktSunDir );
 +
 +			SkipRestOfLine( text );
 +			continue;
@@ -130373,6 +131575,9 @@ index 00000000..cb872616
 +*/
 +// KatarnEngine: rend2's automatic material maps. A lit model stage with no normal / material maps of its own looks
 +// for <diffuse>_nh / _n next to its texture, then <diffuse>_rmo / _orm / _specGloss (as rend2 does).
++image_t* KT_GenerateNormalMap( const char* diffuseName, qboolean mip, qboolean picmip, bool clamp );   // tr_image.cpp
++extern cvar_t* r_genNormalMaps;
++
 +static void KT_AutoMaterialMaps( void )
 +{
 +	if ( shader.sky ) return;
@@ -130401,6 +131606,11 @@ index 00000000..cb872616
 +			st->ktNormal = R_FindImageFile( name, mip, pic, qfalse, GL_REPEAT );
 +			if ( st->ktNormal && !st->ktParallax ) st->ktParallax = 0.05f;   // normal + height
 +			if ( !st->ktNormal ) { Com_sprintf( name, sizeof( name ), "%s_n", base ); st->ktNormal = R_FindImageFile( name, mip, pic, qfalse, GL_REPEAT ); }
++			// none: made from the texture, like rend2's r_genNormalMaps
++			if ( !st->ktNormal && r_genNormalMaps && r_genNormalMaps->integer ) {
++				st->ktNormal = KT_GenerateNormalMap( diffuse->imgName, mip, pic, diffuse->wrapClampMode != GL_REPEAT );
++				st->ktNormalGen = st->ktNormal != nullptr;
++			}
 +		}
 +		if ( !st->ktRmo && !st->ktSpec ) {
 +			Com_sprintf( name, sizeof( name ), "%s_rmo", base );

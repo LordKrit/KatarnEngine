@@ -114,12 +114,17 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
 	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
 	if (gflags & 1) clip(a.a - alphaRef);
+	float tnz = 1;
 	if (normalTex) {
 		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).xyz * 2 - 1;
 		tn.z = sqrt(saturate(1 - dot(tn.xy, tn.xy)));
+		tnz = tn.z;
 		float3 nm = normalize(T * invmax * tn.x - B * invmax * tn.y + n * tn.z);   // uv v runs down: flip the bitangent
 		if (all(isfinite(nm))) n = nm;
 	}
+	// rend2 r_genNormalMaps: a normal map made from the texture's brightness; the texture is brightened by 1 / n.z
+	// to make up for the light the bumps take away (rend2 does this to the texture when it is loaded)
+	if (gflags & 32) a.rgb *= min(1.0 / max(tnz, 0.125), 8.0);
 	float rough = roughness, metal = metallic, matAO = 1;
 	if (rmoTex) {
 		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;

@@ -200,7 +200,7 @@ float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 	// smear into streaks running up the whole screen
 	float3 inscatter = (indices2.x ? SkyRadianceLod(hd, max(SkyMips() - 4, 0)) : SkyRadiance(hd)) * fogColor.rgb;
 	float sunVis = 1;
-	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0) {
+	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0 && sunColor.w > 0) {
 		// volumetric: how much of the view ray inside the shadow range sees the sun (shafts through the fog)
 		float maxD = min(dist, cascadeSplits[3]);
 		float jitter = frac(52.9829189 * frac(dot(P.xy * 0.37 + indices2.w * 0.618, float2(0.06711056, 0.00583715))));
@@ -397,7 +397,15 @@ void CS(uint3 id : SV_DispatchThreadID)
 		}
 	}
 	if (baked) {
-		Lo += g2 * ao;
+		float3 bakedL = g2;
+		if (bspSun.x > 0) {
+			// rend2's forced sun (r_sunlightMode 1): the map's light stays where the sun reaches; in its shadow and on
+			// surfaces turned away from it the light is scaled down (old models get half of that)
+			float sunVis = Shadow(P, N, viewZ) * saturate(dot(N, sunDir.xyz));
+			float keep = plainLegacy ? lerp(bspSun.y, 1.0, 0.5) : bspSun.y;
+			bakedL *= lerp(keep, 1.0, sunVis);
+		}
+		Lo += bakedL * ao;
 		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
 		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 	}

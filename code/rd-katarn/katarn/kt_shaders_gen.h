@@ -63,6 +63,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -268,6 +277,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -439,12 +457,17 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	if (albedoTex) a *= Tex2D[NonUniformResourceIndex(albedoTex)].SampleGrad(sWrap, uv, uvdx, uvdy);
 	if (gflags & 2) a *= float4(SrgbToLinear(i.color.rgb), i.color.a);
 	if (gflags & 1) clip(a.a - alphaRef);
+	float tnz = 1;
 	if (normalTex) {
 		float3 tn = Tex2D[NonUniformResourceIndex(normalTex)].SampleGrad(sWrap, uv, uvdx, uvdy).xyz * 2 - 1;
 		tn.z = sqrt(saturate(1 - dot(tn.xy, tn.xy)));
+		tnz = tn.z;
 		float3 nm = normalize(T * invmax * tn.x - B * invmax * tn.y + n * tn.z);   // uv v runs down: flip the bitangent
 		if (all(isfinite(nm))) n = nm;
 	}
+	// rend2 r_genNormalMaps: a normal map made from the texture's brightness; the texture is brightened by 1 / n.z
+	// to make up for the light the bumps take away (rend2 does this to the texture when it is loaded)
+	if (gflags & 32) a.rgb *= min(1.0 / max(tnz, 0.125), 8.0);
 	float rough = roughness, metal = metallic, matAO = 1;
 	if (rmoTex) {
 		float3 r = Tex2D[NonUniformResourceIndex(rmoTex)].SampleGrad(sWrap, uv, uvdx, uvdy).rgb;
@@ -458,7 +481,8 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	}
 	// models without PBR maps are flagged (metal + 2) so the lighting keeps their reflections soft, like rend2
 	// (no specular / gloss data: a dull dielectric, not a coated one)
-	bool authored = rmoTex != 0 || specTex != 0;
+	bool author)KTSRC",
+R"KTSRC(ed = rmoTex != 0 || specTex != 0;
 	float3 baked = 0;
 	bool hasBaked = false;
 	float3 bakedSpec = 0;
@@ -477,8 +501,7 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 				float shade = clamp(saturate(dot(n, L)) / n0l, 0.0, 2.0);
 				baked *= lerp(1.0, shade, dirAmt);
 				float3 f0s = lerp((rmoTex != 0 || specTex != 0) ? 0.04 : 0.012, a.rgb, saturate(metal));
-				bakedSpec = min(SpecGGX(n,)KTSRC",
-R"KTSRC( V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
+				bakedSpec = min(SpecGGX(n, V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
 			}
 		}
 		else if (normalTex) baked *= saturate(dot(n, n0));   // no direction known: the bumps shade against the surface
@@ -587,6 +610,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -812,7 +844,8 @@ float ScreenShadow(float3 P, float3 N, float3 L, float dist, int steps, float th
 		float sd = Tex2D[indices0.w].Load(int3(viewport.xy + suv * viewport.zw, 0)).r;
 		if (sd <= 0) continue;
 		float dz = ViewDepth(cp.z / cp.w) - ViewDepth(sd);
-		if (dz > 0.4 && dz < thick) { occ = max(occ, saturate(1 - (float)i / steps) * 0.5 + 0.5); if (occ > 0.99) break; }
+		if (dz > 0.4 )KTSRC",
+R"KTSRC(&& dz < thick) { occ = max(occ, saturate(1 - (float)i / steps) * 0.5 + 0.5); if (occ > 0.99) break; }
 	}
 	return 1 - occ;
 }
@@ -829,8 +862,7 @@ float ShadowFast(float3 P, float viewZ)
 	return Tex2DArray[indices1.x].SampleCmpLevelZero(sShadow, float3(suv, c), sc.z - shadowParams.y * 2);
 }
 
-float3 ApplyFog(float3 col, float3 P, float3 V,)KTSRC",
-R"KTSRC( float dist)
+float3 ApplyFog(float3 col, float3 P, float3 V, float dist)
 {
 	if (fogParams.x <= 0) return col;
 	float rayLen = max(dist - fogParams.w, 0);
@@ -846,7 +878,7 @@ R"KTSRC( float dist)
 	// smear into streaks running up the whole screen
 	float3 inscatter = (indices2.x ? SkyRadianceLod(hd, max(SkyMips() - 4, 0)) : SkyRadiance(hd)) * fogColor.rgb;
 	float sunVis = 1;
-	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0) {
+	if ((lflags & 4) && (lflags & 2) && shadowParams.w > 0 && sunColor.w > 0) {
 		// volumetric: how much of the view ray inside the shadow range sees the sun (shafts through the fog)
 		float maxD = min(dist, cascadeSplits[3]);
 		float jitter = frac(52.9829189 * frac(dot(P.xy * 0.37 + indices2.w * 0.618, float2(0.06711056, 0.00583715))));
@@ -1043,7 +1075,15 @@ void CS(uint3 id : SV_DispatchThreadID)
 		}
 	}
 	if (baked) {
-		Lo += g2 * ao;
+		float3 bakedL = g2;
+		if (bspSun.x > 0) {
+			// rend2's forced sun (r_sunlightMode 1): the map's light stays where the sun reaches; in its shadow and on
+			// surfaces turned away from it the light is scaled down (old models get half of that)
+			float sunVis = Shadow(P, N, viewZ) * saturate(dot(N, sunDir.xyz));
+			float keep = plainLegacy ? lerp(bspSun.y, 1.0, 0.5) : bspSun.y;
+			bakedL *= lerp(keep, 1.0, sunVis);
+		}
+		Lo += bakedL * ao;
 		// old BSP maps: no sky light to reflect (their light grid / lightmaps carry it) - only the probes and SSR
 		Lo += spec * env * specOcc * lerp(0.35 * skyParams.w, 1.0, max(probeW, ssrHit));
 	}
@@ -1124,6 +1164,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -1326,7 +1375,8 @@ float3 AgX(float3 c)
 {
 	const float3x3 inset = float3x3(0.842479062253094, 0.0784335999999992, 0.0792237451477643,
 	                                0.0423282422610123, 0.878468636469772, 0.0791661274605434,
-	                                0.0423756549057051, 0.0784336, 0.879142973793104);
+	                  )KTSRC",
+R"KTSRC(              0.0423756549057051, 0.0784336, 0.879142973793104);
 	const float3x3 outset = float3x3(1.19687900512017, -0.0980208811401368, -0.0990297440797205,
 	                                 -0.0528968517574562, 1.15190312990417, -0.0989611768448433,
 	                                 -0.0529716355144438, -0.0980434501171241, 1.15107367264116);
@@ -1338,21 +1388,87 @@ float3 AgX(float3 c)
 	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
 }
 
-float4 Ton)KTSRC",
-R"KTSRC(emapPS(FsOut i) : SV_Target0
+// rend2 atmosphere (r_atmos): distance + height haze lit by the sun and screen-space sun shafts, on the HDR scene
+float3 Atmosphere(float3 c, float2 vuv, int2 px)
+{
+	float d = Tex2D[indices0.w].Load(int3(px, 0)).r;
+	bool sky = d <= 0.0;
+	float2 ndc = vuv * float2(2, -2) + float2(-1, 1);
+	float4 wp = mul(invViewProj, float4(ndc, sky ? 1e-6 : d, 1));
+	float3 P = wp.xyz / wp.w;
+	float3 dv = P - camPos.xyz;
+	float dist = length(dv);
+	float3 V = dv / max(dist, 1e-3);
+	float hide = 0;
+	if (atmos0.w > 0 && !sky) {
+		float falloff = max(atmos2.w, 1e-5), rayUp = V.z, travel = max(dist - atmos3.x, 0.0), h0 = 64.0;
+		float amt = abs(rayUp) > 1e-3 ? atmos0.w * exp(-falloff * h0) * (1.0 - exp(-falloff * rayUp * travel)) / (falloff * rayUp)
+			: atmos0.w * exp(-falloff * h0) * travel;
+		hide = clamp(1.0 - exp(-amt), 0.0, 0.85);
+	}
+	float cosSun = dot(V, normalize(sunDir.xyz));
+	float g = 0.6;
+	float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosSun, 1.5) * 0.08;
+	float3 haze = atmos0.rgb + atmos2.rgb * hg;
+	float3 shafts = 0;
+	if (atmos1.w > 0 && atmos1.z > 0) {
+		float2 stepUV = (atmos1.xy - vuv) / 40.0 * 0.9;
+		float2 s = vuv;
+		float decay = 1.0, acc = 0.0;
+		[loop] for (int k = 0; k < 40; k++) {
+			s += stepUV;
+			if (any(s < 0) || any(s > 1)) break;
+			int2 sp = int2(viewport.xy + s * viewport.zw);
+			float sd = Tex2D[indices0.w].Load(int3(sp, 0)).r;
+			float lum = dot(Tex2D[srcSrv].Load(int3(sp, 0)).rgb, float3(0.2126, 0.7152, 0.0722));
+			acc += (sd <= 0.0 ? min(lum, 1.5) : 0.0) * decay;
+			decay *= 0.96;
+		}
+		shafts = atmos2.rgb * acc / 40.0 * atmos1.w * smoothstep(-0.1, 0.6, cosSun) * atmos1.z;
+	}
+	if (sky) shafts *= 0.25;
+	return c * (1 - hide) + haze * hide + shafts;
+}
+
+// rend2 colour grade (r_grade 1): white balance, exposure, contrast around middle grey, saturation, split toning
+float3 GradePre(float3 c)
+{
+	const float3 LUM = float3(0.2126, 0.7152, 0.0722);
+	c *= grade0.x * grade3.rgb;
+	const float grey = 0.18;
+	c = grey * pow(max(c, 1e-6) / grey, grade0.y);
+	float y = dot(c, LUM);
+	c = max(0, lerp(y, c, grade0.z));
+	float t = smoothstep(0.0, 1.0, saturate(log2(max(y, 1e-6) / grey) * 0.25 + 0.5));
+	return c * lerp(grade1.rgb, grade2.rgb, t);
+}
+
+// black crush and vignette (display-referred)
+float3 GradePost(float3 c, float2 vuv)
+{
+	c = max(0, c - grade2.w) / (1.0 - grade2.w);
+	float2 v = vuv - 0.5;
+	return c * (1.0 - grade0.w * smoothstep(0.15, 0.75, dot(v, v) * 2.0));
+}
+
+float4 TonemapPS(FsOut i) : SV_Target0
 {
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
 	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
 	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
-	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
+	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb);
+	if (atmos3.y > 0.5) c = Atmosphere(c, i.uv, int2(i.pos.xy));
+	c *= Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
+	if (grade3.w > 0.5) c = GradePre(c);
 	if (skyParams.w > 0.5) {
 		c = extraParams.y > 0.5 ? AgX(c) : ACESFitted(c * 1.4);
 		float2 v = i.uv - 0.5;
-		c *= 1 - dot(v, v) * 0.2;
+		if (grade3.w <= 0.5) c *= 1 - dot(v, v) * 0.2;
 	}
 	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
+	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 	c = LinearToSrgb(c);
 	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 	c += (n - 0.5) / 255.0;
@@ -1447,6 +1563,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -1585,6 +1710,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -1761,6 +1895,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -1962,6 +2105,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -2212,6 +2364,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -2414,6 +2575,15 @@ cbuffer View : register(b1)
 	float4 extraParams;        // x overbright scale (2^r_overBrightBits, applied when presenting), y 1 = AgX tone mapping, z 1 = keep the sky portal view, w wind (units)
 	float4x4 viewProjNoJitter; // TAA: this frame without the jitter
 	uint4 probeParams;         // x reflection probe buffer, y probe count, z strength (asfloat)
+	float4 bspSun;             // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float4 grade0;             // rend2 colour grade: exposure mul, contrast, saturation, vignette
+	float4 grade1;             // shadow tint rgb, curve
+	float4 grade2;             // highlight tint rgb, black crush
+	float4 grade3;             // white balance rgb, w 1 = on
+	float4 atmos0;             // rend2 atmosphere: haze rgb, density
+	float4 atmos1;             // sun screen uv, sun visible, shaft strength
+	float4 atmos2;             // sun rgb, height falloff
+	float4 atmos3;             // x haze start, y 1 = on
 };
 float3 Sane(float3 c) { c = isnan(c) ? 0 : c; return clamp(c, 0, 32000.0); }   // NaN -> 0, overflow (inf) -> bright, never black
 float Overbright() { return max(extraParams.x, 1.0); }
@@ -2639,7 +2809,8 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	float3 em = m.emissive;
 	if (m.emissiveTex) em *= Tex2D[NonUniformResourceIndex(m.emissiveTex)].Sample(sWrap, i.uv).rgb;
 	GBufferOut o;
-	o.albedo = float4(albedo.rgb, ao);
+	o.albedo = fl)KTSRC",
+R"KTSRC(oat4(albedo.rgb, ao);
 	// foliage (Blender Translucent BSDF): +8 in the metal channel, the lighting pass lets sun through the leaves
 	o.normal = float4(EncodeNormal(n), clamp(rough, 0.045, 1.0), saturate(metal) + ((m.mflags & 128) ? 8.0 : 0.0));
 	o.emissive = float4(em, 0);
@@ -2655,8 +2826,7 @@ void ShadowPS(VsOut i)
 	clip(a - m.alphaCutoff);
 }
 
-// ---- FX pass: water and flowing water, drawn into the lit )KTSRC",
-R"KTSRC(HDR scene (blend: rgb + dst * a)
+// ---- FX pass: water and flowing water, drawn into the lit HDR scene (blend: rgb + dst * a)
 float3 FxSky(float3 d, float lod)
 {
 	if (indices2.x) {

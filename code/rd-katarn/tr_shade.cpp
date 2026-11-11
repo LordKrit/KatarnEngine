@@ -31,6 +31,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include <string>
 #include "katarn/kt_render.h"
 extern int kt_worldDeluxe;   // tr_bsp.cpp
+bool KT_ShadowCaster(const shader_t* sh);   // tr_bsp.cpp
 
 /*
 
@@ -1984,6 +1985,7 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	d.skin = st->ktSkin;
 	d.specTex = st->ktSpec ? st->ktSpec->texnum : 0;
 	d.parallax = st->ktParallax;
+	if (st->ktNormal && st->ktNormalGen) flags |= 32;
 	d.flags = flags;
 	d.roughness = world ? 0.7f : 0.78f;   // characters: cloth / skin (0.55 read as plastic)
 	d.metallic = 0.0f;
@@ -1993,7 +1995,8 @@ static uint32_t KT_TryDeferred(shaderCommands_t* input)
 	if (sh->cullType == CT_TWO_SIDED) d.cull = 0;
 	else if (sh->cullType == CT_BACK_SIDED) d.cull = backEnd.viewParms.isMirror ? 1 : 2;
 	else d.cull = backEnd.viewParms.isMirror ? 2 : 1;
-	d.castShadow = world || !(ent->e.renderfx & RF_NOSHADOW);
+	// map surfaces in the static sun-shadow mesh are drawn from there (casters off screen too)
+	d.castShadow = world ? !(bspMode && kt::R_BspShadowMesh() && KT_ShadowCaster(sh)) : !(ent->e.renderfx & RF_NOSHADOW);
 	if (bspMode && !world) {
 		// light grid (as rend2 / the old renderer light models): ambient + one directed light, in world space
 		for (int k = 0; k < 3; k++) {

@@ -999,6 +999,49 @@ R_CreateImage
 This is the only way any image_t are created
 ================
 */
+// KatarnEngine: rend2's r_genNormalMaps - a tangent-space normal map from the texture's brightness (Sobel over the
+// luma as height, levelled out; alpha keeps the height), cached as <texture>_kgn
+image_t* KT_GenerateNormalMap(const char* diffuseName, qboolean mip, qboolean picmip, bool clamp)
+{
+	char name[MAX_QPATH];
+	COM_StripExtension(diffuseName, name, sizeof(name));
+	Q_strcat(name, sizeof(name), "_kgn");
+	if (image_t* cached = R_FindImageFile_NoLoad(name, mip, picmip, qfalse, clamp ? GL_CLAMP : GL_REPEAT)) return cached;
+	byte* pic = nullptr;
+	int w = 0, h = 0;
+	R_LoadImage(diffuseName, &pic, &w, &h);
+	if (!pic || w < 4 || h < 4) { if (pic) R_Free(pic); return nullptr; }
+	byte* out = (byte*)R_Malloc(w * h * 4, TAG_TEMP_WORKSPACE, qfalse);
+	int mx = 1;
+	for (int i = 0; i < w * h; i++) {
+		const byte* in = pic + i * 4;
+		int v = (in[0] >> 2) + (in[1] >> 1) + (in[2] >> 2);
+		v = v * v / 255;   // make linear
+		out[i * 4 + 3] = (byte)v;
+		mx = Q_max(mx, v);
+	}
+	for (int i = 0; i < w * h; i++) out[i * 4 + 3] = (byte)(out[i * 4 + 3] + (255 - mx));   // level out heights
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++) {
+			int s[9], k = 0;
+			for (int y2 = -1; y2 <= 1; y2++)
+				for (int x2 = -1; x2 <= 1; x2++) {
+					int sy = clamp ? Q_max(0, Q_min(h - 1, y + y2)) : (y + y2 + h) % h;
+					int sx = clamp ? Q_max(0, Q_min(w - 1, x + x2)) : (x + x2 + w) % w;
+					s[k++] = out[(sy * w + sx) * 4 + 3];
+				}
+			float n[3] = { (float)(s[0] - s[2] + 2 * s[3] - 2 * s[5] + s[6] - s[8]), (float)(s[0] + 2 * s[1] + s[2] - s[6] - 2 * s[7] - s[8]), (float)(s[4] * 4) };
+			float l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+			if (l < 1e-6f) { n[0] = n[1] = 0; n[2] = 1; } else { n[0] /= l; n[1] /= l; n[2] /= l; }
+			byte* o = out + (y * w + x) * 4;
+			for (int c = 0; c < 3; c++) o[c] = (byte)Q_max(0, Q_min(255, (int)((n[c] * 0.5f + 0.5f) * 255.0f + 0.5f)));
+		}
+	R_Free(pic);
+	image_t* img = R_CreateImage(name, out, w, h, GL_RGBA, mip, picmip, qfalse, clamp ? GL_CLAMP : GL_REPEAT);
+	R_Free(out);
+	return img;
+}
+
 image_t* R_CreateImage(const char* name, const byte* pic, const int width, const int height,
 	const GLenum format, const qboolean mipmap, const qboolean allow_picmip, const qboolean allow_tc, int gl_wrap_clamp_mode)
 {

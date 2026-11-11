@@ -128,6 +128,11 @@ void Probes_SetEntities(const char* entityText);   // tr_bsp: the BSP entity str
 void Probes_BeginFrame();                           // RE_BeginFrame: queues this frame's capture views
 void Probes_NoteScene(const void* refdef);          // RE_RenderScene: the game drew a world view (refdef_t*)
 
+// sun shadows on old BSP maps (rend2 r_forceSun / r_sunlightMode 1): the static opaque world, drawn into the sun
+// cascades from one buffer (casters behind the camera too); positions only, world space
+void R_SetBspShadowMesh(const float* pos, uint32_t numVerts, const uint32_t* idx, uint32_t numIdx);
+bool R_BspShadowMesh();
+
 void R_GfxInfo();
 extern void (*g_logCallback)(const char* msg);
 

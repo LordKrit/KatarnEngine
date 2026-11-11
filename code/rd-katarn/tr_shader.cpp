@@ -2254,7 +2254,7 @@ static qboolean ParseShader(const char** text)
 			ParseMaterial(text);
 		}
 		// sun parms
-		else if (!Q_stricmp(token, "sun") || !Q_stricmp(token, "q3map_sun") || !Q_stricmp(token, "q3map_sunExt"))
+		else if (!Q_stricmp(token, "sun") || !Q_stricmp(token, "q3map_sun") || !Q_stricmp(token, "q3map_sunExt") || !Q_stricmp(token, "q3gl2_sun"))
 		{
 			token = COM_ParseExt(text, qfalse);
 			tr.sunLight[0] = atof(token);
@@ -2280,6 +2280,9 @@ static qboolean ParseShader(const char** text)
 			tr.sunDirection[0] = cos(a) * cos(b);
 			tr.sunDirection[1] = sin(a) * cos(b);
 			tr.sunDirection[2] = sin(b);
+			// kept with the shader too: a cached sky shader is not parsed again on the next map
+			shader.ktHasSun = true;
+			VectorCopy(tr.sunDirection, shader.ktSunDir);
 
 			SkipRestOfLine(text);
 		}
@@ -2970,6 +2973,9 @@ from the current global working shader
 // KatarnEngine: rend2's automatic material maps. A lit model stage with no normal / material maps of its own looks
 // for <diffuse>_nh / _n next to its texture, then <diffuse>_rmo / _orm / _specGloss (as rend2 does with
 // r_normalMapping / r_specularMapping), so models made for rend2 without a shader file still get their PBR maps.
+image_t* KT_GenerateNormalMap(const char* diffuseName, qboolean mip, qboolean picmip, bool clamp);   // tr_image.cpp
+extern cvar_t* r_genNormalMaps;
+
 static void KT_AutoMaterialMaps()
 {
 	if (shader.sky) return;
@@ -2998,6 +3004,11 @@ static void KT_AutoMaterialMaps()
 			st->ktNormal = R_FindImageFile(name, mip, pic, qfalse, GL_REPEAT);
 			if (st->ktNormal && !st->ktParallax) st->ktParallax = 0.05f;   // normal + height
 			if (!st->ktNormal) { Com_sprintf(name, sizeof(name), "%s_n", base); st->ktNormal = R_FindImageFile(name, mip, pic, qfalse, GL_REPEAT); }
+			// none: made from the texture, like rend2's r_genNormalMaps
+			if (!st->ktNormal && r_genNormalMaps && r_genNormalMaps->integer) {
+				st->ktNormal = KT_GenerateNormalMap(diffuse->imgName, mip, pic, diffuse->wrapClampMode != GL_REPEAT);
+				st->ktNormalGen = st->ktNormal != nullptr;
+			}
 		}
 		if (!st->ktRmo && !st->ktSpec) {
 			Com_sprintf(name, sizeof(name), "%s_rmo", base);

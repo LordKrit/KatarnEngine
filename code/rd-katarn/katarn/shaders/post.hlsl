@@ -156,20 +156,87 @@ float3 AgX(float3 c)
 	return pow(saturate(c), 2.2);   // display-referred, linearised again for the sRGB encode below
 }
 
+// rend2 atmosphere (r_atmos): distance + height haze lit by the sun and screen-space sun shafts, on the HDR scene
+float3 Atmosphere(float3 c, float2 vuv, int2 px)
+{
+	float d = Tex2D[indices0.w].Load(int3(px, 0)).r;
+	bool sky = d <= 0.0;
+	float2 ndc = vuv * float2(2, -2) + float2(-1, 1);
+	float4 wp = mul(invViewProj, float4(ndc, sky ? 1e-6 : d, 1));
+	float3 P = wp.xyz / wp.w;
+	float3 dv = P - camPos.xyz;
+	float dist = length(dv);
+	float3 V = dv / max(dist, 1e-3);
+	float hide = 0;
+	if (atmos0.w > 0 && !sky) {
+		float falloff = max(atmos2.w, 1e-5), rayUp = V.z, travel = max(dist - atmos3.x, 0.0), h0 = 64.0;
+		float amt = abs(rayUp) > 1e-3 ? atmos0.w * exp(-falloff * h0) * (1.0 - exp(-falloff * rayUp * travel)) / (falloff * rayUp)
+			: atmos0.w * exp(-falloff * h0) * travel;
+		hide = clamp(1.0 - exp(-amt), 0.0, 0.85);
+	}
+	float cosSun = dot(V, normalize(sunDir.xyz));
+	float g = 0.6;
+	float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosSun, 1.5) * 0.08;
+	float3 haze = atmos0.rgb + atmos2.rgb * hg;
+	float3 shafts = 0;
+	if (atmos1.w > 0 && atmos1.z > 0) {
+		float2 stepUV = (atmos1.xy - vuv) / 40.0 * 0.9;
+		float2 s = vuv;
+		float decay = 1.0, acc = 0.0;
+		[loop] for (int k = 0; k < 40; k++) {
+			s += stepUV;
+			if (any(s < 0) || any(s > 1)) break;
+			int2 sp = int2(viewport.xy + s * viewport.zw);
+			float sd = Tex2D[indices0.w].Load(int3(sp, 0)).r;
+			float lum = dot(Tex2D[srcSrv].Load(int3(sp, 0)).rgb, float3(0.2126, 0.7152, 0.0722));
+			acc += (sd <= 0.0 ? min(lum, 1.5) : 0.0) * decay;
+			decay *= 0.96;
+		}
+		shafts = atmos2.rgb * acc / 40.0 * atmos1.w * smoothstep(-0.1, 0.6, cosSun) * atmos1.z;
+	}
+	if (sky) shafts *= 0.25;
+	return c * (1 - hide) + haze * hide + shafts;
+}
+
+// rend2 colour grade (r_grade 1): white balance, exposure, contrast around middle grey, saturation, split toning
+float3 GradePre(float3 c)
+{
+	const float3 LUM = float3(0.2126, 0.7152, 0.0722);
+	c *= grade0.x * grade3.rgb;
+	const float grey = 0.18;
+	c = grey * pow(max(c, 1e-6) / grey, grade0.y);
+	float y = dot(c, LUM);
+	c = max(0, lerp(y, c, grade0.z));
+	float t = smoothstep(0.0, 1.0, saturate(log2(max(y, 1e-6) / grey) * 0.25 + 0.5));
+	return c * lerp(grade1.rgb, grade2.rgb, t);
+}
+
+// black crush and vignette (display-referred)
+float3 GradePost(float3 c, float2 vuv)
+{
+	c = max(0, c - grade2.w) / (1.0 - grade2.w);
+	float2 v = vuv - 0.5;
+	return c * (1.0 - grade0.w * smoothstep(0.15, 0.75, dot(v, v) * 2.0));
+}
+
 float4 TonemapPS(FsOut i) : SV_Target0
 {
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
 	// sky portal maps: pixels the main view drew nothing on (depth 0) keep the portal view drawn before it. Only then:
 	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
-	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb) * Exposure();
+	float3 c = Sane(Tex2D[srcSrv].SampleLevel(sClampPoint, uv, 0).rgb);
+	if (atmos3.y > 0.5) c = Atmosphere(c, i.uv, int2(i.pos.xy));
+	c *= Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
+	if (grade3.w > 0.5) c = GradePre(c);
 	if (skyParams.w > 0.5) {
 		c = extraParams.y > 0.5 ? AgX(c) : ACESFitted(c * 1.4);
 		float2 v = i.uv - 0.5;
-		c *= 1 - dot(v, v) * 0.2;
+		if (grade3.w <= 0.5) c *= 1 - dot(v, v) * 0.2;
 	}
 	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
+	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 	c = LinearToSrgb(c);
 	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 	c += (n - 0.5) / 255.0;

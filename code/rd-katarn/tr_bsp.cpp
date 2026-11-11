@@ -174,6 +174,63 @@ static bool KT_DeluxeMapped(const lump_t* l)
 	return at != std::string::npos && at + 1 < ents.size() && ents[at + 1] == '1';
 }
 
+// KatarnEngine: map surfaces that go into the static sun-shadow mesh: opaque, not alpha tested, not deformed
+bool KT_ShadowCaster(const shader_t* sh)
+{
+	if (!sh || sh->defaultShader || sh->sky || sh->sort != SS_OPAQUE || sh->numDeforms || !sh->stages || !sh->stages[0].active) return false;
+	if (sh->surfaceFlags & (SURF_NODRAW | SURF_SKY)) return false;
+	if (sh->contentFlags & CONTENTS_FOG) return false;
+	for (int i = 0; i < MAX_SHADER_STAGES && sh->stages[i].active; i++)
+		if (sh->stages[i].stateBits & GLS_ATEST_BITS) return false;
+	return true;
+}
+
+static void KT_WorldSunAndShadows(world_t& w)
+{
+	if (!w.bmodels || !w.numsurfaces) return;
+	const bmodel_t& bm = w.bmodels[0];
+	// a sky shader that carries the sun
+	for (int i = 0; i < bm.numSurfaces; i++) {
+		const shader_t* sh = bm.firstSurface[i].shader;
+		if (sh && sh->ktHasSun) { VectorCopy(sh->ktSunDir, tr.sunDirection); break; }
+	}
+	std::vector<float> pos;
+	std::vector<uint32_t> idx;
+	for (int i = 0; i < bm.numSurfaces; i++) {
+		const msurface_t& s = bm.firstSurface[i];
+		if (!s.data || !KT_ShadowCaster(s.shader)) continue;
+		const uint32_t base = (uint32_t)(pos.size() / 3);
+		switch (*s.data) {
+		case SF_FACE: {
+			const srfSurfaceFace_t* f = (const srfSurfaceFace_t*)s.data;
+			const int* ind = (const int*)((const byte*)f + f->ofsIndices);
+			for (int v = 0; v < f->numPoints; v++) { pos.push_back(f->points[v][0]); pos.push_back(f->points[v][1]); pos.push_back(f->points[v][2]); }
+			for (int k = 0; k < f->numIndices; k++) idx.push_back(base + (uint32_t)ind[k]);
+			break;
+		}
+		case SF_TRIANGLES: {
+			const srfTriangles_t* t = (const srfTriangles_t*)s.data;
+			for (int v = 0; v < t->numVerts; v++) { pos.push_back(t->verts[v].xyz[0]); pos.push_back(t->verts[v].xyz[1]); pos.push_back(t->verts[v].xyz[2]); }
+			for (int k = 0; k < t->numIndexes; k++) idx.push_back(base + (uint32_t)t->indexes[k]);
+			break;
+		}
+		case SF_GRID: {
+			const srfGridMesh_t* gm = (const srfGridMesh_t*)s.data;
+			for (int v = 0; v < gm->width * gm->height; v++) { pos.push_back(gm->verts[v].xyz[0]); pos.push_back(gm->verts[v].xyz[1]); pos.push_back(gm->verts[v].xyz[2]); }
+			for (int y = 0; y + 1 < gm->height; y++)
+				for (int x = 0; x + 1 < gm->width; x++) {
+					uint32_t a = base + y * gm->width + x, b = a + gm->width;
+					idx.push_back(a); idx.push_back(b); idx.push_back(a + 1);
+					idx.push_back(b); idx.push_back(b + 1); idx.push_back(a + 1);
+				}
+			break;
+		}
+		default: break;
+		}
+	}
+	kt::R_SetBspShadowMesh(pos.data(), (uint32_t)(pos.size() / 3), idx.data(), (uint32_t)idx.size());
+}
+
 static	void R_LoadLightmaps(const lump_t* l, const char* ps_map_name, world_t& worldData)
 {
 	static byte		image[LIGHTMAP_SIZE * LIGHTMAP_SIZE * 4]{};
@@ -1428,6 +1485,9 @@ void RE_LoadWorldMap_Actual(const char* name, world_t& worldData, const int inde
 
 		// only set tr.world now that we know the entire level has loaded properly
 		tr.world = &worldData;
+
+		// KatarnEngine: the sun of a cached sky shader (not parsed again), and the sun shadow caster mesh
+		KT_WorldSunAndShadows(worldData);
 
 		// KatarnEngine: reflection probe positions from the entities (needs tr.world for the clusters)
 		{

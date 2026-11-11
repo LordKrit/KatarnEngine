@@ -41,10 +41,114 @@ static cvar_t* kt_tonemap = nullptr;
 static cvar_t* kt_fogScale = nullptr;
 static cvar_t* kt_dynGlow, * kt_contactShadows, * kt_lightShadows;
 static cvar_t* kt_probes = nullptr, * kt_probeScale = nullptr, * kt_parallax = nullptr, * kt_wind = nullptr;
+static cvar_t* kt_bspSun = nullptr, * kt_bspSunAmbient = nullptr, * kt_bspSunDist = nullptr;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
+
+// ------------------------------------------------------------------------------------------------ rend2 colour grade
+// rend2's tr_grade: r_grade* cvars, maps/<map>.grade files ("<cvar> <value>" lines, "preset <name>"), the "grade"
+// command (save / load / reset / preset). Same names and files as rend2, so a map's grade carries over.
+struct GradeVar { const char* name; const char* def; cvar_t* cv; };
+static GradeVar s_grade[] = {
+	{ "r_grade", "0", nullptr }, { "r_gradeCurve", "1", nullptr }, { "r_gradeExposure", "0", nullptr }, { "r_gradeContrast", "1.12", nullptr },
+	{ "r_gradeSaturation", "0.92", nullptr }, { "r_gradeTemperature", "0", nullptr }, { "r_gradeTint", "0", nullptr },
+	{ "r_gradeShadows", "1 1 1", nullptr }, { "r_gradeHighlights", "1 1 1", nullptr }, { "r_gradeBlack", "0", nullptr },
+	{ "r_gradeVignette", "0.25", nullptr },
+	{ "r_ssrStrength", "1", nullptr }, { "r_ssrGloss", "1", nullptr }, { "r_ssrRough", "1", nullptr },
+	{ "r_atmosDensity", "0", nullptr }, { "r_atmosFalloff", "0.0012", nullptr }, { "r_atmosStart", "256", nullptr },
+	{ "r_atmosColor", "0.55 0.6 0.7", nullptr }, { "r_atmosShafts", "0.6", nullptr },
+};
+static const int kNumGrade = (int)(sizeof(s_grade) / sizeof(s_grade[0]));
+static cvar_t* r_atmosCv = nullptr;
+struct GradePreset { const char* name; const char* v[10]; };
+static const GradePreset s_gradePresets[] = {
+	{ "default",  { "1", "0",    "1.12", "0.92", "0",     "0",     "1 1 1",          "1 1 1",          "0",    "0.25" } },
+	{ "interior", { "1", "-0.1", "1.22", "0.78", "-0.25", "0",     "0.92 0.97 1.08", "1.02 1.01 0.98", "0.02", "0.30" } },
+	{ "sunset",   { "2", "0.1",  "1.15", "1.05", "0.55",  "0.05",  "0.95 0.92 1.05", "1.10 1.00 0.86", "0.01", "0.30" } },
+	{ "daylight", { "2", "0",    "1.10", "0.95", "0.15",  "-0.05", "0.96 1.00 1.04", "1.04 1.02 0.96", "0.01", "0.20" } },
+	{ "space",    { "1", "0",    "1.25", "0.90", "0.20",  "0",     "0.90 0.95 1.10", "1.08 1.03 0.92", "0.03", "0.35" } },
+	{ "noir",     { "1", "0",    "1.30", "0.15", "0",     "0",     "1 1 1",          "1 1 1",          "0.03", "0.45" } },
+};
+
+static void GradeVec3(const char* s, float* o)
+{
+	o[0] = o[1] = o[2] = 1.0f;
+	if (sscanf(s, "%f %f %f", &o[0], &o[1], &o[2]) == 1) o[1] = o[2] = o[0];
+}
+
+static void GradeReset() { for (auto& g : s_grade) ri.Cvar_Set(g.name, g.def); }
+static void GradePreset(const GradePreset& p) { for (int i = 0; i < 10; i++) ri.Cvar_Set(s_grade[i + 1].name, p.v[i]); }
+
+static void GradePath(char* out, int size)
+{
+	char base[MAX_QPATH];
+	Q_strncpyz(base, COM_SkipPath(tr.world ? tr.world->name : (char*)"nomap"), sizeof(base));
+	COM_StripExtension(base, base, sizeof(base));
+	Com_sprintf(out, size, "maps/%s.grade", base);
+}
+
+static void GradeLoadForMap()
+{
+	if (!s_grade[0].cv) return;
+	char path[MAX_QPATH];
+	GradePath(path, sizeof(path));
+	GradeReset();
+	char* buf = nullptr;
+	if (ri.FS_ReadFile(path, (void**)&buf) <= 0 || !buf) return;
+	const char* p = buf;
+	int set = 0;
+	while (*p) {
+		char line[256]; int n = 0;
+		while (*p && *p != '\n' && n < 255) line[n++] = *p++;
+		line[n] = 0;
+		if (*p) p++;
+		if (char* cm = strstr(line, "//")) *cm = 0;
+		char key[64], val[192];
+		if (sscanf(line, " %63s %191[^\r\n]", key, val) != 2) continue;
+		char* v = val; while (*v == ' ' || *v == '"') v++;
+		for (char* e = v + strlen(v) - 1; e >= v && (*e == ' ' || *e == '"'); e--) *e = 0;
+		if (!Q_stricmp(key, "preset")) { for (const auto& pr : s_gradePresets) if (!Q_stricmp(v, pr.name)) { GradePreset(pr); set++; } continue; }
+		for (auto& g : s_grade) if (!Q_stricmp(key, g.name)) { ri.Cvar_Set(g.name, v); set++; }
+	}
+	ri.FS_FreeFile(buf);
+	ri.Printf(PRINT_ALL, "grade: loaded %s (%d settings)\n", path, set);
+}
+
+static void Grade_f()
+{
+	const char* cmd = ri.Cmd_Argc() > 1 ? ri.Cmd_Argv(1) : "";
+	char path[MAX_QPATH];
+	GradePath(path, sizeof(path));
+	if (!Q_stricmp(cmd, "save")) {
+		char out[2048]; int len = 0;
+		len += Com_sprintf(out + len, sizeof(out) - len, "// colour grade for %s (written by \"grade save\")\n", path);
+		for (int i = 1; i < kNumGrade; i++) len += Com_sprintf(out + len, sizeof(out) - len, "%s \"%s\"\n", s_grade[i].name, s_grade[i].cv->string);
+		ri.FS_WriteFile(path, out, len);
+		ri.Printf(PRINT_ALL, "grade: saved %s\n", path);
+	}
+	else if (!Q_stricmp(cmd, "reset")) { GradeReset(); ri.Printf(PRINT_ALL, "grade: defaults restored\n"); }
+	else if (!Q_stricmp(cmd, "load")) GradeLoadForMap();
+	else if (!Q_stricmp(cmd, "preset")) {
+		const char* n = ri.Cmd_Argc() > 2 ? ri.Cmd_Argv(2) : "";
+		for (const auto& pr : s_gradePresets) if (!Q_stricmp(n, pr.name)) { GradePreset(pr); ri.Printf(PRINT_ALL, "grade: preset %s\n", pr.name); return; }
+		ri.Printf(PRINT_ALL, "grade preset <name>:");
+		for (const auto& pr : s_gradePresets) ri.Printf(PRINT_ALL, " %s", pr.name);
+		ri.Printf(PRINT_ALL, "\n");
+	}
+	else {
+		ri.Printf(PRINT_ALL, "grade save | load | reset | preset <name>   (map file: %s)\n", path);
+		for (auto& g : s_grade) ri.Printf(PRINT_ALL, "  %-20s %s\n", g.name, g.cv->string);
+	}
+}
 
 static void RegisterCvars()
 {
+	for (auto& gv : s_grade) gv.cv = KtCvar(gv.name, gv.def, CVAR_ARCHIVE);
+	r_atmosCv = KtCvar("r_atmos", "1", CVAR_ARCHIVE);
+#ifdef KT_MP
+	ri.Cmd_AddCommand("grade", Grade_f, "colour grade: save | load | reset | preset <name>");
+#else
+	ri.Cmd_AddCommand("grade", Grade_f);
+#endif
 	kt_debug = KtCvar("kt_debug", "0", CVAR_LATCH);
 	kt_ssao = KtCvar("kt_ssao", "1", CVAR_ARCHIVE);
 	kt_shadows = KtCvar("kt_shadows", "1", CVAR_ARCHIVE);
@@ -78,7 +182,12 @@ static void RegisterCvars()
 	kt_probes = KtCvar("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
 	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
-	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)   // 1: Katarn draws its own procedural blades instead of the game's
+	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)
+	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
+	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
+	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
+	kt_bspSunAmbient = KtCvar("kt_bspSunAmbient", "0.5", CVAR_ARCHIVE);
+	kt_bspSunDist = KtCvar("kt_bspSunDist", "3072", CVAR_ARCHIVE);   // 1: Katarn draws its own procedural blades instead of the game's
 
 	// settings saved by older builds (tuning experiments) are put back to the current defaults once
 	cvar_t* ver = KtCvar("kt_configVersion", "0", CVAR_ARCHIVE);
@@ -141,6 +250,10 @@ struct ViewConstants {
 	float extraParams[4];      // x overbright scale (2^r_overBrightBits, applied when the frame is presented)
 	float viewProjNoJitter[16];   // this frame's view-projection without the TAA jitter
 	uint32_t probeParams[4];      // x reflection probe buffer, y probe count, z strength (float)
+	float bspSun[4];              // old BSP maps: x 1 = sun shadows modulate the baked light, y light kept in shadow
+	float grade0[4], grade1[4], grade2[4], grade3[4];   // rend2 colour grade (r_grade*), grade3.w 1 = on
+	float atmos0[4], atmos1[4], atmos2[4];             // rend2 atmosphere (r_atmos*): haze rgb + density; sun uv, visible, shafts; sun rgb + falloff
+	float atmos3[4];                                    // x haze start, y 1 = on
 };
 
 struct LVert { float pos[3]; float normal[3]; float uv[2]; float lmuv[2]; uint32_t color; };
@@ -202,6 +315,9 @@ static struct RState {
 	bool capture = false;            // this view is a probe capture
 	int capProbe = 0, capFace = 0;
 	float capSavedVP[16] = {};
+	// old BSP maps: static sun-shadow caster mesh
+	Buffer bspVB, bspIB, bspCB;
+	uint32_t bspIndexCount = 0, bspVertCount = 0;
 } R;
 static constexpr uint32_t kProbeSize = 128, kProbeMips = 8, kMaxProbes = 64;
 
@@ -520,12 +636,16 @@ bool R_Init(void* hwnd, int width, int height)
 void R_Shutdown()
 {
 	if (!g.dev) return;
+	ri.Cmd_RemoveCommand("grade");
 	if (R.cl) { SubmitList(R.cl); R.cl = nullptr; }
 	WaitIdle();
 	World_Shutdown();
 	GL_ShutdownTextures();
 	DestroyTargets();
 	ProbesDestroy();
+	if (R.bspVB.res) DestroyBuffer(R.bspVB);
+	if (R.bspIB.res) DestroyBuffer(R.bspIB);
+	if (R.bspCB.res) DestroyBuffer(R.bspCB);
 	DestroyBuffer(R.exposure);
 	DestroyBuffer(R.sh);
 	for (auto& kv : R.psos) if (kv.second) kv.second->Release();
@@ -773,9 +893,59 @@ void R_BeginView(const ViewDesc& v)
 	}
 	if (!World_Active()) c.postParams[2] = 1.0f;   // legacy maps: fixed exposure (their content is display-referred)
 
+	// old BSP maps: rend2's forced sun - the sky shader's q3map_sun direction (or rend2's default), shadows only
+	bool bspSun = v.world && !World_Active() && kt_bspSun->integer && kt_shadows->integer && R.bspIndexCount && tr.world;
+	if (bspSun) {
+		sd[0] = tr.sunDirection[0]; sd[1] = tr.sunDirection[1]; sd[2] = tr.sunDirection[2];
+		Norm3(sd);
+		if (sd[2] < 0.05f) bspSun = false;
+		c.sunDir[0] = sd[0]; c.sunDir[1] = sd[1]; c.sunDir[2] = sd[2];
+		c.bspSun[0] = bspSun ? 1.0f : 0.0f;
+		c.bspSun[1] = Q_max(0.0f, Q_min(1.0f, kt_bspSunAmbient->value));
+	}
+
+	// rend2 colour grade (any map) and atmosphere (old BSP maps: haze + screen-space sun shafts)
+	if (s_grade[0].cv && s_grade[0].cv->integer && !R.capture) {
+		float sh[3], hi[3];
+		GradeVec3(s_grade[7].cv->string, sh); GradeVec3(s_grade[8].cv->string, hi);
+		c.grade0[0] = powf(2.0f, s_grade[2].cv->value); c.grade0[1] = s_grade[3].cv->value; c.grade0[2] = s_grade[4].cv->value;
+		c.grade0[3] = Q_max(0.0f, Q_min(1.0f, s_grade[10].cv->value));
+		c.grade1[0] = sh[0]; c.grade1[1] = sh[1]; c.grade1[2] = sh[2]; c.grade1[3] = (float)s_grade[1].cv->integer;
+		c.grade2[0] = hi[0]; c.grade2[1] = hi[1]; c.grade2[2] = hi[2]; c.grade2[3] = Q_max(0.0f, Q_min(0.2f, s_grade[9].cv->value));
+		float t = Q_max(-1.0f, Q_min(1.0f, s_grade[5].cv->value)), m = Q_max(-1.0f, Q_min(1.0f, s_grade[6].cv->value));
+		c.grade3[0] = 1.0f + 0.18f * t + 0.06f * m; c.grade3[1] = 1.0f - 0.12f * m; c.grade3[2] = 1.0f - 0.18f * t + 0.06f * m;
+		float lum = 0.2126f * c.grade3[0] + 0.7152f * c.grade3[1] + 0.0722f * c.grade3[2];
+		c.grade3[0] /= lum; c.grade3[1] /= lum; c.grade3[2] /= lum;
+		c.grade3[3] = 1.0f;
+	}
+	if (v.world && !World_Active() && !R.capture && !v.skyPortal && r_atmosCv && r_atmosCv->integer && tr.world
+		&& (s_grade[14].cv->value > 0 || s_grade[18].cv->value > 0)) {
+		float col[3] = { 0.55f, 0.6f, 0.7f };
+		sscanf(s_grade[17].cv->string, "%f %f %f", &col[0], &col[1], &col[2]);
+		float sun[3] = { tr.sunDirection[0], tr.sunDirection[1], tr.sunDirection[2] };
+		Norm3(sun);
+		// the sun on screen
+		float sunPt[4] = { v.origin[0] + sun[0] * 1e5f, v.origin[1] + sun[1] * 1e5f, v.origin[2] + sun[2] * 1e5f, 1 }, cp[4];
+		for (int r = 0; r < 4; r++) cp[r] = R.viewProj[r] * sunPt[0] + R.viewProj[4 + r] * sunPt[1] + R.viewProj[8 + r] * sunPt[2] + R.viewProj[12 + r];
+		float vis = 0, su = 0.5f, sv = 0.5f;
+		if (cp[3] > 0) {
+			su = cp[0] / cp[3] * 0.5f + 0.5f; sv = -cp[1] / cp[3] * 0.5f + 0.5f;
+			float off = Q_max(fabsf(su - 0.5f), fabsf(sv - 0.5f));
+			vis = Q_max(0.0f, Q_min(1.0f, (1.2f - off) / 0.5f));
+		}
+		float smax = Q_max(tr.sunLight[0], Q_max(tr.sunLight[1], tr.sunLight[2]));
+		float scol[3] = { 1, 0.95f, 0.85f };
+		if (smax > 0) for (int k = 0; k < 3; k++) scol[k] = tr.sunLight[k] / smax;
+		c.atmos0[0] = col[0]; c.atmos0[1] = col[1]; c.atmos0[2] = col[2]; c.atmos0[3] = Q_max(0.0f, s_grade[14].cv->value);
+		c.atmos1[0] = su; c.atmos1[1] = sv; c.atmos1[2] = vis; c.atmos1[3] = Q_max(0.0f, s_grade[18].cv->value);
+		c.atmos2[0] = scol[0]; c.atmos2[1] = scol[1]; c.atmos2[2] = scol[2]; c.atmos2[3] = Q_max(1e-5f, s_grade[15].cv->value);
+		c.atmos3[0] = s_grade[16].cv->value; c.atmos3[1] = 1.0f;
+		c.sunDir[0] = sun[0]; c.sunDir[1] = sun[1]; c.sunDir[2] = sun[2];
+	}
+
 	// sun cascades
-	float shadowDist = Q_max(500.0f, kt_shadowDist->value);
-	bool shadows = v.world && kt_shadows->integer && World_Active() && c.sunColor[3] > 0 && sd[2] > -0.05f;
+	float shadowDist = bspSun ? Q_max(500.0f, kt_bspSunDist->value) : Q_max(500.0f, kt_shadowDist->value);
+	bool shadows = v.world && kt_shadows->integer && ((World_Active() && c.sunColor[3] > 0) || bspSun) && sd[2] > -0.05f;
 	if (shadows) {
 		float n = Q_max(4.0f, v.zNear), f = shadowDist;
 		float splits[5] = { n };
@@ -946,6 +1116,51 @@ static void FullscreenPass(ID3D12GraphicsCommandList* cl, ID3D12PipelineState* p
 	cl->DrawInstanced(3, 1, 0, 0);
 }
 
+// old BSP maps: the static world into one sun cascade (the legacy shadow pipeline, an identity object matrix)
+static void DrawBspShadow(ID3D12GraphicsCommandList* cl, int cascade)
+{
+	if (!R.bspIndexCount || !R.lgShadowPSO) return;
+	cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	uint32_t rc[2] = { (uint32_t)cascade, 1u };
+	cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 2, rc, 0);
+	cl->SetPipelineState(R.lgShadowPSO);
+	cl->SetGraphicsRootConstantBufferView(RP_EXTRA_CBV, R.bspCB.res->GetGPUVirtualAddress());
+	D3D12_VERTEX_BUFFER_VIEW vbv = { R.bspVB.res->GetGPUVirtualAddress(), R.bspVertCount * (UINT)sizeof(LVert), sizeof(LVert) };
+	D3D12_INDEX_BUFFER_VIEW ibv = { R.bspIB.res->GetGPUVirtualAddress(), R.bspIndexCount * 4, DXGI_FORMAT_R32_UINT };
+	cl->IASetVertexBuffers(0, 1, &vbv);
+	cl->IASetIndexBuffer(&ibv);
+	cl->DrawIndexedInstanced(R.bspIndexCount, 1, 0, 0, 0);
+	cl->SetGraphicsRootConstantBufferView(RP_EXTRA_CBV, R.viewCB);
+}
+
+bool R_BspShadowMesh() { return R.bspIndexCount > 0; }
+
+void R_SetBspShadowMesh(const float* pos, uint32_t numVerts, const uint32_t* idx, uint32_t numIdx)
+{
+	if (R.bspVB.res) DestroyBuffer(R.bspVB);
+	if (R.bspIB.res) DestroyBuffer(R.bspIB);
+	R.bspIndexCount = R.bspVertCount = 0;
+	if (!R.ready || !numVerts || !numIdx) return;
+	std::vector<LVert> v(numVerts);
+	for (uint32_t i = 0; i < numVerts; i++) {
+		memset(&v[i], 0, sizeof(LVert));
+		v[i].pos[0] = pos[i * 3]; v[i].pos[1] = pos[i * 3 + 1]; v[i].pos[2] = pos[i * 3 + 2];
+		v[i].normal[2] = 1.0f;
+	}
+	if (!CreateBuffer(R.bspVB, (uint64_t)numVerts * sizeof(LVert), false, "bsp shadow vb") || !CreateBuffer(R.bspIB, (uint64_t)numIdx * 4, false, "bsp shadow ib"))
+		return;
+	UploadBuffer(R.bspVB, 0, v.data(), (uint64_t)numVerts * sizeof(LVert));
+	UploadBuffer(R.bspIB, 0, idx, (uint64_t)numIdx * 4);
+	if (!R.bspCB.res && CreateBuffer(R.bspCB, 256, false, "bsp shadow cb")) {
+		float cb[64] = {};
+		cb[16] = 1; cb[21] = 1; cb[26] = 1;   // objRow0..2 = identity (after the 4x4 gMvp)
+		UploadBuffer(R.bspCB, 0, cb, 256);
+	}
+	R.bspVertCount = numVerts;
+	R.bspIndexCount = numIdx;
+	Log("KatarnEngine: sun shadow mesh %u triangles\n", numIdx / 3);
+}
+
 static void ProbeCaptureFace(ID3D12GraphicsCommandList* cl);
 static void RenderWorldView()
 {
@@ -1003,6 +1218,7 @@ static void RenderWorldView()
 			cl->RSSetScissorRects(1, &src);
 			if (R.capture && ci < 3) continue;   // probe capture: only the last cascade is used
 			World_DrawShadow(cl, ci, c.cascadeViewProj[ci], R.cascadeTexel[ci]);
+			if (!hd && c.bspSun[0] > 0) DrawBspShadow(cl, ci);
 			if (!R.deferred.empty()) DrawDeferredList(cl, true, ci);
 		}
 	}
@@ -1495,6 +1711,7 @@ void Probes_SetEntities(const char* text)
 		PF.list.push_back(pr);
 	}
 	ProbesSync();
+	GradeLoadForMap();   // rend2: maps/<map>.grade
 	ri.Printf(PRINT_DEVELOPER, "KatarnEngine: %d reflection probes (%s)\n", (int)PF.list.size(), authored ? "misc_cubemap" : "from entities");
 }
 
