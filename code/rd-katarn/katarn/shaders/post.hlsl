@@ -241,7 +241,20 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 	if (grade3.w > 0.5) c = GradePre(c);
 	if (skyParams.w > 0.5) {
-		c = extraParams.y > 0.5 ? AgX(c) : ACESFitted(c * 1.4);
+		if (extraParams.y > 0.5) {
+			c = AgX(c);
+			// the look (kt_look), in display-linear: more contrast around mid grey and richer colour, the way
+			// Frostbite / Unreal grades read next to a neutral Blender render
+			float lk = saturate(extraParams.y - 1.0);
+			if (lk > 0) {
+				float3 g = pow(max(c, 0), 1.0 / 2.2);                     // perceptual
+				g = lerp(g, g * g * (3 - 2 * g), 0.55 * lk);             // S-curve
+				float l = dot(g, float3(0.2126, 0.7152, 0.0722));
+				g = saturate(l + (g - l) * (1 + 0.32 * lk));
+				c = pow(g, 2.2);
+			}
+		}
+		else c = ACESFitted(c * 1.4);
 		float2 v = i.uv - 0.5;
 		if (grade3.w <= 0.5) c *= 1 - dot(v, v) * 0.2;
 	}

@@ -52,33 +52,32 @@ float4 PS(VsOut i) : SV_Target0
 
 	// hum: a slight flicker along and over time
 	float tm = projParams.w;
-	float hum = 1.0 + 0.035 * sin(tm * 47.0 + s * 9.0) + 0.025 * sin(tm * 113.0);
+	float hum = 1.0 + 0.03 * sin(tm * 47.0 + s * 9.0) + 0.02 * sin(tm * 113.0);
 
-	float rc = max(coreR, 0.35);                     // core radius
+	// Battlefront II (2017) profile: a solid white core, the blade colour at full saturation right at its edge, a
+	// tight glow a few core widths out and a faint wide halo
+	float rc = max(coreR, 0.5) * 1.15;
 	float w = glowR * 2.2;
 	float window = saturate(1 - dist / w); window *= window;
-	float core = 1 - smoothstep(rc * 0.55, rc * 1.25, dist);           // white-hot centre
-	float edge = exp(-pow(dist / (rc * 1.9), 2)) * (1 - core);        // saturated rim right outside the core
-	float inner = exp(-pow(dist / (rc * 3.5), 2));
-	float outer = exp(-pow(dist / (glowR * 0.95), 2)) * window;
-	float scale = bladeIntensity / max(Exposure(), 1e-6) * vis * hum;
+	float core = 1 - smoothstep(rc * 0.72, rc * 1.12, dist);
+	float tight = exp(-pow(dist / (rc * 2.6), 2));
+	float wide = exp(-dist / (glowR * 0.55)) * window;
+	float k = bladeIntensity * 2.0 * vis * hum;
 
-	if (bladeAlpha == 2) {
-		// core only (over the game's own glow): solid white-hot, the blade colour only at its very edge
-		float cc = 1 - smoothstep(coreR * 0.45, coreR, dist);
-		float3 col = lerp(bladeColor, 1.0, saturate(1.4 - dist / coreR)) * 6.0 / max(Exposure(), 1e-6) * vis;
-		return float4(Sane(col * cc), saturate(cc * vis));
+	if (bladePad == 0) {
+		// HDR scene: only a soft halo for the bloom (and the darksaber's black core)
+		if (bladeAlpha == 1) return float4(0, 0, 0, saturate(core * vis));
+		float3 halo = bladeColor * (tight * 1.2 + wide * 0.5) * k / max(Exposure(), 1e-6);
+		return float4(Sane(halo), 0);
 	}
-	if (bladeAlpha) {
-		// darksaber: black core, white crackling rim
-		float rim = (edge * 3.0 + inner * 0.6 + outer * 0.2);
-		float3 col = float3(1, 1, 1) * rim * scale;
-		return float4(Sane(col), saturate(core * vis));
+	// display overlay (added after the tone map and clamped there)
+	if (bladeAlpha == 1) {
+		// darksaber: white crackling rim around the black core
+		float rim = (tight * 1.3 + wide * 0.25) * (1 - core);
+		return float4(rim * k, rim * k, rim * k, 0);
 	}
-	float3 C = bladeColor;
-	float3 col = 1.0 * core * 14.0
-		+ C * edge * 9.0
-		+ C * inner * 3.0
-		+ C * outer * 0.9;
-	return float4(Sane(col * scale), 0);
+	float3 Cg = pow(saturate(bladeColor), 1.0 / 2.2);          // the blade colour as displayed
+	Cg = saturate(lerp(dot(Cg, float3(0.3, 0.6, 0.1)), Cg, 1.15)); // a touch more saturated
+	float3 col = core + Cg * (tight * 1.7 + wide * 0.4) * (1 - core * 0.5);
+	return float4(Sane(col * k), 0);
 }

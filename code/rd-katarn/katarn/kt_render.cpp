@@ -44,6 +44,7 @@ static cvar_t* kt_probes = nullptr, * kt_probeScale = nullptr, * kt_parallax = n
 static cvar_t* kt_vfog = nullptr, * kt_vfogDensity = nullptr, * kt_vfogLights = nullptr, * kt_vfogSun = nullptr, * kt_vfogFar = nullptr,
 	* kt_vfogHeight = nullptr, * kt_vfogAmbient = nullptr, * kt_vfogColor = nullptr;
 static cvar_t* kt_sss = nullptr, * kt_dof = nullptr, * kt_dofFocus = nullptr, * kt_dofAperture = nullptr, * kt_motionBlur = nullptr;
+static cvar_t* kt_look = nullptr, * kt_sunScale = nullptr, * kt_skyLight = nullptr, * kt_sharpen = nullptr;
 static cvar_t* kt_taa = nullptr, * kt_taaSharpen = nullptr, * kt_gi = nullptr, * kt_giRadius = nullptr;
 static cvar_t* kt_bspSun = nullptr, * kt_bspSunAmbient = nullptr, * kt_bspSunDist = nullptr;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
@@ -182,7 +183,12 @@ static void RegisterCvars()
 	kt_volumetric = KtCvar("kt_volumetric", "1", CVAR_ARCHIVE);   // sun shafts in the fog
 	kt_saberLight = KtCvar("kt_saberLight", "1", CVAR_ARCHIVE);   // lightsaber blades as line lights (scale)
 	kt_saberGlow = KtCvar("kt_saberGlowScale", "1", CVAR_ARCHIVE);   // saber glow brightness in the HDR scene (1 = as authored, like rend2)
-	kt_saberDraw = KtCvar("kt_saberDraw2", "0", CVAR_ARCHIVE);
+	kt_saberDraw = KtCvar("kt_saberDraw2", "1", CVAR_ARCHIVE);     // 1: Katarn's own Battlefront-style blades, 0: the game's glow sprites (rend2 look)
+	// HD worlds: the Frostbite / Unreal style picture - a punchier tone curve, a stronger sun against darker, bluer shade
+	kt_look = KtCvar("kt_look", "1", CVAR_ARCHIVE);               // 0 = Blender-neutral AgX, 1 = full, in between blends
+	kt_sunScale = KtCvar("kt_sunScale", "1.4", CVAR_ARCHIVE);     // sun brightness (HD worlds)
+	kt_skyLight = KtCvar("kt_skyLight", "0.65", CVAR_ARCHIVE);    // light from the sky in the shade (HD worlds)
+	kt_sharpen = KtCvar("kt_sharpen", "0.3", CVAR_ARCHIVE);       // image sharpening (0 = off)
 	kt_probes = KtCvar("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
 	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
@@ -227,6 +233,10 @@ static void RegisterCvars()
 			{ "kt_vfogAmbient", "0.08" }, { "kt_sss", "0.3" }, { "kt_saberLight", "1" } };
 		for (auto& r : reset) ri.Cvar_Set(r[0], r[1]);
 		ri.Cvar_Set("kt_configVersion", "3");
+	}
+	if (ver->integer < 4) {
+		ri.Cvar_Set("kt_saberDraw2", "1"); ri.Cvar_Set("kt_saberGlowScale", "1"); ri.Cvar_Set("kt_saberLight", "1");
+		ri.Cvar_Set("kt_configVersion", "4");
 	}
 }
 
@@ -980,7 +990,7 @@ void R_BeginView(const ViewDesc& v)
 	if (R.taaThisView && R.taaValid) memcpy(c.prevViewProj, R.lastVpNoJitter, 64);   // history is resolved: no jitter in it
 	memcpy(c.viewProjNoJitter, R.vpNoJitter, 64);
 	c.taaParams[0] = R.taaJitter[0]; c.taaParams[1] = R.taaJitter[1];
-	c.taaParams[2] = R.taaThisView ? Q_max(0.0f, Q_min(1.0f, kt_taaSharpen->value)) : 0.0f;
+	c.taaParams[2] = Q_max(0.0f, Q_min(1.0f, R.taaThisView ? Q_max(kt_taaSharpen->value, kt_sharpen->value) : (v.world && !R.capture ? kt_sharpen->value : 0.0f)));
 	c.taaParams[3] = R.taaThisView ? 1.0f : 0.0f;
 	if (v.world && !R.capture && !v.skyPortal && kt_vfog->integer && kt_vfogDensity->value > 0 && R.csFogInject && R.csFogIntegrate
 		&& R.csFogApply && R.fogTypedLoad && R.froxIn.res) {
@@ -1001,9 +1011,9 @@ void R_BeginView(const ViewDesc& v)
 	Norm3(sd);
 	c.sunDir[0] = sd[0]; c.sunDir[1] = sd[1]; c.sunDir[2] = sd[2]; c.sunDir[3] = Q_max(0.004f, env.sunAngle);
 	c.sunColor[0] = env.sunColor[0]; c.sunColor[1] = env.sunColor[1]; c.sunColor[2] = env.sunColor[2];
-	c.sunColor[3] = (kt_sun->integer && World_Active()) ? env.sunIntensity : 0.0f;   // old BSP maps: their own baked light only
-	c.skyParams[0] = env.haze; c.skyParams[1] = env.skyIntensity; c.skyParams[2] = env.ambient; c.skyParams[3] = World_Active() ? 1.0f : 0.0f;
-	if (env.envSrv) { c.indices2[0] = env.envSrv; c.skyParams[1] = env.envStrength; float rs = env.envLight / Q_max(1e-4f, env.envStrength); memcpy(&c.indices2[2], &rs, 4); }
+	c.sunColor[3] = (kt_sun->integer && World_Active()) ? env.sunIntensity * Q_max(0.0f, kt_sunScale->value) : 0.0f;   // old BSP maps: their own baked light only
+	c.skyParams[0] = env.haze; c.skyParams[1] = env.skyIntensity; c.skyParams[2] = env.ambient * Q_max(0.0f, kt_skyLight->value); c.skyParams[3] = World_Active() ? 1.0f : 0.0f;
+	if (env.envSrv) { c.indices2[0] = env.envSrv; c.skyParams[1] = env.envStrength; float rs = env.envLight * Q_max(0.0f, kt_skyLight->value) / Q_max(1e-4f, env.envStrength); memcpy(&c.indices2[2], &rs, 4); }
 	if (env.hasSH) { c.indices2[1] = 1; for (int k = 0; k < 9; k++) for (int q = 0; q < 3; q++) c.ambientSH[k][q] = env.sh[k][q]; }
 	if (kt_fog->integer) {
 		c.fogParams[0] = env.fogDensity * Q_max(0.0f, kt_fogScale->value); c.fogParams[1] = env.fogFalloff; c.fogParams[2] = env.fogHeight; c.fogParams[3] = env.fogStart;
@@ -1017,7 +1027,7 @@ void R_BeginView(const ViewDesc& v)
 	c.postParams[2] = kt_manualExposure->value;
 	c.postParams[3] = kt_glowBoost->value;
 	c.extraParams[0] = (float)(1 << tr.overbrightBits);
-	c.extraParams[1] = kt_tonemap->integer ? 1.0f : 0.0f;
+	c.extraParams[1] = kt_tonemap->integer ? 1.0f + Q_max(0.0f, Q_min(1.5f, kt_look->value)) : 0.0f;   // 0 ACES, 1 AgX, 1..2.5 AgX + look
 	// sky portal maps: the portal view is drawn first; the main view keeps it where it drew nothing (its sky)
 	if (v.skyPortal) R.portalThisFrame = true;
 	c.extraParams[2] = (!v.skyPortal && R.portalThisFrame && !R.capture) ? 1.0f : 0.0f;
@@ -1551,16 +1561,26 @@ static void RenderWorldView()
 		cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
 		cl->SetPipelineState(R.bladePSO);
 		cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		for (int pass = 0; pass < 2; pass++)            // glows, then cores on top
-			for (const auto& bl0 : R.blades) {
-				if ((int)bl0.mode != pass) continue;
-				RState::Blade bl = bl0;
-				GLTexture* t = bl.tex ? R_GLTexture(bl.tex, false) : nullptr;
-				R_ResolveTexture(t);
-				bl.tex = t ? R_TextureSrv(t, true) : 0;
-				cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 20, &bl, 0);
-				cl->DrawInstanced(6, 1, 0, 0);
+		// first a soft halo into the HDR scene (bloom, and the dark core of a darksaber), then the blade itself into
+		// the display overlay: it skips the tone curve, so the edge keeps its colour and the core stays white
+		for (int tgt = 0; tgt < 2; tgt++) {
+			if (tgt == 1) {
+				Transition(cl, R.overlay, D3D12_RESOURCE_STATE_RENDER_TARGET);
+				cl->OMSetRenderTargets(1, &R.overlay.rtv[0], FALSE, nullptr);
 			}
+			for (int pass = 0; pass < 2; pass++)            // glows, then cores on top
+				for (const auto& bl0 : R.blades) {
+					if ((int)bl0.mode != pass) continue;
+					RState::Blade bl = bl0;
+					GLTexture* t = bl.tex ? R_GLTexture(bl.tex, false) : nullptr;
+					R_ResolveTexture(t);
+					bl.tex = t ? R_TextureSrv(t, true) : 0;
+					bl.pad = (uint32_t)tgt;
+					cl->SetGraphicsRoot32BitConstants(RP_CONSTANTS, 20, &bl, 0);
+					cl->DrawInstanced(6, 1, 0, 0);
+				}
+		}
+		Transition(cl, R.overlay, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	}
 	// ---- volumetric fog over everything drawn so far (before TAA, which smooths its noise)
 	if (c.vfogIdx[0]) {
@@ -1705,7 +1725,7 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 	const float hum = 1.0f + 0.04f * sinf(t * 47.0f + start[0] * 0.05f) + 0.03f * sinf(t * 113.0f);
 	for (int q = 0; q < 3; q++) l.color[q] = (powf(c[q] / mx, 2.2f) * 0.85f + 0.15f) * hum;
 	l.type = 2;
-	l.invSquare = 800.0f;
+	l.invSquare = 1100.0f;
 	l.pad[0] = 32.0f * 32.0f;   // soft radius squared (lighting.hlsl Light.lp.x)
 	R.tubes.push_back(l);
 }
