@@ -128,6 +128,7 @@ static struct {
 	std::vector<IVert> imm;
 	const void* stage = nullptr;
 	bool glow = false;
+	bool saber = false;
 	float scale = 1.0f;
 } s;
 
@@ -143,9 +144,11 @@ void GL_ResetState()
 	s.stack[0].assign(1, Mat()); MatIdentity(s.stack[0][0].m);
 	s.stack[1].assign(1, Mat()); MatIdentity(s.stack[1][0].m);
 	s.matrixMode = GL_MODELVIEW;
+	s.saber = false;
 }
 void GL_SetStage(const void* stage, bool glow) { s.stage = stage; s.glow = glow; }
 void GL_SetScale(float v) { s.scale = v; }
+void GL_SetSaber(bool v) { s.saber = v; }
 
 // PSO bits (kt_render.cpp decodes these)
 enum : uint32_t {
@@ -212,6 +215,7 @@ static void Snapshot(LegacyDraw& d)
 		d.alphaRef = s.alphaRef;
 	}
 	if (s.glow) f |= LF_GLOW;
+	if (s.saber) f |= LF_SABER;
 	d.flags = f;
 
 	// matrices

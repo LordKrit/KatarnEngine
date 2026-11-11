@@ -19,6 +19,24 @@ float3 YCoCgToRGB(float3 c) { return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.
 float3 Compress(float3 c) { return c / (1.0 + max(c.r, max(c.g, c.b))); }       // tone-map before blending (Karis)
 float3 Expand(float3 c) { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4); }
 
+// history fetched with a Catmull-Rom filter (5 bilinear taps): bilinear would soften the image a little every frame
+float3 SampleHistory(float2 tuv)
+{
+	float2 ts = 1.0 / invTargetSize.xy;
+	float2 pos = tuv * ts, c = floor(pos - 0.5) + 0.5, f = pos - c;
+	float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+	float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);
+	float2 w12 = w1 + w2, o12 = c + w2 / w12;
+	float2 p0 = (c - 1) * invTargetSize.xy, p3 = (c + 2) * invTargetSize.xy, p12 = o12 * invTargetSize.xy;
+	float3 r = Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p0.y), 0).rgb * (w12.x * w0.y)
+		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p0.x, p12.y), 0).rgb * (w0.x * w12.y)
+		+ Tex2D[histSrv].SampleLevel(sClamp, p12, 0).rgb * (w12.x * w12.y)
+		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p3.x, p12.y), 0).rgb * (w3.x * w12.y)
+		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p3.y), 0).rgb * (w12.x * w3.y);
+	float wt = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+	return max(r / wt, 0);
+}
+
 [numthreads(8, 8, 1)]
 void ResolveCS(uint3 id : SV_DispatchThreadID)
 {
@@ -54,7 +72,7 @@ void ResolveCS(uint3 id : SV_DispatchThreadID)
 		puv = cuv + (puv - vuv);
 		if (all(puv >= 0) && all(puv <= 1)) {
 			float2 tuv = (viewport.xy + puv * viewport.zw) * invTargetSize.xy;
-			float3 h = RGBToYCoCg(Compress(max(Tex2D[histSrv].SampleLevel(sClamp, tuv, 0).rgb, 0)));
+			float3 h = RGBToYCoCg(Compress(max(SampleHistory(tuv), 0)));
 			// clip the history to the neighbourhood's colour box (variance clipping)
 			float3 bmin = m1 - sigma * 1.25, bmax = m1 + sigma * 1.25;
 			float3 center = 0.5 * (bmax + bmin), ext = max(0.5 * (bmax - bmin), 1e-5);

@@ -14,6 +14,7 @@ enum LegacyFlags : uint32_t {
 	LF_ATEST_SHIFT = 8,          // 3 bits: 0 off, 1 >, 2 <, 3 >=, 4 <=, 5 ==, 6 !=
 	LF_GLOW = 1u << 11,          // shader stage marked glow: boosted in HDR so bloom picks it up
 	LF_ENV0_SHIFT = 12,          // 2 bits: unit 0 env (replace ignores vertex colour)
+	LF_SABER = 1u << 14,         // lightsaber blade / glow: composited after the tone map, the way rend2 shows it
 };
 
 struct PsoKey {
@@ -71,6 +72,7 @@ bool SaberDraw();
 void R_AddSaberBlade(const float* start, const float* dir, float length, float radius, const uint8_t* rgba, uint32_t glowTex, const uint8_t* vertexRgba, bool coreOnly);
 void R_AddSaberCore(const float* start, const float* end, float radius, const uint8_t* rgba, uint32_t tex, bool alphaBlend);
 void GL_SetStage(const void* stage, bool glow);
+void GL_SetSaber(bool v);   // the next draws are lightsaber blades (LF_SABER)
 void GL_SetScale(float v);   // extra HDR brightness for the next draws (saber glow sprites)   // the shader stage being drawn (glow boost)
 // projection to use for 3D views (D3D, reversed-Z infinite) - the GL translation layer swaps it in for the
 // front end's GL projection

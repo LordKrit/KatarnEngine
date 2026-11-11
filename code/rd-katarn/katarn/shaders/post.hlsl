@@ -248,6 +248,9 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 	c = LinearToSrgb(c);
+	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
+	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
+	if (dstUav) c = saturate(c + Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb));
 	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 	c += (n - 0.5) / 255.0;
 	return float4(c, dot(c, float3(0.299, 0.587, 0.114)));

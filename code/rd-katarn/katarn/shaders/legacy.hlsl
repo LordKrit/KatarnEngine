@@ -34,20 +34,31 @@ float4 SampleUnit(uint tex, float2 uv, bool clampMode, bool pointMode)
 	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 }
 
-struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; };
-float4 Shade(VsOut i);
+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; };
+float4 Shade(VsOut i, out float4 display);
 PsOut PS(VsOut i)
 {
 	PsOut o;
-	o.c = Shade(i);
+	float4 display;
+	o.c = Shade(i, display);
 	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
 	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
+	o.overlay = float4(0, 0, 0, o.c.a);
+	if (drawTarget == 1 && (flags & (1u << 14))) {
+		// lightsaber blade: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added to the
+		// display after the tone map with the plain clamp rend2 has; a softer copy feeds the bloom
+		o.overlay = display;
+		o.glow = float4(o.c.rgb * 0.35, o.c.a);
+		o.c = float4(0, 0, 0, o.c.a);
+	}
 	return o;
 }
-float4 Shade(VsOut i)
+float4 Shade(VsOut i, out float4 display)
 {
 	float4 c = i.color;
-	if (drawTarget == 1) c.rgb = SrgbToLinear(c.rgb);
+	display = 0;
+	const bool saber = drawTarget == 1 && (flags & (1u << 14));
+	if (drawTarget == 1 && !saber) c.rgb = SrgbToLinear(c.rgb);
 	if (flags & 1) {
 		float4 t = SampleUnit(tex0, i.uv0, (flags & 4) != 0, (flags & 16) != 0);
 		uint env0 = (flags >> 12) & 3;
@@ -72,6 +83,11 @@ float4 Shade(VsOut i)
 		else if (at == 6) keep = c.a != alphaRef;
 		else keep = false;
 		if (!keep) discard;
+	}
+	if (saber) {
+		// display-space colour (gamma, as authored), scaled by kt_saberGlowScale; the linear copy feeds the bloom
+		display = float4(c.rgb * (drawScale > 0 ? drawScale : 1.0), c.a);
+		c.rgb = SrgbToLinear(saturate(c.rgb));
 	}
 	if (drawTarget == 1) {
 		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness

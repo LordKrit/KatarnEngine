@@ -2094,6 +2094,11 @@ static void RB_IterateStagesGeneric(const shaderCommands_t* input)
 		}
 		kt::GL_SetStage(p_stage, p_stage->glow);
 		kt::GL_SetScale(backEnd.currentEntity && backEnd.currentEntity->e.reType == RT_SABER_GLOW ? kt::SaberGlowBoost() : 1.0f);
+		{
+			// lightsaber blades (glow sprites, the core line) are composited after the tone map, as rend2 shows them
+			const int rt = backEnd.currentEntity ? backEnd.currentEntity->e.reType : -1;
+			kt::GL_SetSaber(rt == RT_SABER_GLOW || (rt == RT_LINE && tess.shader && Q_stristr(tess.shader->name, "saber")));
+		}
 
 		// Reject this stage if it's not a glow stage but we are doing a glow pass.
 		if (g_bRenderGlowingObjects && !p_stage->glow)

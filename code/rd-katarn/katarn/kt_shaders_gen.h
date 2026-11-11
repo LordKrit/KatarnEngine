@@ -928,20 +928,31 @@ float4 SampleUnit(uint tex, float2 uv, bool clampMode, bool pointMode)
 	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 }
 
-struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; };
-float4 Shade(VsOut i);
+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; };
+float4 Shade(VsOut i, out float4 display);
 PsOut PS(VsOut i)
 {
 	PsOut o;
-	o.c = Shade(i);
+	float4 display;
+	o.c = Shade(i, display);
 	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
 	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
+	o.overlay = float4(0, 0, 0, o.c.a);
+	if (drawTarget == 1 && (flags & (1u << 14))) {
+		// lightsaber blade: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added to the
+		// display after the tone map with the plain clamp rend2 has; a softer copy feeds the bloom
+		o.overlay = display;
+		o.glow = float4(o.c.rgb * 0.35, o.c.a);
+		o.c = float4(0, 0, 0, o.c.a);
+	}
 	return o;
 }
-float4 Shade(VsOut i)
+float4 Shade(VsOut i, out float4 display)
 {
 	float4 c = i.color;
-	if (drawTarget == 1) c.rgb = SrgbToLinear(c.rgb);
+	display = 0;
+	const bool saber = drawTarget == 1 && (flags & (1u << 14));
+	if (drawTarget == 1 && !saber) c.rgb = SrgbToLinear(c.rgb);
 	if (flags & 1) {
 		float4 t = SampleUnit(tex0, i.uv0, (flags & 4) != 0, (flags & 16) != 0);
 		uint env0 = (flags >> 12) & 3;
@@ -966,6 +977,11 @@ float4 Shade(VsOut i)
 		else if (at == 6) keep = c.a != alphaRef;
 		else keep = false;
 		if (!keep) discard;
+	}
+	if (saber) {
+		// display-space colour (gamma, as authored), scaled by kt_saberGlowScale; the linear copy feeds the bloom
+		display = float4(c.rgb * (drawScale > 0 ? drawScale : 1.0), c.a);
+		c.rgb = SrgbToLinear(saturate(c.rgb));
 	}
 	if (drawTarget == 1) {
 		// LDR content in an HDR scene: undo the camera exposure so it shows at its authored brightness
@@ -1765,9 +1781,9 @@ void CS(uint3 id : SV_DispatchThreadID)
 	else if (skin && sunColor.w > 0) {
 		// wrapped diffuse with a warm scattered terminator (light bleeding through skin), GGX on top
 		float nl = dot(N, L);
-		float wrap = saturate((nl + 0.45) / 1.45);
+		float wrap = saturate((nl + 0.25) / 1.25);
 		float sh = Shadow(P, N, viewZ);
-		float3 scatter = lerp(float3(1.0, 0.35, 0.22), 1.0, saturate(nl * 2.0));
+		float3 scatter = lerp(float3(1.0, 0.62, 0.52), 1.0, saturate(nl * 3.0 + 0.3));
 		Lo += diff / PI * wrap * scatter * sunColor.rgb * sunColor.w * lerp(0.35, 1.0, sh);
 		if (nl > 0) Lo += (Brdf(N, V, L, 0, f0, rough)) * sunColor.rgb * sunColor.w * sh;
 	}
@@ -1796,7 +1812,7 @@ void CS(uint3 id : SV_DispatchThreadID)
 			float dd2 = dot(Cd, Cd);
 			if (dd2 > l.radius * l.radius) continue;
 			float wnd = saturate(1 - pow(dd2 / (l.radius * l.radius), 2)); wnd *= wnd;
-			float att = wnd * l.invSquare / max(dd2, 400.0);
+			float att = wnd * l.invSquare / (dd2 + l.lp.x);   // pad[0]: the blade's soft radius squared
 			float3 Rr = reflect(-V, N);
 			float3 A0 = A - P;
 			float rb = dot(Rr, Bv), ra = dot(Rr, A0);
@@ -1882,13 +1898,13 @@ void CS(uint3 id : SV_DispatchThreadID)
 					float4 pp = mul(prevViewProj, float4(Q, 1));
 					huv = pp.xy / pp.w * float2(0.5, -0.5) + 0.5;
 					float2 e = saturate(min(huv, 1 - huv) * 10);
-					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0.2);
+					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0)KTSRC",
+R"KTSRC(.2);
 					break;
 				}
 			}
 			if (hit > 0) {
-				)KTSRC",
-R"KTSRC(float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, (viewport.xy + huv * viewport.zw) * invTargetSize.xy, 0).rgb;
+				float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, (viewport.xy + huv * viewport.zw) * invTargetSize.xy, 0).rgb;
 				sc = min(sc, 64.0);                              // no fireflies from the sun disc
 				spec = lerp(spec, sc / max(skyParams.z, 1e-3), hit);
 				ssrHit = hit;
@@ -1944,7 +1960,8 @@ void FogInjectCS(uint3 id : SV_DispatchThreadID)
 {
 	uint3 dim = uint3(vfogIdx.y & 0xffff, vfogIdx.y >> 16, vfogIdx.w);
 	if (id.x >= dim.x || id.y >= dim.y) return;
-	float jit = frac(sin(dot(float2(id.xy) + projParams.w * 7.13, float2(12.9898, 78.233))) * 43758.5453);
+	// slice jitter: changes every frame only under TAA (which averages it); without TAA it stays put (no shimmer)
+	float jit = frac(sin(dot(float2(id.xy) + (taaParams.w > 0.5 ? projParams.w * 7.13 : 0.0), float2(12.9898, 78.233))) * 43758.5453);
 	for (uint z = 0; z < dim.z; z++) {
 		float viewZ = FroxelDepth(z + jit);
 		float2 vuv = (float2(id.xy) + 0.5) / float2(dim.xy);
@@ -1972,7 +1989,7 @@ void FogInjectCS(uint3 id : SV_DispatchThreadID)
 			float d2 = dot(d, d);
 			if (d2 > l.radius * l.radius) continue;
 			float wnd = saturate(1 - pow(d2 / (l.radius * l.radius), 2)); wnd *= wnd;
-			float att = l.invSquare > 0 ? wnd * l.invSquare / max(d2, 256.0) : wnd;
+			float att = l.invSquare > 0 ? wnd * l.invSquare / (d2 + (l.type == 2 ? l.lp.x : 256.0)) : wnd;
 			if (l.type == 1) att *= smoothstep(l.spotCos, l.spotInner, dot(-normalize(d), l.dir));
 			S += l.color * att / (4 * PI) * vfog1.y;
 		}
@@ -2383,6 +2400,9 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 	c = LinearToSrgb(c);
+	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
+	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
+	if (dstUav) c = saturate(c + Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb));
 	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 	c += (n - 0.5) / 255.0;
 	return float4(c, dot(c, float3(0.299, 0.587, 0.114)));
@@ -3698,6 +3718,14 @@ bool IsSkin(int2 p)
 	return w > 3.5 && w < 7.5;
 }
 
+// the lit colour divided by the albedo: what gets blurred is the light under the skin, never the texture (pores,
+// stubble, eyebrows stay sharp)
+float3 Irradiance(int2 p)
+{
+	float3 a = Tex2D[indices0.x].Load(int3(p, 0)).rgb;
+	return Tex2D[srcSrv].Load(int3(p, 0)).rgb / max(a, 0.04);
+}
+
 [numthreads(8, 8, 1)]
 void BlurCS(uint3 id : SV_DispatchThreadID)
 {
@@ -3710,25 +3738,28 @@ void BlurCS(uint3 id : SV_DispatchThreadID)
 	float4 c = Tex2D[srcSrv].Load(int3(px, 0));
 	// pixels per world unit at this depth
 	float ppu = projParams.y * viewport.w * 0.5 / z;
-	float stepPx = clamp(width * ppu / 3.0, 0.0, 6.0);
+	float stepPx = clamp(width * ppu / 3.0, 0.0, 2.5);
 	if (stepPx < 0.3) { UavTex[outUav][px] = c; return; }
 	int2 dir = dirY ? int2(0, 1) : int2(1, 0);
-	// per-channel Gaussian (red scatters furthest)
-	const float3 sigma = float3(1.0, 0.42, 0.28) * 1.6;
-	float3 acc = c.rgb, wsum = 1;
+	float3 alb = max(Tex2D[indices0.x].Load(int3(px, 0)).rgb, 0.04);
+	// per-channel Gaussian (red scatters furthest, green and blue barely)
+	const float3 sigma = float3(1.0, 0.35, 0.22) * 1.4;
+	float3 acc = c.rgb / alb, wsum = 1;
 	int2 lo = int2(viewport.xy), hi = int2(viewport.xy + viewport.zw) - 1;
-	[unroll] for (int k = -6; k <= 6; k++) {
+	[unroll] for (int k = -4; k <= 4; k++) {
 		if (k == 0) continue;
 		float o = k * 0.5;
 		int2 q = clamp(px + dir * (int)round(o * stepPx), lo, hi);
 		if (!IsSkin(q)) continue;
 		float dq = Tex2D[indices0.w].Load(int3(q, 0)).r;
-		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.5) continue;
+		if (dq <= 0 || abs(ViewDepth(dq) - z) > width * 2.0) continue;
 		float3 w = exp(-0.5 * (o * o) / (sigma * sigma));
-		acc += Tex2D[srcSrv].Load(int3(q, 0)).rgb * w;
+		acc += min(Irradiance(q), 64.0) * w;
 		wsum += w;
 	}
-	UavTex[outUav][px] = float4(acc / wsum, c.a);
+	// mostly the original: the scatter only softens the light's edges
+	float3 blurred = acc / wsum * alb;
+	UavTex[outUav][px] = float4(lerp(c.rgb, blurred, 0.7), c.a);
 }
 )KTSRC",
 nullptr };
@@ -3901,6 +3932,24 @@ float3 YCoCgToRGB(float3 c) { return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.
 float3 Compress(float3 c) { return c / (1.0 + max(c.r, max(c.g, c.b))); }       // tone-map before blending (Karis)
 float3 Expand(float3 c) { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4); }
 
+// history fetched with a Catmull-Rom filter (5 bilinear taps): bilinear would soften the image a little every frame
+float3 SampleHistory(float2 tuv)
+{
+	float2 ts = 1.0 / invTargetSize.xy;
+	float2 pos = tuv * ts, c = floor(pos - 0.5) + 0.5, f = pos - c;
+	float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+	float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);
+	float2 w12 = w1 + w2, o12 = c + w2 / w12;
+	float2 p0 = (c - 1) * invTargetSize.xy, p3 = (c + 2) * invTargetSize.xy, p12 = o12 * invTargetSize.xy;
+	float3 r = Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p0.y), 0).rgb * (w12.x * w0.y)
+		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p0.x, p12.y), 0).rgb * (w0.x * w12.y)
+		+ Tex2D[histSrv].SampleLevel(sClamp, p12, 0).rgb * (w12.x * w12.y)
+		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p3.x, p12.y), 0).rgb * (w3.x * w12.y)
+		+ Tex2D[histSrv].SampleLevel(sClamp, float2(p12.x, p3.y), 0).rgb * (w12.x * w3.y);
+	float wt = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+	return max(r / wt, 0);
+}
+
 [numthreads(8, 8, 1)]
 void ResolveCS(uint3 id : SV_DispatchThreadID)
 {
@@ -3936,7 +3985,7 @@ void ResolveCS(uint3 id : SV_DispatchThreadID)
 		puv = cuv + (puv - vuv);
 		if (all(puv >= 0) && all(puv <= 1)) {
 			float2 tuv = (viewport.xy + puv * viewport.zw) * invTargetSize.xy;
-			float3 h = RGBToYCoCg(Compress(max(Tex2D[histSrv].SampleLevel(sClamp, tuv, 0).rgb, 0)));
+			float3 h = RGBToYCoCg(Compress(max(SampleHistory(tuv), 0)));
 			// clip the history to the neighbourhood's colour box (variance clipping)
 			float3 bmin = m1 - sigma * 1.25, bmax = m1 + sigma * 1.25;
 			float3 center = 0.5 * (bmax + bmin), ext = max(0.5 * (bmax - bmin), 1e-5);

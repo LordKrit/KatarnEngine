@@ -190,18 +190,18 @@ static void RegisterCvars()
 	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
 	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
-	kt_taa = KtCvar("kt_taa", "1", CVAR_ARCHIVE);
+	kt_taa = KtCvar("kt_taa", "0", CVAR_ARCHIVE);
 	// volumetric fog (froxels): light from the sun, lamps and lightsabers scattered in the air
 	kt_vfog = KtCvar("kt_vfog", "1", CVAR_ARCHIVE);
-	kt_vfogDensity = KtCvar("kt_vfogDensity", "0.00005", CVAR_ARCHIVE);   // per unit (0.00005: 80% clear at 4000 units)
-	kt_vfogLights = KtCvar("kt_vfogLights", "150", CVAR_ARCHIVE);        // how strongly lamps and sabers light the air
+	kt_vfogDensity = KtCvar("kt_vfogDensity", "0.000015", CVAR_ARCHIVE);   // per unit (0.000015: 94% clear at 4000 units)
+	kt_vfogLights = KtCvar("kt_vfogLights", "12", CVAR_ARCHIVE);         // how strongly lamps and sabers light the air
 	kt_vfogSun = KtCvar("kt_vfogSun", "1", CVAR_ARCHIVE);
 	kt_vfogFar = KtCvar("kt_vfogFar", "8000", CVAR_ARCHIVE);
 	kt_vfogHeight = KtCvar("kt_vfogHeight", "0", CVAR_ARCHIVE);          // thinner with height (per unit above the floor)
-	kt_vfogAmbient = KtCvar("kt_vfogAmbient", "0.25", CVAR_ARCHIVE);     // old maps: light already in the air
+	kt_vfogAmbient = KtCvar("kt_vfogAmbient", "0.08", CVAR_ARCHIVE);     // old maps: light already in the air
 	kt_vfogColor = KtCvar("kt_vfogColor", "1 1 1", CVAR_ARCHIVE);
-	kt_gi = KtCvar("kt_gi", "1", CVAR_ARCHIVE);
-	kt_sss = KtCvar("kt_sss", "0.6", CVAR_ARCHIVE);               // skin subsurface scattering radius (units, 0 = off)
+	kt_gi = KtCvar("kt_gi", "0", CVAR_ARCHIVE);
+	kt_sss = KtCvar("kt_sss", "0.3", CVAR_ARCHIVE);               // skin subsurface scattering radius (units, 0 = off)
 	// camera (for cinematics; off in play)
 	kt_dof = KtCvar("kt_dof", "0", CVAR_ARCHIVE);                 // depth of field
 	kt_dofFocus = KtCvar("kt_dofFocus", "0", 0);                  // focus distance in units, 0 = what is in the middle of the screen
@@ -220,6 +220,13 @@ static void RegisterCvars()
 		for (auto& r : reset) ri.Cvar_Set(r[0], r[1]);
 		ri.Cvar_Set("kt_configVersion", "2");
 		ri.Printf(PRINT_ALL, "KatarnEngine: bloom, glow and saber settings reset to the defaults\n");
+	}
+	if (ver->integer < 3) {
+		// r11's first settings were too heavy (soft TAA, costly bounced light, thick fog, strong skin blur)
+		const char* reset[][2] = { { "kt_taa", "0" }, { "kt_gi", "0" }, { "kt_vfogDensity", "0.000015" }, { "kt_vfogLights", "12" },
+			{ "kt_vfogAmbient", "0.08" }, { "kt_sss", "0.3" }, { "kt_saberLight", "1" } };
+		for (auto& r : reset) ri.Cvar_Set(r[0], r[1]);
+		ri.Cvar_Set("kt_configVersion", "3");
 	}
 }
 
@@ -301,6 +308,7 @@ static struct RState {
 	// targets
 	Texture screen, screenDepth, ldr;
 	Texture hdr, depth, gb0, gb1, gb2, ao, aoTmp, shadow, skyLut;
+	Texture overlay;                 // lightsaber blades in display space: added after the tone map (rend2's look)
 	Texture glow;                    // glow stages (saber blades, lights) drawn again here; blurred into the bloom (rend2 dynamic glow)
 	Texture hdrPrev;                 // last frame's lit scene (screen-space reflections)
 	bool hdrPrevValid = false;
@@ -497,9 +505,9 @@ static ID3D12PipelineState* LegacyPSO(uint32_t bits, int target)   // target 0 s
 	}
 	if (bits & PSO_WIRE) d.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
 	d.PrimitiveTopologyType = (bits & PSO_LINES) ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d.NumRenderTargets = target == 1 ? 2 : 1;   // HDR: + the glow target (same blend)
+	d.NumRenderTargets = target == 1 ? 3 : 1;   // HDR: + the glow target and the saber overlay (same blend)
 	d.RTVFormats[0] = target == 1 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
-	if (target == 1) d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	if (target == 1) d.RTVFormats[1] = d.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	ID3D12PipelineState* p = CreateGraphicsPSO(d, "legacy");
 	R.psos[key] = p;
@@ -636,7 +644,7 @@ static bool CreatePipelines()
 // ------------------------------------------------------------------------------------------------ targets
 static void DestroyTargets()
 {
-	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
+	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.overlay, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
 	for (Texture* t : all) DestroyTexture(*t);
 	for (auto& t : R.bloomDown) DestroyTexture(t);
 	for (auto& t : R.bloomUp) DestroyTexture(t);
@@ -653,6 +661,7 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 	ok &= CreateTexture(R.ldr, w, h, 1, DXGI_FORMAT_R8G8B8A8_UNORM, TEX_RT, 1, black, "ldr");
 	ok &= CreateTexture(R.hdr, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT | TEX_UAV, 1, black, "hdr");
 	ok &= CreateTexture(R.glow, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "glow");
+	ok &= CreateTexture(R.overlay, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "saber overlay");
 	ok &= CreateTexture(R.hdrPrev, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, nullptr, "hdr previous");
 	R.hdrPrevValid = false;
 	for (int i = 0; i < 2; i++) ok &= CreateTexture(R.taa[i], w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "taa history");
@@ -806,8 +815,9 @@ static void FlushStream(int target)
 	Transition(cl, ds, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 	if (target == 1) {
 		Transition(cl, R.glow, D3D12_RESOURCE_STATE_RENDER_TARGET);
-		D3D12_CPU_DESCRIPTOR_HANDLE two[2] = { rt.rtv[0], R.glow.rtv[0] };
-		cl->OMSetRenderTargets(2, two, FALSE, &ds.dsv[0]);
+		Transition(cl, R.overlay, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		D3D12_CPU_DESCRIPTOR_HANDLE three[3] = { rt.rtv[0], R.glow.rtv[0], R.overlay.rtv[0] };
+		cl->OMSetRenderTargets(3, three, FALSE, &ds.dsv[0]);
 	}
 	else cl->OMSetRenderTargets(1, &rt.rtv[0], FALSE, &ds.dsv[0]);
 	if (target == 1) cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
@@ -1410,6 +1420,17 @@ static void RenderWorldView()
 			for (int q = 0; q < 3; q++) l.color[q] *= kt_saberLight->value;
 			lights.push_back(l);
 		}
+	// nearest first: the screen-space shadows go to the closest lights, and the fog only takes the first few
+	{
+		const float* o = v.origin;
+		auto key = [o](const GpuLight& l) {
+			float p[3] = { l.pos[0], l.pos[1], l.pos[2] };
+			if (l.type == 2.0f) for (int q = 0; q < 3; q++) p[q] += l.dir[q] * 0.5f;
+			float d = sqrtf((p[0] - o[0]) * (p[0] - o[0]) + (p[1] - o[1]) * (p[1] - o[1]) + (p[2] - o[2]) * (p[2] - o[2]));
+			return d - l.radius * 0.5f;
+		};
+		std::stable_sort(lights.begin(), lights.end(), [&](const GpuLight& a, const GpuLight& b) { return key(a) < key(b); });
+	}
 	uint32_t nl = (uint32_t)lights.size();
 	if (!nl) { GpuLight dummy = {}; lights.push_back(dummy); }
 	UploadAlloc la = Upload(lights.size() * sizeof(GpuLight), 256);
@@ -1481,7 +1502,7 @@ static void RenderWorldView()
 	// ---- volumetric fog: light the froxels and integrate them (applied after the forward pass)
 	if (c.vfogIdx[0]) {
 		Transition(cl, R.froxIn, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-		uint32_t k[8] = { R.froxIn.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], nl, 0, (shadows ? 2u : 0u), 0, 0 };
+		uint32_t k[8] = { R.froxIn.uav[0], R.sh.srv, R.lightSrv[g.frameIndex], Q_min(nl, 16u), 0, (shadows ? 2u : 0u), 0, 0 };
 		Dispatch(cl, R.csFogInject, k, 8, (R.froxIn.width + 7) / 8, (R.froxIn.height + 7) / 8);
 		Transition(cl, R.froxIn, srv);
 		Transition(cl, R.froxOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1511,9 +1532,12 @@ static void RenderWorldView()
 		const float zero4g[4] = { 0, 0, 0, 0 };
 		Transition(cl, R.glow, D3D12_RESOURCE_STATE_RENDER_TARGET);
 		cl->ClearRenderTargetView(R.glow.rtv[0], zero4g, 0, nullptr);
+		Transition(cl, R.overlay, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		cl->ClearRenderTargetView(R.overlay.rtv[0], zero4g, 0, nullptr);
 	}
 	FlushStream(1);
 	Transition(cl, R.glow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	Transition(cl, R.overlay, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
 	// ---- camera: exposure
 	D3D12_RESOURCE_STATES srvAll = srv;
@@ -1651,7 +1675,7 @@ static void RenderWorldView()
 	Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
 	Transition(cl, tmTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	{
-		uint32_t k[8] = { R.hdr.srv, 0, 0, bloomSrv, R.w, R.h, 0, 0 };
+		uint32_t k[8] = { R.hdr.srv, R.overlay.srv, 0, bloomSrv, R.w, R.h, 0, 0 };
 		FullscreenPass(cl, R.tonemapPSO, tmTarget, k, 8);
 	}
 	if (fxaa) {
@@ -1670,14 +1694,19 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 	if (!R.inView || length < 1.0f || R.tubes.size() >= 64) return;
 	GpuLight l = {};
 	for (int q = 0; q < 3; q++) { l.pos[q] = start[q]; l.dir[q] = dir[q] * length; }
-	l.radius = 220.0f + length;
-	// the blade colour, saturated (the glow sprites carry it), as radiance; intensity / d^2 from the nearest point
+	l.radius = 320.0f + length * 0.5f;
+	// Battlefront II (2017) style: the blade colour with a little of the white-hot core in it, a soft-cored inverse
+	// square from the nearest point of the blade (bright pools on floors and walls nearby, not a hard hot spot on
+	// whatever touches it) and a faint hum flicker
 	float c[3] = { rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f };
 	float mx = Q_max(c[0], Q_max(c[1], c[2]));
 	if (mx < 0.01f) { c[0] = c[1] = c[2] = 1; mx = 1; }
-	for (int q = 0; q < 3; q++) l.color[q] = powf(c[q] / mx, 2.2f) * 1.0f;
+	const float t = ri.Milliseconds() * 0.001f;
+	const float hum = 1.0f + 0.04f * sinf(t * 47.0f + start[0] * 0.05f) + 0.03f * sinf(t * 113.0f);
+	for (int q = 0; q < 3; q++) l.color[q] = (powf(c[q] / mx, 2.2f) * 0.85f + 0.15f) * hum;
 	l.type = 2;
-	l.invSquare = 220.0f;   // a soft fill, about what rend2's saber dynamic light gives
+	l.invSquare = 800.0f;
+	l.pad[0] = 32.0f * 32.0f;   // soft radius squared (lighting.hlsl Light.lp.x)
 	R.tubes.push_back(l);
 }
 float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }

@@ -278,9 +278,9 @@ void CS(uint3 id : SV_DispatchThreadID)
 	else if (skin && sunColor.w > 0) {
 		// wrapped diffuse with a warm scattered terminator (light bleeding through skin), GGX on top
 		float nl = dot(N, L);
-		float wrap = saturate((nl + 0.45) / 1.45);
+		float wrap = saturate((nl + 0.25) / 1.25);
 		float sh = Shadow(P, N, viewZ);
-		float3 scatter = lerp(float3(1.0, 0.35, 0.22), 1.0, saturate(nl * 2.0));
+		float3 scatter = lerp(float3(1.0, 0.62, 0.52), 1.0, saturate(nl * 3.0 + 0.3));
 		Lo += diff / PI * wrap * scatter * sunColor.rgb * sunColor.w * lerp(0.35, 1.0, sh);
 		if (nl > 0) Lo += (Brdf(N, V, L, 0, f0, rough)) * sunColor.rgb * sunColor.w * sh;
 	}
@@ -309,7 +309,7 @@ void CS(uint3 id : SV_DispatchThreadID)
 			float dd2 = dot(Cd, Cd);
 			if (dd2 > l.radius * l.radius) continue;
 			float wnd = saturate(1 - pow(dd2 / (l.radius * l.radius), 2)); wnd *= wnd;
-			float att = wnd * l.invSquare / max(dd2, 400.0);
+			float att = wnd * l.invSquare / (dd2 + l.lp.x);   // pad[0]: the blade's soft radius squared
 			float3 Rr = reflect(-V, N);
 			float3 A0 = A - P;
 			float rb = dot(Rr, Bv), ra = dot(Rr, A0);
@@ -456,7 +456,8 @@ void FogInjectCS(uint3 id : SV_DispatchThreadID)
 {
 	uint3 dim = uint3(vfogIdx.y & 0xffff, vfogIdx.y >> 16, vfogIdx.w);
 	if (id.x >= dim.x || id.y >= dim.y) return;
-	float jit = frac(sin(dot(float2(id.xy) + projParams.w * 7.13, float2(12.9898, 78.233))) * 43758.5453);
+	// slice jitter: changes every frame only under TAA (which averages it); without TAA it stays put (no shimmer)
+	float jit = frac(sin(dot(float2(id.xy) + (taaParams.w > 0.5 ? projParams.w * 7.13 : 0.0), float2(12.9898, 78.233))) * 43758.5453);
 	for (uint z = 0; z < dim.z; z++) {
 		float viewZ = FroxelDepth(z + jit);
 		float2 vuv = (float2(id.xy) + 0.5) / float2(dim.xy);
@@ -484,7 +485,7 @@ void FogInjectCS(uint3 id : SV_DispatchThreadID)
 			float d2 = dot(d, d);
 			if (d2 > l.radius * l.radius) continue;
 			float wnd = saturate(1 - pow(d2 / (l.radius * l.radius), 2)); wnd *= wnd;
-			float att = l.invSquare > 0 ? wnd * l.invSquare / max(d2, 256.0) : wnd;
+			float att = l.invSquare > 0 ? wnd * l.invSquare / (d2 + (l.type == 2 ? l.lp.x : 256.0)) : wnd;
 			if (l.type == 1) att *= smoothstep(l.spotCos, l.spotInner, dot(-normalize(d), l.dir));
 			S += l.color * att / (4 * PI) * vfog1.y;
 		}
