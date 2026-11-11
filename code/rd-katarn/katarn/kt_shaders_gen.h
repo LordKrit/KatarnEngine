@@ -2437,6 +2437,14 @@ float3 GradePost(float3 c, float2 vuv)
 	return c * (1.0 - grade0.w * smoothstep(0.15, 0.75, dot(v, v) * 2.0));
 }
 
+// rend2's tonemap.glsl FilmicTonemap (Hable)
+float3 Rend2Filmic(float3 x)
+{
+	const float SS = 0.22, LS = 0.30, LA = 0.10, TS = 0.20, TAN = 0.01, TAD = 0.30;
+	float3 SSxx = SS * x * x;
+	return (SSxx + LS * x * LA + TS * TAN) / (SSxx + LS * x + TS * TAD) - TAN / TAD;
+}
+
 float4 TonemapPS(FsOut i) : SV_Target0
 {
 	float2 uv = (viewport.xy + i.uv * viewport.zw) * invTargetSize.xy;
@@ -2481,7 +2489,14 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	c = LinearToSrgb(c);
 	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
 	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
-	if (dstUav) c = saturate(c + Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb));
+	if (dstUav) {
+		// rend2 (r_hdr 1, r_toneMap 1) puts the blades through its tone map: x 2^(r_cameraExposure 0.1 + overbright
+		// bits), then Hable's filmic curve normalised to white 1, per channel, clamped. That is what makes the faint
+		// tails of the glow sprites read as a thick saturated glow and the stacked middle burn white: the same here
+		float3 ov = Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb);
+		ov = saturate(Rend2Filmic(ov * (1.0718 * max(extraParams.x, 1.0))) / Rend2Filmic(1.0));
+		c = saturate(c + ov);
+	}
 	// rend2 dynamic glow of the saber glow stages (histBuf carries glowScaled[0] here, dt the intensity), blended
 	// GL_ONE / GL_ONE_MINUS_SRC_COLOR over the finished picture as rend2's RB_PostProcess composites it
 	if (histBuf) {
@@ -2508,7 +2523,8 @@ float4 FxaaPS(FsOut i) : SV_Target0
 	float se = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, 0.5) * rcp, 0).a;
 	float lmax = max(max(nw, ne), max(sw, se)), lmin = min(min(nw, ne), min(sw, se));
 	if (max(lmax, m.a) - min(lmin, m.a) < max(0.05, lmax * 0.125)) return float4(m.rgb, 1);
-	float2 dir = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
+	float2 dir = f)KTSRC",
+R"KTSRC(loat2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
 	float red = max((nw + ne + sw + se) * 0.03125, 1.0 / 128.0);
 	float rmin = 1.0 / (min(abs(dir.x), abs(dir.y)) + red);
 	dir = clamp(dir * rmin, -8.0, 8.0) * rcp;
