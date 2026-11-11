@@ -323,6 +323,8 @@ static struct RState {
 	Texture screen, screenDepth, ldr;
 	Texture hdr, depth, gb0, gb1, gb2, ao, aoTmp, shadow, skyLut;
 	Texture overlay;                 // lightsaber blades in display space: added after the tone map (rend2's look)
+	Texture saberGlow;               // their glow stages in display space (rend2's dynamic glow buffer)
+	Texture saberGlowLvl[5];         // rend2's glowScaled chain: full size, then halves
 	Texture glow;                    // glow stages (saber blades, lights) drawn again here; blurred into the bloom (rend2 dynamic glow)
 	Texture hdrPrev;                 // last frame's lit scene (screen-space reflections)
 	bool hdrPrevValid = false;
@@ -341,6 +343,7 @@ static struct RState {
 	ID3D12PipelineState* presentPSO = nullptr, * tonemapPSO = nullptr, * fxaaPSO = nullptr;
 	ID3D12PipelineState* lgPSO[3] = {}, * lgShadowPSO = nullptr, * lgShadowAlphaPSO = nullptr;
 	ID3D12PipelineState* csSkyLut = nullptr, * csSkySh = nullptr, * csLighting = nullptr, * csAo = nullptr, * csAoBlur = nullptr;
+	ID3D12PipelineState* csDGlowDown = nullptr, * csDGlowUp = nullptr;
 	ID3D12PipelineState* csHist = nullptr, * csExposure = nullptr, * csBloomDown = nullptr, * csBloomUp = nullptr;
 	// frame
 	std::vector<LegacyDraw> stream;
@@ -519,9 +522,9 @@ static ID3D12PipelineState* LegacyPSO(uint32_t bits, int target)   // target 0 s
 	}
 	if (bits & PSO_WIRE) d.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
 	d.PrimitiveTopologyType = (bits & PSO_LINES) ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d.NumRenderTargets = target == 1 ? 3 : 1;   // HDR: + the glow target and the saber overlay (same blend)
+	d.NumRenderTargets = target == 1 ? 4 : 1;   // HDR: + the glow target, the saber overlay and the saber glow (same blend)
 	d.RTVFormats[0] = target == 1 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
-	if (target == 1) d.RTVFormats[1] = d.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	if (target == 1) d.RTVFormats[1] = d.RTVFormats[2] = d.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	ID3D12PipelineState* p = CreateGraphicsPSO(d, "legacy");
 	R.psos[key] = p;
@@ -615,6 +618,8 @@ static bool CreatePipelines()
 	R.csExposure = CreateComputePSO(R_Shader("post", "ExposureCS", "cs_5_1"), "exposure");
 	R.csBloomDown = CreateComputePSO(R_Shader("post", "BloomDownCS", "cs_5_1"), "bloom down");
 	R.csBloomUp = CreateComputePSO(R_Shader("post", "BloomUpCS", "cs_5_1"), "bloom up");
+	R.csDGlowDown = CreateComputePSO(R_Shader("post", "DGlowDownCS", "cs_5_1"), "saber glow down");
+	R.csDGlowUp = CreateComputePSO(R_Shader("post", "DGlowUpCS", "cs_5_1"), "saber glow up");
 	{
 		Shader ps = R_Shader("probes", "FilterCS", "cs_5_1");   // optional: without it there are no probes
 		if (ps.ok) R.csProbe = CreateComputePSO(ps, "probe filter");
@@ -658,9 +663,10 @@ static bool CreatePipelines()
 // ------------------------------------------------------------------------------------------------ targets
 static void DestroyTargets()
 {
-	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.overlay, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
+	Texture* all[] = { &R.screen, &R.screenDepth, &R.ldr, &R.hdr, &R.glow, &R.overlay, &R.saberGlow, &R.hdrPrev, &R.depth, &R.gb0, &R.gb1, &R.gb2, &R.ao, &R.aoTmp, &R.shadow, &R.skyLut };
 	for (Texture* t : all) DestroyTexture(*t);
 	for (auto& t : R.bloomDown) DestroyTexture(t);
+	for (auto& t : R.saberGlowLvl) DestroyTexture(t);
 	for (auto& t : R.bloomUp) DestroyTexture(t);
 }
 
@@ -676,6 +682,9 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 	ok &= CreateTexture(R.hdr, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT | TEX_UAV, 1, black, "hdr");
 	ok &= CreateTexture(R.glow, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "glow");
 	ok &= CreateTexture(R.overlay, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "saber overlay");
+	ok &= CreateTexture(R.saberGlow, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "saber glow");
+	for (int i = 0; i < 5; i++)
+		ok &= CreateTexture(R.saberGlowLvl[i], Q_max(1u, w >> i), Q_max(1u, h >> i), 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "saber glow chain");
 	ok &= CreateTexture(R.hdrPrev, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, nullptr, "hdr previous");
 	R.hdrPrevValid = false;
 	for (int i = 0; i < 2; i++) ok &= CreateTexture(R.taa[i], w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_UAV, 1, nullptr, "taa history");
@@ -772,7 +781,7 @@ void R_Shutdown()
 	for (auto& kv : R.psos) if (kv.second) kv.second->Release();
 	R.psos.clear();
 	ID3D12PipelineState* ps[] = { R.presentPSO, R.tonemapPSO, R.fxaaPSO, R.lgPSO[0], R.lgPSO[1], R.lgPSO[2], R.lgShadowPSO, R.lgShadowAlphaPSO,
-		R.csSkyLut, R.csSkySh, R.csLighting, R.csAo, R.csAoBlur, R.csHist, R.csExposure, R.csBloomDown, R.csBloomUp, R.csProbe, R.csTaa, R.csGiTrace, R.csGiTemporal, R.csGiSpatial, R.csFogInject, R.csFogIntegrate, R.csFogApply, R.csSss, R.csFocus, R.csDof, R.csMotionBlur };
+		R.csSkyLut, R.csSkySh, R.csLighting, R.csAo, R.csAoBlur, R.csHist, R.csExposure, R.csBloomDown, R.csBloomUp, R.csDGlowDown, R.csDGlowUp, R.csProbe, R.csTaa, R.csGiTrace, R.csGiTemporal, R.csGiSpatial, R.csFogInject, R.csFogIntegrate, R.csFogApply, R.csSss, R.csFocus, R.csDof, R.csMotionBlur };
 	for (auto* p : ps) if (p) p->Release();
 	Shader* sh[] = { &R.legacyVS, &R.legacyPS, &R.fsVS, &R.presentPS, &R.tonemapPS, &R.fxaaPS, &R.lgVS, &R.lgPS, &R.lgShadowPS };
 	for (auto* s : sh) if (s->blob) s->blob->Release();
@@ -830,8 +839,9 @@ static void FlushStream(int target)
 	if (target == 1) {
 		Transition(cl, R.glow, D3D12_RESOURCE_STATE_RENDER_TARGET);
 		Transition(cl, R.overlay, D3D12_RESOURCE_STATE_RENDER_TARGET);
-		D3D12_CPU_DESCRIPTOR_HANDLE three[3] = { rt.rtv[0], R.glow.rtv[0], R.overlay.rtv[0] };
-		cl->OMSetRenderTargets(3, three, FALSE, &ds.dsv[0]);
+		Transition(cl, R.saberGlow, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		D3D12_CPU_DESCRIPTOR_HANDLE four[4] = { rt.rtv[0], R.glow.rtv[0], R.overlay.rtv[0], R.saberGlow.rtv[0] };
+		cl->OMSetRenderTargets(4, four, FALSE, &ds.dsv[0]);
 	}
 	else cl->OMSetRenderTargets(1, &rt.rtv[0], FALSE, &ds.dsv[0]);
 	if (target == 1) cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
@@ -1548,10 +1558,13 @@ static void RenderWorldView()
 		cl->ClearRenderTargetView(R.glow.rtv[0], zero4g, 0, nullptr);
 		Transition(cl, R.overlay, D3D12_RESOURCE_STATE_RENDER_TARGET);
 		cl->ClearRenderTargetView(R.overlay.rtv[0], zero4g, 0, nullptr);
+		Transition(cl, R.saberGlow, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		cl->ClearRenderTargetView(R.saberGlow.rtv[0], zero4g, 0, nullptr);
 	}
 	FlushStream(1);
 	Transition(cl, R.glow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	Transition(cl, R.overlay, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	Transition(cl, R.saberGlow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
 	// ---- camera: exposure
 	D3D12_RESOURCE_STATES srvAll = srv;
@@ -1692,6 +1705,30 @@ static void RenderWorldView()
 		bloomSrv = prev;
 	}
 
+	// ---- rend2 dynamic glow for the saber glow stages: the glow buffer downsampled into glowScaled[0..4] (CoD:AW
+	// 13-tap filter, glowScaled[0] is full size), then upsampled back level by level; the tone map pass screen-blends
+	// glowScaled[0] x r_dynamicGlowIntensity (1.13) over the picture, exactly as rend2's RB_PostProcess does
+	uint32_t saberGlowSrv = 0;
+	if (R.csDGlowDown && R.csDGlowUp && kt_dynGlow->value > 0) {
+		uint32_t src = R.saberGlow.srv;
+		for (int i = 0; i < 5; i++) {
+			Texture& d = R.saberGlowLvl[i];
+			Transition(cl, d, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			uint32_t k[8] = { src, d.uav[0], 0, 0, d.width, d.height, 0, 0 };
+			Dispatch(cl, R.csDGlowDown, k, 8, (d.width + 7) / 8, (d.height + 7) / 8);
+			Transition(cl, d, srvAll);
+			src = d.srv;
+		}
+		for (int i = 3; i >= 0; i--) {
+			Texture& d = R.saberGlowLvl[i];
+			Transition(cl, d, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			uint32_t k[8] = { R.saberGlowLvl[i + 1].srv, d.uav[0], 0, 0, d.width, d.height, 0, 0 };
+			Dispatch(cl, R.csDGlowUp, k, 8, (d.width + 7) / 8, (d.height + 7) / 8);
+			Transition(cl, d, srvAll);
+		}
+		saberGlowSrv = R.saberGlowLvl[0].srv;
+	}
+
 	// ---- tone map (+ FXAA) into the screen
 	cl->SetGraphicsRootConstantBufferView(RP_VIEW_CBV, R.viewCB);
 	bool fxaa = kt_fxaa->integer && R.fxaaPSO && !R.taaThisView;   // TAA does the anti-aliasing
@@ -1699,7 +1736,9 @@ static void RenderWorldView()
 	Transition(cl, R.depth, D3D12_RESOURCE_STATE_DEPTH_READ | srv);
 	Transition(cl, tmTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	{
-		uint32_t k[8] = { R.hdr.srv, R.overlay.srv, 0, bloomSrv, R.w, R.h, 0, 0 };
+		uint32_t k[8] = { R.hdr.srv, R.overlay.srv, saberGlowSrv, bloomSrv, R.w, R.h, 0, 0 };
+		float gi = 1.13f * Q_max(0.0f, kt_dynGlow->value);   // r_dynamicGlowIntensity
+		memcpy(&k[6], &gi, 4);
 		FullscreenPass(cl, R.tonemapPSO, tmTarget, k, 8);
 	}
 	if (fxaa) {

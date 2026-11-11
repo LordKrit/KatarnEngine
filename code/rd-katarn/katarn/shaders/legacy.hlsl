@@ -34,7 +34,7 @@ float4 SampleUnit(uint tex, float2 uv, bool clampMode, bool pointMode)
 	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 }
 
-struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; };
+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; float4 sglow : SV_Target3; };
 float4 Shade(VsOut i, out float4 display);
 PsOut PS(VsOut i)
 {
@@ -44,11 +44,14 @@ PsOut PS(VsOut i)
 	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
 	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
 	o.overlay = float4(0, 0, 0, o.c.a);
+	o.sglow = float4(0, 0, 0, o.c.a);
 	if (drawTarget == 1 && (flags & (1u << 14))) {
-		// lightsaber blade: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added to the
-		// display after the tone map with the plain clamp rend2 has; a softer copy feeds the bloom
+		// lightsaber blade / trail: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added
+		// to the display after the tone map with the plain clamp rend2 has. Glow stages also go to rend2's dynamic
+		// glow buffer (blurred and screen-blended at the end, as rend2 does), not into Katarn's HDR bloom
 		o.overlay = display;
-		o.glow = float4(o.c.rgb * 0.35, o.c.a);
+		o.sglow = (flags & (1u << 11)) ? display : float4(0, 0, 0, display.a);
+		o.glow = float4(0, 0, 0, o.c.a);
 		o.c = float4(0, 0, 0, o.c.a);
 	}
 	return o;

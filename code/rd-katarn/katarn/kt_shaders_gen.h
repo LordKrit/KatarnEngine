@@ -928,7 +928,7 @@ float4 SampleUnit(uint tex, float2 uv, bool clampMode, bool pointMode)
 	return clampMode ? Tex2D[NonUniformResourceIndex(tex)].Sample(sClampAniso, uv) : Tex2D[NonUniformResourceIndex(tex)].Sample(sWrap, uv);
 }
 
-struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; };
+struct PsOut { float4 c : SV_Target0; float4 glow : SV_Target1; float4 overlay : SV_Target2; float4 sglow : SV_Target3; };
 float4 Shade(VsOut i, out float4 display);
 PsOut PS(VsOut i)
 {
@@ -938,11 +938,14 @@ PsOut PS(VsOut i)
 	// glow stages also go to the glow target (blurred into the bloom); everything else only covers it
 	o.glow = (drawTarget == 1 && (flags & (1u << 11))) ? o.c : float4(0, 0, 0, o.c.a);
 	o.overlay = float4(0, 0, 0, o.c.a);
+	o.sglow = float4(0, 0, 0, o.c.a);
 	if (drawTarget == 1 && (flags & (1u << 14))) {
-		// lightsaber blade: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added to the
-		// display after the tone map with the plain clamp rend2 has; a softer copy feeds the bloom
+		// lightsaber blade / trail: kept out of the HDR scene (no tone-map whitening, no fog, no TAA smear) and added
+		// to the display after the tone map with the plain clamp rend2 has. Glow stages also go to rend2's dynamic
+		// glow buffer (blurred and screen-blended at the end, as rend2 does), not into Katarn's HDR bloom
 		o.overlay = display;
-		o.glow = float4(o.c.rgb * 0.35, o.c.a);
+		o.sglow = (flags & (1u << 11)) ? display : float4(0, 0, 0, display.a);
+		o.glow = float4(0, 0, 0, o.c.a);
 		o.c = float4(0, 0, 0, o.c.a);
 	}
 	return o;
@@ -2275,6 +2278,54 @@ void BloomDownCS(uint3 id : SV_DispatchThreadID)
 	UavTex[dstUav][id.xy] = float4(r, 1);
 }
 
+// rend2's dynamic glow chain (glsl/dglow_downsample.glsl and dglow_upsample.glsl, Call of Duty: Advanced Warfare
+// filters) for the lightsaber glow stages: same taps and weights (the down filter samples (2,-2) twice, as rend2's
+// does), offsets in source texels, sampled at the destination's texture coordinate, every pass overwriting its target
+[numthreads(8, 8, 1)]
+void DGlowDownCS(uint3 id : SV_DispatchThreadID)
+{
+	if (any(id.xy >= dstSize)) return;
+	float2 uv = (id.xy + 0.5) / float2(dstSize)KTSRC",
+R"KTSRC();
+	float sw, sh; Tex2D[srcSrv].GetDimensions(sw, sh);
+	float2 r = 1.0 / float2(sw, sh);
+	float4 c = 0;
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-2, -2), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, -2), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(2, -2), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, -1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, -1), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-2, 0), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, 0), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(2, -2), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, 1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, 1), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-2, 2), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, 2), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(2, 2), 0);
+	UavTex[dstUav][id.xy] = float4(Sane(c.rgb), c.a);
+}
+
+[numthreads(8, 8, 1)]
+void DGlowUpCS(uint3 id : SV_DispatchThreadID)
+{
+	if (any(id.xy >= dstSize)) return;
+	float2 uv = (id.xy + 0.5) / float2(dstSize);
+	float sw, sh; Tex2D[srcSrv].GetDimensions(sw, sh);
+	float2 r = 1.0 / float2(sw, sh);
+	float4 c = 0;
+	c += 0.0625 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, -1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, -1), 0);
+	c += 0.0625 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, -1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, 0), 0);
+	c += 0.25 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, 0), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, 0), 0);
+	c += 0.0625 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, 1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, 1), 0);
+	c += 0.0625 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, 1), 0);
+	UavTex[dstUav][id.xy] = c;
+}
+
 [numthreads(8, 8, 1)]
 void BloomUpCS(uint3 id : SV_DispatchThreadID)
 {
@@ -2282,8 +2333,7 @@ void BloomUpCS(uint3 id : SV_DispatchThreadID)
 	float2 uv = (id.xy + 0.5) / float2(dstSize);
 	float2 h = 1.0 / float2(dstSize);
 	float3 s = Fetch(bloomSrv, uv + float2(-1, -1) * h) + Fetch(bloomSrv, uv + float2(1, -1) * h) + Fetch(bloomSrv, uv + float2(-1, 1) * h) + Fetch(bloomSrv, uv + float2(1, 1) * h);
-	s += 2 * (Fetch(bloomSrv, uv + float2(0, -1) * h) + Fetch(bloomSrv, uv + float2(-1, 0) * h) + Fetch(bloomSrv, uv + float2(1, 0) * h) )KTSRC",
-R"KTSRC(+ Fetch(bloomSrv, uv + float2(0, 1) * h));
+	s += 2 * (Fetch(bloomSrv, uv + float2(0, -1) * h) + Fetch(bloomSrv, uv + float2(-1, 0) * h) + Fetch(bloomSrv, uv + float2(1, 0) * h) + Fetch(bloomSrv, uv + float2(0, 1) * h));
 	s += 4 * Fetch(bloomSrv, uv);
 	s /= 16;
 	float3 base = Tex2D[srcSrv].Load(int3(id.xy, 0)).rgb;
@@ -2432,6 +2482,12 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
 	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
 	if (dstUav) c = saturate(c + Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb));
+	// rend2 dynamic glow of the saber glow stages (histBuf carries glowScaled[0] here, dt the intensity), blended
+	// GL_ONE / GL_ONE_MINUS_SRC_COLOR over the finished picture as rend2's RB_PostProcess composites it
+	if (histBuf) {
+		float3 g = saturate(Sane(Tex2D[histBuf].SampleLevel(sClamp, i.pos.xy * invTargetSize.xy, 0).rgb) * dt);
+		c = saturate(g + c * (1 - g));
+	}
 	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 	c += (n - 0.5) / 255.0;
 	return float4(c, dot(c, float3(0.299, 0.587, 0.114)));

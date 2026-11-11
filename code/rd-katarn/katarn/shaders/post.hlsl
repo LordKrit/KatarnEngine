@@ -108,6 +108,53 @@ void BloomDownCS(uint3 id : SV_DispatchThreadID)
 	UavTex[dstUav][id.xy] = float4(r, 1);
 }
 
+// rend2's dynamic glow chain (glsl/dglow_downsample.glsl and dglow_upsample.glsl, Call of Duty: Advanced Warfare
+// filters) for the lightsaber glow stages: same taps and weights (the down filter samples (2,-2) twice, as rend2's
+// does), offsets in source texels, sampled at the destination's texture coordinate, every pass overwriting its target
+[numthreads(8, 8, 1)]
+void DGlowDownCS(uint3 id : SV_DispatchThreadID)
+{
+	if (any(id.xy >= dstSize)) return;
+	float2 uv = (id.xy + 0.5) / float2(dstSize);
+	float sw, sh; Tex2D[srcSrv].GetDimensions(sw, sh);
+	float2 r = 1.0 / float2(sw, sh);
+	float4 c = 0;
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-2, -2), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, -2), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(2, -2), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, -1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, -1), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-2, 0), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, 0), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(2, -2), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, 1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, 1), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-2, 2), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, 2), 0);
+	c += 0.03125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(2, 2), 0);
+	UavTex[dstUav][id.xy] = float4(Sane(c.rgb), c.a);
+}
+
+[numthreads(8, 8, 1)]
+void DGlowUpCS(uint3 id : SV_DispatchThreadID)
+{
+	if (any(id.xy >= dstSize)) return;
+	float2 uv = (id.xy + 0.5) / float2(dstSize);
+	float sw, sh; Tex2D[srcSrv].GetDimensions(sw, sh);
+	float2 r = 1.0 / float2(sw, sh);
+	float4 c = 0;
+	c += 0.0625 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, -1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, -1), 0);
+	c += 0.0625 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, -1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, 0), 0);
+	c += 0.25 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, 0), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, 0), 0);
+	c += 0.0625 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(-1, 1), 0);
+	c += 0.125 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(0, 1), 0);
+	c += 0.0625 * Tex2D[srcSrv].SampleLevel(sClamp, uv + r * float2(1, 1), 0);
+	UavTex[dstUav][id.xy] = c;
+}
+
 [numthreads(8, 8, 1)]
 void BloomUpCS(uint3 id : SV_DispatchThreadID)
 {
@@ -264,6 +311,12 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
 	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
 	if (dstUav) c = saturate(c + Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb));
+	// rend2 dynamic glow of the saber glow stages (histBuf carries glowScaled[0] here, dt the intensity), blended
+	// GL_ONE / GL_ONE_MINUS_SRC_COLOR over the finished picture as rend2's RB_PostProcess composites it
+	if (histBuf) {
+		float3 g = saturate(Sane(Tex2D[histBuf].SampleLevel(sClamp, i.pos.xy * invTargetSize.xy, 0).rgb) * dt);
+		c = saturate(g + c * (1 - g));
+	}
 	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 	c += (n - 0.5) / 255.0;
 	return float4(c, dot(c, float3(0.299, 0.587, 0.114)));
