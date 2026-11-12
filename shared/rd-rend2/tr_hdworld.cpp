@@ -354,6 +354,42 @@ static void R_KWLoad(const char* base)
 	std::vector<uint32_t> tri;
 	size_t totalTris = 0, totalVerts = 0;
 	kwClusters.reserve(clus.size());
+	std::vector<packedKw_t> batchV;
+	std::vector<glIndex_t> batchI;
+	std::vector<size_t> pendingDraws;
+	int numBatches = 0;
+	auto flushBatch = [&]() {
+		if (batchV.empty()) return;
+		VBO_t* vbo = R_CreateVBO((byte*)batchV.data(), (int)(batchV.size() * sizeof(packedKw_t)), VBO_USAGE_STATIC, va("kw%d", numBatches));
+		IBO_t* ibo = R_CreateIBO((byte*)batchI.data(), (int)(batchI.size() * sizeof(glIndex_t)), VBO_USAGE_STATIC, va("kw%d", numBatches));
+		const int stride = sizeof(packedKw_t);
+		vbo->offsets[ATTR_INDEX_POSITION] = offsetof(packedKw_t, pos);
+		vbo->offsets[ATTR_INDEX_NORMAL] = offsetof(packedKw_t, normal);
+		vbo->offsets[ATTR_INDEX_TANGENT] = offsetof(packedKw_t, tangent);
+		vbo->offsets[ATTR_INDEX_TEXCOORD0] = offsetof(packedKw_t, uv);
+		vbo->offsets[ATTR_INDEX_TEXCOORD1] = offsetof(packedKw_t, uv);
+		vbo->offsets[ATTR_INDEX_TEXCOORD2] = offsetof(packedKw_t, uv);
+		vbo->offsets[ATTR_INDEX_TEXCOORD3] = offsetof(packedKw_t, uv);
+		vbo->offsets[ATTR_INDEX_TEXCOORD4] = offsetof(packedKw_t, uv);
+		vbo->offsets[ATTR_INDEX_COLOR] = offsetof(packedKw_t, color);
+		vbo->offsets[ATTR_INDEX_LIGHTDIRECTION] = offsetof(packedKw_t, lightDir);
+		for (int a : { ATTR_INDEX_POSITION, ATTR_INDEX_NORMAL, ATTR_INDEX_TANGENT, ATTR_INDEX_TEXCOORD0, ATTR_INDEX_TEXCOORD1, ATTR_INDEX_TEXCOORD2,
+			ATTR_INDEX_TEXCOORD3, ATTR_INDEX_TEXCOORD4, ATTR_INDEX_COLOR, ATTR_INDEX_LIGHTDIRECTION })
+			vbo->strides[a] = stride;
+		vbo->sizes[ATTR_INDEX_POSITION] = sizeof(vec3_t);
+		vbo->sizes[ATTR_INDEX_NORMAL] = sizeof(uint32_t);
+		vbo->sizes[ATTR_INDEX_TANGENT] = sizeof(uint32_t);
+		for (int a : { ATTR_INDEX_TEXCOORD0, ATTR_INDEX_TEXCOORD1, ATTR_INDEX_TEXCOORD2, ATTR_INDEX_TEXCOORD3, ATTR_INDEX_TEXCOORD4 })
+			vbo->sizes[a] = sizeof(vec2_t);
+		vbo->sizes[ATTR_INDEX_COLOR] = sizeof(vec4_t);
+		vbo->sizes[ATTR_INDEX_LIGHTDIRECTION] = sizeof(uint32_t);
+
+		for (size_t di : pendingDraws) { kwDraws[di].surf.vbo = vbo; kwDraws[di].surf.ibo = ibo; }
+		pendingDraws.clear();
+		batchV.clear();
+		batchI.clear();
+		numBatches++;
+	};
 	for (size_t ci = 0; ci < clus.size(); ci++)
 	{
 		const KwCluster& c = clus[ci];
@@ -425,49 +461,31 @@ static void R_KWLoad(const char* base)
 		lodRunStart.push_back((int)runs.size());
 		if (out.empty()) continue;
 
-		VBO_t* vbo = R_CreateVBO((byte*)pv.data(), (int)(pv.size() * sizeof(packedKw_t)), VBO_USAGE_STATIC, va("kw%d", (int)ci));
-		IBO_t* ibo = R_CreateIBO((byte*)out.data(), (int)(out.size() * sizeof(glIndex_t)), VBO_USAGE_STATIC, va("kw%d", (int)ci));
-		const int stride = sizeof(packedKw_t);
-		vbo->offsets[ATTR_INDEX_POSITION] = offsetof(packedKw_t, pos);
-		vbo->offsets[ATTR_INDEX_NORMAL] = offsetof(packedKw_t, normal);
-		vbo->offsets[ATTR_INDEX_TANGENT] = offsetof(packedKw_t, tangent);
-		vbo->offsets[ATTR_INDEX_TEXCOORD0] = offsetof(packedKw_t, uv);
-		vbo->offsets[ATTR_INDEX_TEXCOORD1] = offsetof(packedKw_t, uv);
-		vbo->offsets[ATTR_INDEX_TEXCOORD2] = offsetof(packedKw_t, uv);
-		vbo->offsets[ATTR_INDEX_TEXCOORD3] = offsetof(packedKw_t, uv);
-		vbo->offsets[ATTR_INDEX_TEXCOORD4] = offsetof(packedKw_t, uv);
-		vbo->offsets[ATTR_INDEX_COLOR] = offsetof(packedKw_t, color);
-		vbo->offsets[ATTR_INDEX_LIGHTDIRECTION] = offsetof(packedKw_t, lightDir);
-		for (int a : { ATTR_INDEX_POSITION, ATTR_INDEX_NORMAL, ATTR_INDEX_TANGENT, ATTR_INDEX_TEXCOORD0, ATTR_INDEX_TEXCOORD1, ATTR_INDEX_TEXCOORD2,
-			ATTR_INDEX_TEXCOORD3, ATTR_INDEX_TEXCOORD4, ATTR_INDEX_COLOR, ATTR_INDEX_LIGHTDIRECTION })
-			vbo->strides[a] = stride;
-		vbo->sizes[ATTR_INDEX_POSITION] = sizeof(vec3_t);
-		vbo->sizes[ATTR_INDEX_NORMAL] = sizeof(uint32_t);
-		vbo->sizes[ATTR_INDEX_TANGENT] = sizeof(uint32_t);
-		for (int a : { ATTR_INDEX_TEXCOORD0, ATTR_INDEX_TEXCOORD1, ATTR_INDEX_TEXCOORD2, ATTR_INDEX_TEXCOORD3, ATTR_INDEX_TEXCOORD4 })
-			vbo->sizes[a] = sizeof(vec2_t);
-		vbo->sizes[ATTR_INDEX_COLOR] = sizeof(vec4_t);
-		vbo->sizes[ATTR_INDEX_LIGHTDIRECTION] = sizeof(uint32_t);
-
+		// clusters share big buffers (rend2 has a fixed number of VBOs): flush when this one would overflow
+		if (!batchV.empty() && batchV.size() + pv.size() > 4000000) flushBatch();
+		const uint32_t vbase = (uint32_t)batchV.size();
+		const uint32_t ibase = (uint32_t)batchI.size();
+		batchV.insert(batchV.end(), pv.begin(), pv.end());
+		for (glIndex_t x : out) batchI.push_back(x + vbase);
 		for (int l = 0; l <= kc.numLods; l++)
 			kc.firstDraw[l] = (int)kwDraws.size() + lodRunStart[l];
 		for (const run_t& r : runs)
 		{
 			kwDraw_t d = {};
 			d.surf.surfaceType = SF_VBO_MDVMESH;
-			d.surf.vbo = vbo;
-			d.surf.ibo = ibo;
-			d.surf.indexOffset = r.first;
+			d.surf.indexOffset = ibase + r.first;
 			d.surf.numIndexes = r.count;
 			d.surf.numVerts = c.numVertices;
-			d.surf.minIndex = 0;
-			d.surf.maxIndex = c.numVertices - 1;
+			d.surf.minIndex = vbase;
+			d.surf.maxIndex = vbase + c.numVertices - 1;
+			pendingDraws.push_back(kwDraws.size());
 			d.shader = shaderFor(r.mat);
 			kwDraws.push_back(d);
 		}
 		kwClusters.push_back(kc);
 		totalVerts += c.numVertices;
 	}
+	flushBatch();
 	kf.close();
 	ri.Printf(PRINT_ALL, "kworld: %s.kworld: %d clusters, %d draws, %d triangles at full detail, %d vertices, %s, light grid %s\n", base,
 		(int)kwClusters.size(), (int)kwDraws.size(), (int)totalTris, (int)totalVerts, haveLight ? "baked light" : "no baked light (cook without --bake 0)",
