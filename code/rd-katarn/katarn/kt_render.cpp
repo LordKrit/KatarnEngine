@@ -195,7 +195,7 @@ static void RegisterCvars()
 	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
 	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);
-	kt_glowLights = KtCvar("kt_glowLights", "0.6", CVAR_ARCHIVE);   // glowing textures on old maps light their surroundings (strength, 0 = off)               // HD worlds: leaves move in the wind (0 = still)
+	kt_glowLights = KtCvar("kt_glowLights", "0.35", CVAR_ARCHIVE);   // glowing textures on old maps light their surroundings (strength, 0 = off)               // HD worlds: leaves move in the wind (0 = still)
 	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
 	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
@@ -249,6 +249,10 @@ static void RegisterCvars()
 		// rend2 look on old maps: no extra haze in the air, no sharpening (rend2 has neither)
 		ri.Cvar_Set("kt_vfogAmbient", "0"); ri.Cvar_Set("kt_sharpen", "0");
 		ri.Cvar_Set("kt_configVersion", "6");
+	}
+	if (ver->integer < 7) {
+		ri.Cvar_Set("kt_glowLights", "0.35");   // r24: glowing panels lit nearby characters too strongly
+		ri.Cvar_Set("kt_configVersion", "7");
 	}
 }
 
@@ -1460,7 +1464,12 @@ static void RenderWorldView()
 			const float* g = &s_glowLights[near_[k].second * 7];
 			GpuLight l = {};
 			l.pos[0] = g[0]; l.pos[1] = g[1]; l.pos[2] = g[2];
-			for (int q = 0; q < 3; q++) l.color[q] = g[3 + q] * kt_glowLights->value;
+			// r24: fade in with distance (1800..3000) and out at the end of the list, so lights never pop on as you walk up
+			float dist = sqrtf(near_[k].first);
+			float fd = 1.0f - Q_max(0.0f, Q_min(1.0f, (dist - 1800.0f) / 1200.0f));
+			float fr = 1.0f - Q_max(0.0f, Q_min(1.0f, ((float)k - 36.0f) / 12.0f));
+			float fade = fd * fd * (3 - 2 * fd) * fr;
+			for (int q = 0; q < 3; q++) l.color[q] = g[3 + q] * kt_glowLights->value * fade;
 			l.radius = Q_min(g[6], 300.0f);
 			l.pad[1] = 1.0f;   // lighting.hlsl Light.lp.y: no volumetric fog from these
 			l.type = 0; l.invSquare = 0;
