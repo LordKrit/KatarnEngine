@@ -191,7 +191,7 @@ static void RegisterCvars()
 	kt_sunScale = KtCvar("kt_sunScale", "1.4", CVAR_ARCHIVE);     // sun brightness (HD worlds)
 	kt_skyLight = KtCvar("kt_skyLight", "0.65", CVAR_ARCHIVE);    // light from the sky in the shade (HD worlds)
 	kt_sharpen = KtCvar("kt_sharpen", "0.3", CVAR_ARCHIVE);       // image sharpening (0 = off)
-	kt_probes = KtCvar("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
+	kt_probes = KtCvar("kt_probes", "0", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
 	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
 	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);
@@ -253,6 +253,10 @@ static void RegisterCvars()
 	if (ver->integer < 7) {
 		ri.Cvar_Set("kt_glowLights", "0.35");   // r24: glowing panels lit nearby characters too strongly
 		ri.Cvar_Set("kt_configVersion", "7");
+	}
+	if (ver->integer < 8) {
+		ri.Cvar_Set("kt_probes", "0");   // r28: reflection probes off by default (performance)
+		ri.Cvar_Set("kt_configVersion", "8");
 	}
 }
 
