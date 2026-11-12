@@ -1838,7 +1838,18 @@ void CS(uint3 id : SV_DispatchThreadID)
 				att *= s;
 			}
 			Lo += diff / PI * NoLd * l.color * att;
-			Lo += (Brdf(N, V, Lspec, 0, f0, max(rough, 0.12)) ) * l.color * att;
+			// r22 (Frostbite 2014 / Karis 2013 area lights): the highlight is the blade's reflection - widen the lobe by
+			// the blade's apparent size from the reflection point and keep its energy (a / a'), attenuated from that point,
+			// so armour, helmets and wet skin show a long bright streak instead of a pin-point
+			{
+				float dS2 = max(dot(Cs, Cs), 1.0), dS = sqrt(dS2);
+				float a0 = max(rough * rough, 0.0144);
+				float aSph = saturate(a0 + 1.5 / (2.0 * dS));              // blade core radius ~1.5 units
+				float aLin = saturate(a0 + sqrt(len2) / (2.0 * dS));       // along the blade
+				float energy = (a0 / aSph) * (a0 / aSph) * (a0 / aLin);
+				float attS = wnd * l.invSquare / (dS2 + l.lp.x);
+				Lo += Brdf(N, V, Lspec, 0, f0, sqrt(a0)) * energy * l.color * attS;
+			}
 			continue;
 		}
 		float3 d = l.pos - P;
@@ -1894,7 +1905,8 @@ void CS(uint3 id : SV_DispatchThreadID)
 			float jit = frac(52.9829189 * frac(dot(float2(px), float2(0.06711056, 0.00583715)) + indices2.w * 0.618));
 			float3 Q = O + R * stepLen * jit;
 			float hit = 0; float2 huv = 0;
-			[loop] for (int sI = 0; sI < 40; sI++) {
+			[loop] for (int sI = 0; sI < )KTSRC",
+R"KTSRC(40; sI++) {
 				Q += R * stepLen;
 				stepLen *= 1.08;
 				float4 cp = mul(viewProj, float4(Q, 1));
@@ -1909,8 +1921,7 @@ void CS(uint3 id : SV_DispatchThreadID)
 					float4 pp = mul(prevViewProj, float4(Q, 1));
 					huv = pp.xy / pp.w * float2(0.5, -0.5) + 0.5;
 					float2 e = saturate(min(huv, 1 - huv) * 10);
-					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0)KTSRC",
-R"KTSRC(.2);
+					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0.2);
 					break;
 				}
 			}

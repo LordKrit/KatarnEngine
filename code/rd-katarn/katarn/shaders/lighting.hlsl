@@ -324,7 +324,18 @@ void CS(uint3 id : SV_DispatchThreadID)
 				att *= s;
 			}
 			Lo += diff / PI * NoLd * l.color * att;
-			Lo += (Brdf(N, V, Lspec, 0, f0, max(rough, 0.12)) ) * l.color * att;
+			// r22 (Frostbite 2014 / Karis 2013 area lights): the highlight is the blade's reflection - widen the lobe by
+			// the blade's apparent size from the reflection point and keep its energy (a / a'), attenuated from that point,
+			// so armour, helmets and wet skin show a long bright streak instead of a pin-point
+			{
+				float dS2 = max(dot(Cs, Cs), 1.0), dS = sqrt(dS2);
+				float a0 = max(rough * rough, 0.0144);
+				float aSph = saturate(a0 + 1.5 / (2.0 * dS));              // blade core radius ~1.5 units
+				float aLin = saturate(a0 + sqrt(len2) / (2.0 * dS));       // along the blade
+				float energy = (a0 / aSph) * (a0 / aSph) * (a0 / aLin);
+				float attS = wnd * l.invSquare / (dS2 + l.lp.x);
+				Lo += Brdf(N, V, Lspec, 0, f0, sqrt(a0)) * energy * l.color * attS;
+			}
 			continue;
 		}
 		float3 d = l.pos - P;
