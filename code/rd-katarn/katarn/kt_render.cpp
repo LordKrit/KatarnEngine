@@ -195,7 +195,7 @@ static void RegisterCvars()
 	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
 	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);
-	kt_glowLights = KtCvar("kt_glowLights", "0.35", CVAR_ARCHIVE);   // glowing textures on old maps light their surroundings (strength, 0 = off)               // HD worlds: leaves move in the wind (0 = still)
+	kt_glowLights = KtCvar("kt_glowLights", "0", CVAR_ARCHIVE);   // glowing textures on old maps light their surroundings (strength, 0 = off)               // HD worlds: leaves move in the wind (0 = still)
 	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
 	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
@@ -257,6 +257,10 @@ static void RegisterCvars()
 	if (ver->integer < 8) {
 		ri.Cvar_Set("kt_probes", "0");   // r28: reflection probes off by default (performance)
 		ri.Cvar_Set("kt_configVersion", "8");
+	}
+	if (ver->integer < 9) {
+		ri.Cvar_Set("kt_glowLights", "0");   // r29: lights from glowing panels off (performance)
+		ri.Cvar_Set("kt_configVersion", "9");
 	}
 }
 
