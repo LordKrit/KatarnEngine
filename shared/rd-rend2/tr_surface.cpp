@@ -2494,10 +2494,10 @@ static void RB_SurfaceVBOMDVMesh(srfVBOMDVMesh_t* surface)
 	}
 
 	//FIXME: Implement GPU vertex interpolation instead!
-	if (backEnd.currentEntity->e.oldframe != 0 ||
+	if ((backEnd.currentEntity->e.oldframe != 0 ||
 		backEnd.currentEntity->e.frame != 0 ||
 		ShaderRequiresCPUDeforms(tess.shader)
-		)
+		) && surface->mdvSurface)
 	{
 		RB_SurfaceMesh(surface->mdvSurface);
 		return;

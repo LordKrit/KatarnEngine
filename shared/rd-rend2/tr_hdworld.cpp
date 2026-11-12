@@ -550,6 +550,9 @@ static void R_KWAddSurfaces(viewParms_t* viewParms)
 		int lod = 0;
 		for (int l = c.numLods - 1; l > 0; l--)
 			if (c.lodError[l] * projScale / dist <= maxPx) { lod = l; break; }
+		// keep room for the entities: the draw-surface list is a fixed size (it wraps and corrupts when overfilled)
+		if (tr.refdef.numDrawSurfs + (c.firstDraw[lod + 1] - c.firstDraw[lod]) >= MAX_DRAWSURFS - 8192)
+			break;
 		for (int d = c.firstDraw[lod]; d < c.firstDraw[lod + 1]; d++)
 		{
 			kwDraw_t& dr = kwDraws[d];

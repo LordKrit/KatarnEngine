@@ -97,7 +97,6 @@ extern cvar_t* r_ignore;
 extern cvar_t* r_detailTextures;
 
 extern cvar_t* r_znear;
-extern cvar_t* r_distanceCull; // large worlds: view distance override (0 = map / auto)
 extern cvar_t* r_zproj;
 extern cvar_t* r_stereoSeparation;
 
@@ -2355,7 +2354,7 @@ void		R_Modellist_f(void);
 //====================================================
 constexpr auto MAX_SKINS = 1024;
 
-constexpr auto MAX_DRAWSURFS = 0x40000; // large worlds (Warzone uses 262144): was 0x10000
+constexpr auto MAX_DRAWSURFS = 0x40000;   // kworld worlds: many clusters
 #define	DRAWSURF_MASK			(MAX_DRAWSURFS-1)
 
 #define MAX_INSTANCES			256
