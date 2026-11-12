@@ -1457,18 +1457,15 @@ static void RenderWorldView()
 		for (int i = 0; i < (int)s_glowLights.size() / 7; i++) {
 			const float* g = &s_glowLights[i * 7];
 			float d2 = (g[0] - o[0]) * (g[0] - o[0]) + (g[1] - o[1]) * (g[1] - o[1]) + (g[2] - o[2]) * (g[2] - o[2]);
-			if (d2 < 3000.0f * 3000.0f) near_.push_back({ d2, i });
+			if (d2 < 9000.0f * 9000.0f) near_.push_back({ d2, i });   // r25: the whole level's glow lights, always on
 		}
 		std::sort(near_.begin(), near_.end());
-		for (size_t k = 0; k < near_.size() && k < 48 && lights.size() < 1024; k++) {
+		for (size_t k = 0; k < near_.size() && k < 256 && lights.size() < 1024; k++) {
 			const float* g = &s_glowLights[near_[k].second * 7];
 			GpuLight l = {};
 			l.pos[0] = g[0]; l.pos[1] = g[1]; l.pos[2] = g[2];
 			// r24: fade in with distance (1800..3000) and out at the end of the list, so lights never pop on as you walk up
-			float dist = sqrtf(near_[k].first);
-			float fd = 1.0f - Q_max(0.0f, Q_min(1.0f, (dist - 1800.0f) / 1200.0f));
-			float fr = 1.0f - Q_max(0.0f, Q_min(1.0f, ((float)k - 36.0f) / 12.0f));
-			float fade = fd * fd * (3 - 2 * fd) * fr;
+			const float fade = 1.0f;   // r25: no distance fade - the lights are part of the level from the moment it loads
 			for (int q = 0; q < 3; q++) l.color[q] = g[3 + q] * kt_glowLights->value * fade;
 			l.radius = Q_min(g[6], 300.0f);
 			l.pad[1] = 1.0f;   // lighting.hlsl Light.lp.y: no volumetric fog from these
