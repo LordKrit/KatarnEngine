@@ -2147,7 +2147,7 @@ static uint32_t ProbeList(const float* org)
 		for (uint32_t i = 0; i < R.probes.size(); i++) {
 			const RState::Probe& p = R.probes[i];
 			if (!p.valid) continue;
-			if (!pass && vis && p.cluster >= 0 && !(vis[p.cluster >> 3] & (1 << (p.cluster & 7)))) continue;
+			(void)vis;   // r26: every probe, always - picking them by what the camera can see switched reflections on as you walked
 			pick.push_back(i);
 		}
 	if (pick.empty()) return 0;
