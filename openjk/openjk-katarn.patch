@@ -38501,10 +38501,10 @@ index 00000000..250f277f
 +}
 diff --git a/code/rd-katarn/tr_bsp.cpp b/code/rd-katarn/tr_bsp.cpp
 new file mode 100644
-index 00000000..cbfbf1fc
+index 00000000..2fb06172
 --- /dev/null
 +++ b/code/rd-katarn/tr_bsp.cpp
-@@ -0,0 +1,1563 @@
+@@ -0,0 +1,1583 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -38535,6 +38535,7 @@ index 00000000..cbfbf1fc
 +
 +#include "tr_common.h"
 +#include "tr_local.h"
++#include <string>
 +#include "katarn/kt_render.h"
 +
 +/*
@@ -39822,6 +39823,25 @@ index 00000000..cbfbf1fc
 +	tr.distanceCull = 12000;//DEFAULT_DISTANCE_CULL;
 +
 +	p = (char *)(fileBase + l->fileofs);
++	{	// KatarnEngine: misc_skyportal_orient (origin + modelscale) for the SP 3D-skybox parallax (tr_scene.cpp)
++		extern qboolean ktSkyOri; extern vec3_t ktSkyOriPos; extern float ktSkyOriScale; extern qboolean ktHaveMainView;
++		ktSkyOri = qfalse; ktHaveMainView = qfalse;
++		std::string ents_( (const char *)( fileBase + l->fileofs ), l->filelen );
++		size_t e = ents_.find( "\"misc_skyportal_orient\"" );
++		if ( e != std::string::npos )
++		{
++			size_t b = ents_.rfind( '{', e ), c = ents_.find( '}', e );
++			if ( b != std::string::npos && c != std::string::npos )
++			{
++				std::string ent = ents_.substr( b, c - b );
++				size_t o = ent.find( "\"origin\"" ), m = ent.find( "\"modelscale\"" );
++				if ( o != std::string::npos && m != std::string::npos &&
++					 sscanf( ent.c_str() + o + 8, " \"%f %f %f\"", &ktSkyOriPos[0], &ktSkyOriPos[1], &ktSkyOriPos[2] ) == 3 &&
++					 sscanf( ent.c_str() + m + 12, " \"%f\"", &ktSkyOriScale ) == 1 && ktSkyOriScale > 0.0f )
++					ktSkyOri = qtrue;
++			}
++		}
++	}
 +
 +	token = COM_ParseExt( &p, qtrue );
 +	if (!*token || *token != '{') {
@@ -56080,10 +56100,10 @@ index 00000000..29778a6e
 +extern CQuickSpriteSystem SQuickSprite;
 diff --git a/code/rd-katarn/tr_scene.cpp b/code/rd-katarn/tr_scene.cpp
 new file mode 100644
-index 00000000..275369b6
+index 00000000..51c197e6
 --- /dev/null
 +++ b/code/rd-katarn/tr_scene.cpp
-@@ -0,0 +1,417 @@
+@@ -0,0 +1,439 @@
 +/*
 +===========================================================================
 +Copyright (C) 1999 - 2005, Id Software, Inc.
@@ -56127,6 +56147,11 @@ index 00000000..275369b6
 +int			r_numpolyverts;
 +
 +int			skyboxportal;
++qboolean	ktSkyOri;
++vec3_t		ktSkyOriPos;
++float		ktSkyOriScale;
++vec3_t		ktLastMainView;
++qboolean	ktHaveMainView;
 +int			drawskyboxportal;
 +
 +/*
@@ -56372,6 +56397,23 @@ index 00000000..275369b6
 +
 +	if (!tr.world && !( fd->rdflags & RDF_NOWORLDMODEL ) ) {
 +		Com_Error (ERR_DROP, "R_RenderScene: NULL worldmodel");
++	}
++	// KatarnEngine: Source-style 3D skybox parallax for SP (MP's cgame does this from misc_skyportal_orient; the SP
++	// cgame keeps the portal camera fixed). The portal view moves by (player - orient) * modelscale, using the main
++	// view of the previous frame.
++	refdef_t ktSkyFd;
++	if ( ( fd->rdflags & RDF_SKYBOXPORTAL ) && ktSkyOri && ktHaveMainView )
++	{
++		vec3_t dif;
++		ktSkyFd = *fd;
++		VectorSubtract( ktLastMainView, ktSkyOriPos, dif );
++		VectorMA( ktSkyFd.vieworg, ktSkyOriScale, dif, ktSkyFd.vieworg );
++		fd = &ktSkyFd;
++	}
++	else if ( !( fd->rdflags & ( RDF_SKYBOXPORTAL | RDF_NOWORLDMODEL ) ) )
++	{
++		VectorCopy( fd->vieworg, ktLastMainView );
++		ktHaveMainView = qtrue;
 +	}
 +	kt::Probes_NoteScene(fd);
 +

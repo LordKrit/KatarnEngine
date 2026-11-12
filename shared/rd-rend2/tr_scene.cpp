@@ -518,6 +518,12 @@ Rendering a scene may require multiple views to be rendered
 to handle mirrors,
 @@@@@@@@@@@@@@@@@@@@@
 */
+qboolean ktSkyOri;
+vec3_t ktSkyOriPos;
+float ktSkyOriScale;
+vec3_t ktLastMainView;
+qboolean ktHaveMainView;
+
 void RE_RenderScene(const refdef_t* fd)
 {
 	int				startTime = 0;
@@ -526,6 +532,24 @@ void RE_RenderScene(const refdef_t* fd)
 		return;
 	}
 	GLimp_LogComment("====== RE_RenderScene =====\n");
+#ifdef REND2_SP
+	// Source-style 3D skybox parallax (MP's cgame does this from misc_skyportal_orient; the SP cgame keeps the portal
+	// camera fixed): the portal view moves by (player - orient) * modelscale, from the previous frame's main view
+	refdef_t ktSkyFd;
+	if ((fd->rdflags & RDF_SKYBOXPORTAL) && ktSkyOri && ktHaveMainView)
+	{
+		vec3_t dif;
+		ktSkyFd = *fd;
+		VectorSubtract(ktLastMainView, ktSkyOriPos, dif);
+		VectorMA(ktSkyFd.vieworg, ktSkyOriScale, dif, ktSkyFd.vieworg);
+		fd = &ktSkyFd;
+	}
+	else if (!(fd->rdflags & (RDF_SKYBOXPORTAL | RDF_NOWORLDMODEL)))
+	{
+		VectorCopy(fd->vieworg, ktLastMainView);
+		ktHaveMainView = qtrue;
+	}
+#endif
 
 	if (r_norefresh->integer) {
 		return;

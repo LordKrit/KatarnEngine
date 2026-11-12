@@ -41,6 +41,11 @@ int			r_firstScenePoly;
 int			r_numpolyverts;
 
 int			skyboxportal;
+qboolean	ktSkyOri;
+vec3_t		ktSkyOriPos;
+float		ktSkyOriScale;
+vec3_t		ktLastMainView;
+qboolean	ktHaveMainView;
 int			drawskyboxportal;
 
 /*
@@ -280,6 +285,23 @@ void RE_RenderScene(const refdef_t* fd) {
 
 	if (!tr.world && !(fd->rdflags & RDF_NOWORLDMODEL)) {
 		Com_Error(ERR_DROP, "R_RenderScene: NULL worldmodel");
+	}
+	// KatarnEngine: Source-style 3D skybox parallax for SP (MP's cgame does this from misc_skyportal_orient; the SP
+	// cgame keeps the portal camera fixed). The portal view moves by (player - orient) * modelscale, using the main
+	// view of the previous frame.
+	refdef_t ktSkyFd;
+	if ( ( fd->rdflags & RDF_SKYBOXPORTAL ) && ktSkyOri && ktHaveMainView )
+	{
+		vec3_t dif;
+		ktSkyFd = *fd;
+		VectorSubtract( ktLastMainView, ktSkyOriPos, dif );
+		VectorMA( ktSkyFd.vieworg, ktSkyOriScale, dif, ktSkyFd.vieworg );
+		fd = &ktSkyFd;
+	}
+	else if ( !( fd->rdflags & ( RDF_SKYBOXPORTAL | RDF_NOWORLDMODEL ) ) )
+	{
+		VectorCopy( fd->vieworg, ktLastMainView );
+		ktHaveMainView = qtrue;
 	}
 	kt::Probes_NoteScene(fd);
 

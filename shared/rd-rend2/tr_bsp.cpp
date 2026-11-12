@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_map.c
 
 #include "tr_local.h"
+#include <string>
 
 #define JSON_IMPLEMENTATION
 #include "json.h"
@@ -2934,6 +2935,23 @@ static void R_LoadEntities(world_t* worldData, lump_t* l)
 	tr_distanceCullFromMap = qfalse;
 
 	p = (char*)(fileBase + l->fileofs);
+	{	// misc_skyportal_orient (origin + modelscale) for the SP 3D-skybox parallax (tr_scene.cpp)
+		extern qboolean ktSkyOri; extern vec3_t ktSkyOriPos; extern float ktSkyOriScale; extern qboolean ktHaveMainView;
+		ktSkyOri = qfalse; ktHaveMainView = qfalse;
+		std::string ents_((const char*)(fileBase + l->fileofs), l->filelen);
+		size_t e = ents_.find("\"misc_skyportal_orient\"");
+		if (e != std::string::npos) {
+			size_t b = ents_.rfind('{', e), c = ents_.find('}', e);
+			if (b != std::string::npos && c != std::string::npos) {
+				std::string ent = ents_.substr(b, c - b);
+				size_t o = ent.find("\"origin\""), m = ent.find("\"modelscale\"");
+				if (o != std::string::npos && m != std::string::npos &&
+					sscanf(ent.c_str() + o + 8, " \"%f %f %f\"", &ktSkyOriPos[0], &ktSkyOriPos[1], &ktSkyOriPos[2]) == 3 &&
+					sscanf(ent.c_str() + m + 12, " \"%f\"", &ktSkyOriScale) == 1 && ktSkyOriScale > 0.0f)
+					ktSkyOri = qtrue;
+			}
+		}
+	}
 
 	// store for reference by the cgame
 	w->entityString = (char*)Hunk_Alloc(l->filelen + 1, h_low);

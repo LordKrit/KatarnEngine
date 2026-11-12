@@ -28,6 +28,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "tr_common.h"
 #include "tr_local.h"
+#include <string>
 #include "katarn/kt_render.h"
 
 /*
@@ -1298,6 +1299,25 @@ static void R_LoadEntities(const lump_t* l, world_t& worldData)
 	tr.distanceCull = 12000;//DEFAULT_DISTANCE_CULL;
 
 	p = reinterpret_cast<char*>(fileBase + l->fileofs);
+	{	// KatarnEngine: misc_skyportal_orient (origin + modelscale) for the SP 3D-skybox parallax (tr_scene.cpp)
+		extern qboolean ktSkyOri; extern vec3_t ktSkyOriPos; extern float ktSkyOriScale; extern qboolean ktHaveMainView;
+		ktSkyOri = qfalse; ktHaveMainView = qfalse;
+		std::string ents_( (const char *)( fileBase + l->fileofs ), l->filelen );
+		size_t e = ents_.find( "\"misc_skyportal_orient\"" );
+		if ( e != std::string::npos )
+		{
+			size_t b = ents_.rfind( '{', e ), c = ents_.find( '}', e );
+			if ( b != std::string::npos && c != std::string::npos )
+			{
+				std::string ent = ents_.substr( b, c - b );
+				size_t o = ent.find( "\"origin\"" ), m = ent.find( "\"modelscale\"" );
+				if ( o != std::string::npos && m != std::string::npos &&
+					 sscanf( ent.c_str() + o + 8, " \"%f %f %f\"", &ktSkyOriPos[0], &ktSkyOriPos[1], &ktSkyOriPos[2] ) == 3 &&
+					 sscanf( ent.c_str() + m + 12, " \"%f\"", &ktSkyOriScale ) == 1 && ktSkyOriScale > 0.0f )
+					ktSkyOri = qtrue;
+			}
+		}
+	}
 
 	const char* token = COM_ParseExt(&p, qtrue);
 	if (!*token || *token != '{') {
