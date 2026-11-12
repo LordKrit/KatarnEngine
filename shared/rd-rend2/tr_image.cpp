@@ -2990,99 +2990,6 @@ Finds or loads the given image.
 Returns NULL if it fails, not a default image.
 ==============
 */
-/*
-================
-R_LoadDDSImage
-
-Precompressed DDS textures (DX10 header: BC7 / BC5 / RGBA8, with their mips), as the kworld v3 cook
-writes them (textures/kw_<map>/*.dds). Uploaded as they are: no decode, no re-compression.
-================
-*/
-#ifndef GL_COMPRESSED_RG_RGTC2
-#define GL_COMPRESSED_RG_RGTC2 0x8DBD
-#endif
-#ifndef GL_TEXTURE_SWIZZLE_RGBA
-#define GL_TEXTURE_SWIZZLE_RGBA 0x8E46
-#endif
-static image_t* R_LoadDDSImage(const char* name, imgType_t type, int flags)
-{
-	char path[MAX_QPATH];
-	COM_StripExtension(name, path, sizeof(path));
-	Q_strcat(path, sizeof(path), ".dds");
-	byte* buf = nullptr;
-	const long len = ri.FS_ReadFile(path, (void**)&buf);
-	if (len < 148 || !buf)
-	{
-		if (buf) ri.FS_FreeFile(buf);
-		return nullptr;
-	}
-	const uint32_t* hd = (const uint32_t*)buf;
-	image_t* image = nullptr;
-	if (hd[0] == 0x20534444 && hd[21] == 0x30315844)   // "DDS " + DX10
-	{
-		const uint32_t height = hd[3], width = hd[4], mips = Q_max(1u, hd[7]), dxgi = hd[32];
-		GLenum fmt = 0;
-		int bpb = 16;   // bytes per 4x4 block
-		bool block = true, rg = false;
-		switch (dxgi)
-		{
-		case 98: fmt = GL_COMPRESSED_RGBA_BPTC_UNORM_ARB; break;
-		case 99: fmt = (flags & IMGFLAG_SRGB) ? GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM_ARB : GL_COMPRESSED_RGBA_BPTC_UNORM_ARB; break;
-		case 83: fmt = GL_COMPRESSED_RG_RGTC2; rg = true; break;
-		case 28: case 29: fmt = (dxgi == 29 && (flags & IMGFLAG_SRGB)) ? GL_SRGB8_ALPHA8 : GL_RGBA8; block = false; bpb = 4; break;
-		default: break;
-		}
-		if (fmt)   // BC7 / BC5 need no r_ext_compressed_textures: every GL 4.2+ driver has them
-		{
-			image = R_AllocImage();
-			qglGenTextures(1, &image->texnum);
-			image->type = type;
-			image->flags = flags | IMGFLAG_MIPMAP;
-			Q_strncpyz(image->imgName, name, sizeof(image->imgName));
-			image->width = image->uploadWidth = width;
-			image->height = image->uploadHeight = height;
-			image->internalFormat = fmt;
-			image->TMU = 0;
-			GL_SelectTexture(0);
-			GL_Bind(image);
-			const byte* p = buf + 148;
-			const byte* end = buf + len;
-			uint32_t w = width, h = height, levels = 0;
-			for (uint32_t m = 0; m < mips; m++)
-			{
-				const size_t size = block ? (size_t)((w + 3) / 4) * ((h + 3) / 4) * bpb : (size_t)w * h * 4;
-				if (p + size > end) break;
-				if (block) qglCompressedTexImage2D(GL_TEXTURE_2D, m, fmt, w, h, 0, (GLsizei)size, p);
-				else qglTexImage2D(GL_TEXTURE_2D, m, fmt, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, p);
-				p += size;
-				levels++;
-				w = Q_max(1u, w / 2); h = Q_max(1u, h / 2);
-			}
-			qglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, Q_max(0, (int)levels - 1));
-			qglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, levels > 1 ? gl_filter_min : GL_LINEAR);
-			qglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_filter_max);
-			const GLint wrap = (flags & IMGFLAG_CLAMPTOEDGE) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
-			qglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
-			qglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
-			if (r_ext_texture_filter_anisotropic->value > 1.0f && glConfig.maxTextureFilterAnisotropy > 0.0f)
-				qglTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT,
-					Com_Clamp(1.0f, glConfig.maxTextureFilterAnisotropy, r_ext_texture_filter_anisotropic->value));
-			if (rg)
-			{
-				// two-channel normal map: lightall reads the normal from .ag
-				const GLint sw[4] = { GL_RED, GL_GREEN, GL_ONE, GL_RED };
-				qglTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, sw);
-			}
-			if (glRefConfig.annotateResources) qglObjectLabel(GL_TEXTURE, image->texnum, -1, image->imgName);
-			const long hash = generateHashValue(name);
-			image->next = hashTable[hash];
-			hashTable[hash] = image;
-		}
-	}
-	ri.FS_FreeFile(buf);
-	return image;
-}
-
 image_t* R_FindImageFile(const char* name, imgType_t type, int flags)
 {
 	image_t* image = nullptr;
@@ -3096,10 +3003,6 @@ image_t* R_FindImageFile(const char* name, imgType_t type, int flags)
 	}
 
 	if ((image = R_GetLoadedImage(name, flags)) != NULL)
-		return image;
-
-	// kworld v3 / other precompressed textures
-	if ((image = R_LoadDDSImage(name, type, flags)) != NULL)
 		return image;
 
 	//

@@ -214,7 +214,7 @@ bool World_Load(const char* mapName)
 	if (!CreateWorldPipelines()) { fclose(f); Log("^1KatarnEngine: world shaders failed\n"); return false; }
 	int t0 = ri.Milliseconds();
 	KwHeader h;
-	if (fread(&h, sizeof(h), 1, f) != 1 || memcmp(h.magic, KW_MAGIC, 8) || h.version < 2 || h.version > KW_VERSION) {
+	if (fread(&h, sizeof(h), 1, f) != 1 || memcmp(h.magic, KW_MAGIC, 8) || h.version != KW_VERSION) {
 		Log("^1KatarnEngine: %s is not a version %d .kworld - cook it again with tools\\katarn_cook\n", path.c_str(), KW_VERSION);
 		fclose(f);
 		return false;
@@ -284,39 +284,17 @@ bool World_Load(const char* mapName)
 	if (!ok) { Log("^1KatarnEngine: %s: geometry upload failed\n", path.c_str()); fclose(f); World_Unload(); return false; }
 
 	const KwSection* tdat = find(KW_TDAT);
-	if (tdat && !tdat->size) tdat = nullptr;
-	// v3: textures are DDS files in the game filesystem (TNAM: their paths), so pk3s can carry and override them
-	std::vector<char> tnam;
-	readVec(KW_TNAM, tnam);
 	W.textures.resize(texs.size());
-	uint64_t pending = 0, texBytes = 0, missing = 0;
+	uint64_t pending = 0, texBytes = 0;
 	std::vector<uint8_t> data;
-	for (size_t i = 0; i < texs.size() && (tdat || tnam.size() >= (i + 1) * 64); i++) {
-		KwTexture k = texs[i];
+	for (size_t i = 0; i < texs.size() && tdat; i++) {
+		const KwTexture& k = texs[i];
 		Texture& t = W.textures[i];
-		if (!tdat) {
-			char nm[80]; memcpy(nm, &tnam[i * 64], 64); nm[63] = 0;
-			Q_strcat(nm, sizeof(nm), ".dds");
-			void* buf = nullptr;
-			int len = ri.FS_ReadFile(nm, &buf);
-			if (len < 148 || !buf || memcmp(buf, "DDS ", 4)) { if (buf) ri.FS_FreeFile(buf); missing++; continue; }
-			const uint32_t* hd = (const uint32_t*)buf;
-			const uint32_t* dx = hd + 32;
-			k.height = hd[3]; k.width = hd[4]; k.mips = Q_max(1u, hd[7]);
-			uint32_t df = dx[0];
-			k.srgb = (df == 99 || df == 29) ? 1 : 0;
-			k.format = df == 99 ? 98 : df == 29 ? 28 : df;
-			data.assign((uint8_t*)buf + 148, (uint8_t*)buf + len);
-			k.size = data.size();
-			ri.FS_FreeFile(buf);
-		}
 		DXGI_FORMAT fmt = (DXGI_FORMAT)k.format;
 		if (!CreateTexture(t, k.width, k.height, k.mips, fmt, k.srgb ? TEX_SRGB_VIEW : 0, 1, nullptr, "world texture")) continue;
-		if (tdat) {
-			data.resize(k.size);
-			_fseeki64(f, (long long)(tdat->offset + k.offset), SEEK_SET);
-			fread(data.data(), 1, k.size, f);
-		}
+		data.resize(k.size);
+		_fseeki64(f, (long long)(tdat->offset + k.offset), SEEK_SET);
+		fread(data.data(), 1, k.size, f);
 		bool bc = fmt != DXGI_FORMAT_R8G8B8A8_UNORM;
 		uint32_t bpb = FormatBytes(fmt);
 		size_t off = 0;
@@ -334,7 +312,6 @@ bool World_Load(const char* mapName)
 	}
 	FlushUploads();
 	fclose(f);
-	if (missing) Log("^3KatarnEngine: %llu world textures (.dds) not found\n", (unsigned long long)missing);
 	if (envTex >= 0 && envTex < (int)W.textures.size() && W.textures[envTex].res) W.env.envSrv = W.textures[envTex].srvSrgb;
 
 	std::vector<KwMaterial> gm = W.mats;

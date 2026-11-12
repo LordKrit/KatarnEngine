@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 #define KW_MAGIC "KWORLD02"
-#define KW_VERSION 3   // v3: textures are DDS files (TNAM paths), materials have shader names (MNAM); v2 kept TDAT
+#define KW_VERSION 2
 
 enum KwSectionType : uint32_t {
 	KW_VERT = 0x54524556,   // 'VERT' KwVertex[]
@@ -22,11 +22,6 @@ enum KwSectionType : uint32_t {
 	KW_LITE = 0x4554494C,   // 'LITE' KwLight[]
 	KW_ENVT = 0x54564E45,   // 'ENVT' environment, text: "key value value ..." per line
 	KW_SPLT = 0x544C5053,   // 'SPLT' splat (terrain) materials: KwSplatHeader + KwSplatLayer[] records
-	KW_TNAM = 0x4D414E54,   // 'TNAM' v3: per texture a 64-byte game path (no extension) of its .dds file
-	KW_MNAM = 0x4D414E4D,   // 'MNAM' v3: per material a 64-byte shader name (shaders/kw_<map>.shader)
-	KW_VCOL = 0x4C4F4356,   // 'VCOL' v3: per vertex baked light, RGBA8: rgb = sqrt(light / 4) (1 = the texture as is), a = sky visibility
-	KW_LGRD = 0x4452474C,   // 'LGRD' v3: light grid for entities: KwGridHeader + dims[0]*dims[1]*dims[2] KwGridPoint (x fastest)
-	KW_SKYN = 0x4E594B53,   // 'SKYN' v3: 64-byte name of the BSP sky shader (6 sky box faces next to the textures)
 };
 
 #pragma pack(push, 4)
@@ -126,18 +121,5 @@ struct KwFlowLayer {            // 32 bytes
 	float speed[2];
 	uint32_t op;
 	float pad;
-};
-// light grid: ambient = sky + bounce + nearby lights (no direction), directed = the sun where it is not shadowed,
-// both encoded like VCOL (sqrt(light / 4)); the direction of the directed light is the sun (ENVT sunDir)
-struct KwGridHeader {
-	float origin[3];
-	float step[3];
-	uint32_t dims[3];
-	uint32_t pad;
-};
-struct KwGridPoint {
-	uint8_t ambient[3];
-	uint8_t directed[3];
-	uint8_t pad[2];
 };
 #pragma pack(pop)

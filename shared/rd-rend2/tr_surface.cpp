@@ -2494,10 +2494,10 @@ static void RB_SurfaceVBOMDVMesh(srfVBOMDVMesh_t* surface)
 	}
 
 	//FIXME: Implement GPU vertex interpolation instead!
-	if ((backEnd.currentEntity->e.oldframe != 0 ||
+	if (backEnd.currentEntity->e.oldframe != 0 ||
 		backEnd.currentEntity->e.frame != 0 ||
 		ShaderRequiresCPUDeforms(tess.shader)
-		) && surface->mdvSurface)
+		)
 	{
 		RB_SurfaceMesh(surface->mdvSurface);
 		return;
@@ -2511,7 +2511,7 @@ static void RB_SurfaceVBOMDVMesh(srfVBOMDVMesh_t* surface)
 	mergeForward = -1;
 	mergeBack = -1;
 	firstIndexOffset = BUFFER_OFFSET(surface->indexOffset * sizeof(glIndex_t));
-	lastIndexOffset = BUFFER_OFFSET((surface->indexOffset + surface->numIndexes) * sizeof(glIndex_t));
+	lastIndexOffset = BUFFER_OFFSET(surface->numIndexes * sizeof(glIndex_t));
 
 	if (r_mergeMultidraws->integer)
 	{
