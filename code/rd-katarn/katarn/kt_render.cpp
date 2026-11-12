@@ -737,6 +737,37 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 
 static void ProbesDestroy();
 static uint32_t ProbeList(const float* org);
+// r27: sphere vs the current view frustum (lights / probes off screen cost every pixel nothing but still looped)
+static float s_fr[6][4]; static bool s_frOk = false;
+static void FrustumFromViewProj(const float* m, const float* org, const float* fwd)
+{
+	float M[4][4];
+	float p[4] = { org[0] + fwd[0] * 100, org[1] + fwd[1] * 100, org[2] + fwd[2] * 100, 1 };
+	int best = 0; float bestErr = 1e30f;
+	for (int t = 0; t < 2; t++) {
+		float c[4];
+		for (int r = 0; r < 4; r++) { c[r] = 0; for (int k = 0; k < 4; k++) c[r] += (t ? m[k * 4 + r] : m[r * 4 + k]) * p[k]; }
+		float e = c[3] > 1e-3f ? fabsf(c[0] / c[3]) + fabsf(c[1] / c[3]) : 1e30f;
+		if (e < bestErr) { bestErr = e; best = t; }
+	}
+	for (int r = 0; r < 4; r++) for (int k = 0; k < 4; k++) M[r][k] = best ? m[k * 4 + r] : m[r * 4 + k];
+	const int sg[4][2] = { { 0, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 } };
+	for (int i = 0; i < 4; i++)
+		for (int k = 0; k < 4; k++) s_fr[i][k] = M[3][k] + sg[i][1] * M[sg[i][0]][k];
+	for (int k = 0; k < 4; k++) s_fr[4][k] = M[3][k] - 0.0f * M[2][k];   // in front of the camera (w > 0)
+	for (int i = 0; i < 5; i++) {
+		float l = sqrtf(s_fr[i][0] * s_fr[i][0] + s_fr[i][1] * s_fr[i][1] + s_fr[i][2] * s_fr[i][2]);
+		if (l > 1e-6f) for (int k = 0; k < 4; k++) s_fr[i][k] /= l;
+	}
+	s_frOk = bestErr < 0.5f;
+}
+static bool SphereVisible(const float* c, float r)
+{
+	if (!s_frOk) return true;
+	for (int i = 0; i < 5; i++)
+		if (s_fr[i][0] * c[0] + s_fr[i][1] * c[1] + s_fr[i][2] * c[2] + s_fr[i][3] < -r) return false;
+	return true;
+}
 
 // ------------------------------------------------------------------------------------------------ init
 void InstallCrashHandler();
@@ -1010,6 +1041,8 @@ void R_BeginView(const ViewDesc& v)
 	ViewConstants& c = R.vc;
 	memset(&c, 0, sizeof(c));
 	memcpy(c.viewProj, R.viewProj, 64);
+	FrustumFromViewProj(R.viewProj, v.origin, backEnd.viewParms.ori.axis[0]);
+	if (R.capture) s_frOk = false;
 	MatInverse(R.viewProj, c.invViewProj);
 	memcpy(c.worldToEye, v.worldToEye, 64);
 	memcpy(c.prevViewProj, R.prevViewProj, 64);
@@ -1489,6 +1522,16 @@ static void RenderWorldView()
 			return d - l.radius * 0.5f;
 		};
 		std::stable_sort(lights.begin(), lights.end(), [&](const GpuLight& a, const GpuLight& b) { return key(a) < key(b); });
+	}
+	if (s_frOk) {
+		size_t w = 0;
+		for (size_t i = 0; i < lights.size(); i++) {
+			const GpuLight& l = lights[i];
+			float c[3] = { l.pos[0], l.pos[1], l.pos[2] }, r = l.radius;
+			if (l.type == 2.0f) { for (int q = 0; q < 3; q++) c[q] += l.dir[q] * 0.5f; r += 0.5f * sqrtf(l.dir[0] * l.dir[0] + l.dir[1] * l.dir[1] + l.dir[2] * l.dir[2]); }
+			if (SphereVisible(c, r)) lights[w++] = l;
+		}
+		lights.resize(w);
 	}
 	uint32_t nl = (uint32_t)lights.size();
 	if (!nl) { GpuLight dummy = {}; lights.push_back(dummy); }
@@ -2147,6 +2190,7 @@ static uint32_t ProbeList(const float* org)
 		for (uint32_t i = 0; i < R.probes.size(); i++) {
 			const RState::Probe& p = R.probes[i];
 			if (!p.valid) continue;
+			if (!SphereVisible(p.origin, p.radius)) continue;   // r27: off-screen probes reflect into nothing on screen
 			(void)vis;   // r26: every probe, always - picking them by what the camera can see switched reflections on as you walked
 			pick.push_back(i);
 		}
