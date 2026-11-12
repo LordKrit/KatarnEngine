@@ -215,6 +215,7 @@ static std::vector<KwGridPoint> kwGridPts;
 static vec3_t kwSunDir = { 0.35f, 0.25f, 0.9f };
 static cvar_t* r_kwLodPixels;
 static cvar_t* r_kwLight;
+static cvar_t* r_kwMinLod;
 
 struct kwFile_t
 {
@@ -351,7 +352,8 @@ static void R_KWLoad(const char* base)
 	std::vector<uint32_t> ki;
 	std::vector<packedKw_t> pv;
 	std::vector<glIndex_t> out;
-	std::vector<uint32_t> tri;
+	std::vector<uint32_t> tri, used;
+	std::vector<int> remap;
 	size_t totalTris = 0, totalVerts = 0;
 	kwClusters.reserve(clus.size());
 	std::vector<packedKw_t> batchV;
@@ -402,11 +404,25 @@ static void R_KWLoad(const char* base)
 		ki.resize(i1 - i0);
 		if (!kf.read(si->offset + (uint64_t)i0 * 4, ki.data(), ki.size() * 4)) continue;
 
-		pv.resize(c.numVertices);
-		for (uint32_t v = 0; v < c.numVertices; v++)
+		// r_kwMinLod: skip the most detailed LODs and keep only the vertices the rest use (GPU memory)
+		const int lodStart = Q_min(Q_max(0, r_kwMinLod->integer), (int)c.numLods - 1);
+		remap.assign(c.numVertices, -1);
+		used.clear();
+		for (uint32_t l = lodStart; l < c.numLods && l < (uint32_t)(lodStart + KW_MAX_LODS); l++)
 		{
+			const KwLod& L = lods[c.firstLod + l];
+			for (uint32_t i = 0; i < L.indexCount; i++)
+			{
+				const uint32_t v = ki[L.firstIndex - i0 + i];
+				if (v < c.numVertices && remap[v] < 0) { remap[v] = (int)used.size(); used.push_back(v); }
+			}
+		}
+		pv.resize(used.size());
+		for (uint32_t u = 0; u < used.size(); u++)
+		{
+			const uint32_t v = used[u];
 			const KwVertex& s = kv[v];
-			packedKw_t& o = pv[v];
+			packedKw_t& o = pv[u];
 			VectorCopy(s.pos, o.pos);
 			vec3_t n, t;
 			OctDecode(s.normal, n);
@@ -433,15 +449,15 @@ static void R_KWLoad(const char* base)
 		VectorCopy(c.boundsMax, kc.maxs);
 		kc.cls = c.cls;
 		kc.flags = c.flags;
-		kc.numLods = std::min<int>(c.numLods, KW_MAX_LODS);
+		kc.numLods = std::min<int>(c.numLods - lodStart, KW_MAX_LODS);
 		out.clear();
 		struct run_t { uint32_t mat, first, count; };
 		std::vector<run_t> runs;
 		std::vector<int> lodRunStart;
 		for (int l = 0; l < kc.numLods; l++)
 		{
-			const KwLod& L = lods[c.firstLod + l];
-			kc.lodError[l] = L.error;
+			const KwLod& L = lods[c.firstLod + lodStart + l];
+			kc.lodError[l] = l == 0 ? 0.0f : L.error;
 			lodRunStart.push_back((int)runs.size());
 			const uint32_t* idx = ki.data() + (L.firstIndex - i0);
 			const uint32_t nt = L.indexCount / 3;
@@ -453,7 +469,7 @@ static void R_KWLoad(const char* base)
 				const uint32_t m = kv[idx[tri[t] * 3]].material;
 				if (runs.size() == (size_t)lodRunStart.back() || runs.back().mat != m)
 					runs.push_back({ m, (uint32_t)out.size(), 0 });
-				for (int k = 0; k < 3; k++) out.push_back(idx[tri[t] * 3 + k]);
+				for (int k = 0; k < 3; k++) out.push_back((glIndex_t)remap[idx[tri[t] * 3 + k]]);
 				runs.back().count += 3;
 			}
 			if (l == 0) totalTris += nt;
@@ -475,19 +491,19 @@ static void R_KWLoad(const char* base)
 			d.surf.surfaceType = SF_VBO_MDVMESH;
 			d.surf.indexOffset = ibase + r.first;
 			d.surf.numIndexes = r.count;
-			d.surf.numVerts = c.numVertices;
+			d.surf.numVerts = (int)pv.size();
 			d.surf.minIndex = vbase;
-			d.surf.maxIndex = vbase + c.numVertices - 1;
+			d.surf.maxIndex = vbase + (glIndex_t)pv.size() - 1;
 			pendingDraws.push_back(kwDraws.size());
 			d.shader = shaderFor(r.mat);
 			kwDraws.push_back(d);
 		}
 		kwClusters.push_back(kc);
-		totalVerts += c.numVertices;
+		totalVerts += pv.size();
 	}
 	flushBatch();
 	kf.close();
-	ri.Printf(PRINT_ALL, "kworld: %s.kworld: %d clusters, %d draws, %d triangles at full detail, %d vertices, %s, light grid %s\n", base,
+	ri.Printf(PRINT_ALL, "kworld: %s.kworld (LOD %d+): %d clusters, %d draws, %d triangles at full detail, %d vertices, %s, light grid %s\n", base, r_kwMinLod->integer,
 		(int)kwClusters.size(), (int)kwDraws.size(), (int)totalTris, (int)totalVerts, haveLight ? "baked light" : "no baked light (cook without --bake 0)",
 		kwGridPts.empty() ? "none" : va("%ux%ux%u", kwGrid.dims[0], kwGrid.dims[1], kwGrid.dims[2]));
 }
@@ -595,6 +611,7 @@ void R_HDWorldLoad(const char* bspName)
 		r_hdSun = ri.Cvar_Get("r_hdSun", "1.0 0.95 0.85", CVAR_ARCHIVE);
 		r_kwLodPixels = ri.Cvar_Get("r_kwLodPixels", "1.5", CVAR_ARCHIVE);
 		r_kwLight = ri.Cvar_Get("r_kwLight", "1", CVAR_ARCHIVE | CVAR_LATCH);
+		r_kwMinLod = ri.Cvar_Get("r_kwMinLod", "1", CVAR_ARCHIVE | CVAR_LATCH);
 	}
 	hdChunks.clear();
 	R_KWShutdown();   // VBOs/IBOs are freed with the rest of the renderer's buffers
