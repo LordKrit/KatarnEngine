@@ -292,6 +292,7 @@ float4 TonemapPS(FsOut i) : SV_Target0
 		c = max(0, (c + (n + s + e + w) * wgt) / (1 + 4 * wgt));
 	}
 	if (atmos3.y > 0.5) c = Atmosphere(c, i.uv, int2(i.pos.xy));
+	float3 cScene = c;
 	c *= Exposure();
 	if (bloomSrv) c += Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y;
 	if (grade3.w > 0.5) c = GradePre(c);
@@ -313,7 +314,20 @@ float4 TonemapPS(FsOut i) : SV_Target0
 		float2 v = i.uv - 0.5;
 		if (grade3.w <= 0.5) c *= 1 - dot(v, v) * 0.2;
 	}
-	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
+	else {
+		// legacy BSP maps: rend2's tone map exactly (r_hdr 1, r_toneMap 1, r_autoExposure 1, MD defaults). rend2 lights
+		// these maps in gamma space, so the scene goes to gamma first; then x 2^(r_cameraExposure 0.1 + overbright
+		// bits), auto exposure that only darkens (average luminance clamped to 2^-1..2^3 against the 2^-1 target),
+		// minus the 2^-8 floor, Hable's filmic curve normalised to the white level
+		float avgLin = 0.18 * exp2(postParams.x) / max(Exposure(), 1e-6);
+		float avgG = pow(max(avgLin, 1e-6), 1.0 / 2.2);
+		float ae = 0.5 / clamp(avgG, 0.5, 8.0);
+		float3 g = pow(max(cScene, 0), 1.0 / 2.2) * (1.0718 * max(extraParams.x, 1.0)) * ae;
+		if (bloomSrv) g += pow(max(Tex2D[bloomSrv].SampleLevel(sClamp, i.uv, 0).rgb * postParams.y, 0), 1.0 / 2.2) * 0.5;
+		const float lo = 1.0 / 256.0;
+		g = max(0, g - lo);
+		c = SrgbToLinear(saturate(Rend2Filmic(g) / Rend2Filmic(1.0 - lo)));   // back to linear: LinearToSrgb below
+	}
 	if (grade3.w > 0.5) c = GradePost(c, i.uv);
 	c = LinearToSrgb(c);
 	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -

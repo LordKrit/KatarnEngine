@@ -242,6 +242,11 @@ static void RegisterCvars()
 		ri.Cvar_Set("kt_saberDraw2", "0");   // back to MD's saber textures and trails
 		ri.Cvar_Set("kt_configVersion", "5");
 	}
+	if (ver->integer < 6) {
+		// rend2 look on old maps: no extra haze in the air, no sharpening (rend2 has neither)
+		ri.Cvar_Set("kt_vfogAmbient", "0"); ri.Cvar_Set("kt_sharpen", "0");
+		ri.Cvar_Set("kt_configVersion", "6");
+	}
 }
 
 // ------------------------------------------------------------------------------------------------ math
