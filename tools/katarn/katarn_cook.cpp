@@ -28,6 +28,11 @@
 #define RGBCX_IMPLEMENTATION
 #include "../../../ext/bc7enc/rgbcx.h"
 #include "../../../ext/meshoptimizer/src/meshoptimizer.h"
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -349,7 +354,7 @@ static std::pair<int, int> SourceDims(const std::string& file)
 
 // ================================================================================================ texture encoding
 enum TexKind { TK_COLOR, TK_NORMAL, TK_DATA };
-struct TexOut { KwTexture k; std::vector<uint8_t> data; uint64_t spillAt = 0, bytes = 0; };
+struct TexOut { KwTexture k; std::vector<uint8_t> data; uint64_t spillAt = 0, bytes = 0; std::string name; };
 static std::vector<TexOut> textures;
 static std::mutex texMutex;
 static std::map<uint64_t, int> texByHash;
@@ -1688,6 +1693,139 @@ static int CollisionOnly(const Json& scene, const std::string& outDir, const std
 	_exit(0);   // (the watchdog thread is still running)
 }
 
+
+// ================================================================================================ kworld v3 export
+std::vector<std::string> g_v3TexNames, g_v3MatNames;
+static bool FORMAT_V3 = true;
+static void MakeDirs(const std::string& p)
+{
+	std::string cur;
+	for (size_t i = 0; i <= p.size(); i++) {
+		if (i == p.size() || p[i] == '/' || p[i] == '\\') {
+			if (!cur.empty() && cur != "." && cur != ".." && !(cur.size() == 2 && cur[1] == ':')) {
+#ifdef _WIN32
+				_mkdir(cur.c_str());
+#else
+				mkdir(cur.c_str(), 0755);
+#endif
+			}
+		}
+		if (i < p.size()) cur += p[i];
+	}
+}
+// Textures leave the .kworld: each one is a DDS file (BC7 / BC5 with its mips) at textures/kw_<map>/<name>.dds, found
+// through the game filesystem (pk3s, overrides, shared between maps). Materials become a normal .shader file
+// (shaders/kw_<map>.shader) with rend2's stage keywords, so any renderer that parses shaders can draw the world.
+static std::string SafeName(std::string n)
+{
+	for (char& c : n) { c = (char)tolower((unsigned char)c); if (!isalnum((unsigned char)c) && c != '_') c = '_'; }
+	while (n.find("__") != std::string::npos) n.replace(n.find("__"), 2, "_");
+	if (n.size() > 30) { uint32_t h = 2166136261u; for (char c : n) { h ^= (uint8_t)c; h *= 16777619u; } char b[16]; snprintf(b, sizeof(b), "_%06x", h & 0xffffff); n = n.substr(0, 23) + b; }
+	return n.empty() ? std::string("m") : n;
+}
+static void WriteDDS(const std::string& path, const TexOut& t)
+{
+	FILE* f = fopen(path.c_str(), "wb");
+	if (!f) { printf("  ! cannot write %s\n", path.c_str()); return; }
+	uint32_t hdr[32] = {};
+	hdr[0] = 0x20534444;                         // "DDS "
+	hdr[1] = 124;
+	hdr[2] = 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000;
+	hdr[3] = t.k.height; hdr[4] = t.k.width;
+	hdr[5] = (uint32_t)(((t.k.width + 3) / 4) * ((t.k.height + 3) / 4) * 16);
+	hdr[7] = t.k.mips;
+	hdr[19] = 32; hdr[20] = 0x4; hdr[21] = 0x30315844;   // pixel format: FOURCC "DX10"
+	hdr[27] = 0x1000 | 0x400000 | 0x8;
+	uint32_t fmt = t.k.format == 98 && t.k.srgb ? 99u : t.k.format;
+	uint32_t dx10[5] = { fmt, 3, 0, 1, 0 };
+	fwrite(hdr, 4, 32, f); fwrite(dx10, 4, 5, f);
+	SpillCopy(t.spillAt, t.bytes, f);
+	fclose(f);
+}
+static void ExportV3(const std::string& outDir, const std::string& mapName, const std::vector<uint8_t>& splat)
+{
+	std::string root = outDir + "/..";                // home\MD (maps live in home\MD\maps)
+	std::string texDir = "textures/kw_" + mapName;
+	MakeDirs(root + "/" + texDir); MakeDirs(root + "/shaders");
+	std::vector<std::string> mname(kmats.size());
+	std::map<std::string, int> used;
+	for (size_t i = 0; i < kmats.size() && i < mats.size(); i++) {
+		std::string n = SafeName(mats[i].name.substr(0, mats[i].name.find('|')));
+		if (used[n]++) n += "_" + std::to_string(used[n] - 1);
+		mname[i] = n;
+		const KwMaterial& k = kmats[i];
+		auto nameTex = [&](int ti, const char* suf) { if (ti >= 0 && ti < (int)textures.size() && textures[ti].name.empty()) textures[ti].name = n + suf; };
+		if (!(k.flags & (KWM_SPLAT | KWM_FLOW))) { nameTex(k.albedoTex, "_d"); nameTex(k.normalTex, "_n"); nameTex(k.ormTex, "_orm"); nameTex(k.emissiveTex, "_e"); }
+	}
+	// flat-colour materials: a 4x4 texture of the colour (rend2 multiplies the texture by the baked vertex light)
+	std::vector<int> flatTex(kmats.size(), -1);
+	for (size_t i = 0; i < kmats.size(); i++) {
+		const KwMaterial& k = kmats[i];
+		if (k.albedoTex >= 0 || (k.flags & (KWM_SPLAT | KWM_FLOW))) continue;
+		BakeImage b; b.w = b.h = 4; b.px.resize(64);
+		for (int p = 0; p < 16; p++) for (int c = 0; c < 4; c++) b.px[p * 4 + c] = c < 3 ? std::min(1.0f, k.baseColor[c]) : k.baseColor[3];
+		flatTex[i] = AddTexture(b, TK_COLOR, false);
+		if (textures[flatTex[i]].name.empty()) textures[flatTex[i]].name = mname[i] + "_c";
+	}
+	for (size_t t = 0; t < textures.size(); t++) {
+		if (textures[t].name.empty()) { char b[32]; snprintf(b, sizeof(b), "t%04zu", t); textures[t].name = b; }
+		WriteDDS(root + "/" + texDir + "/" + textures[t].name + ".dds", textures[t]);
+	}
+	auto tp = [&](int ti) { return texDir + "/" + textures[ti].name; };
+	std::string sh = "// " + mapName + " - KatarnEngine HD world materials (kworld v3). rend2 stage keywords; edit freely.\n\n";
+	for (size_t i = 0; i < kmats.size(); i++) {
+		const KwMaterial& k = kmats[i];
+		std::string name = texDir + "/" + mname[i];
+		char buf[256];
+		sh += name + "\n{\n";
+		if (k.flags & KWM_TWOSIDED) sh += "\tcull none\n";
+		if (k.flags & (KWM_WATER | KWM_FLOW)) sh += "\tsurfaceparm water\n\tsurfaceparm trans\n";
+		if (k.flags & KWM_FOLIAGE) sh += "\tsurfaceparm trans\n\tdeformVertexes wave 194 sin 0 0.6 0 0.25\n";
+		sh += "\tsurfaceparm nolightmap\n";
+		int base = (k.albedoTex >= 0 && !(k.flags & (KWM_SPLAT | KWM_FLOW))) ? k.albedoTex : flatTex[i];
+		const KwSplatHeader* sp = nullptr;
+		if ((k.flags & KWM_SPLAT) && k.albedoTex >= 0 && (size_t)k.albedoTex + sizeof(KwSplatHeader) + sizeof(KwSplatLayer) <= splat.size())
+			sp = (const KwSplatHeader*)&splat[k.albedoTex];
+		if (sp && sp->kind == 0 && sp->numLayers > 0) {
+			// splat terrain: its base layer, tiled from the world position (tcGen vector), as KatarnEngine does
+			const KwSplatLayer* L0 = (const KwSplatLayer*)(sp + 1);
+			float sc = L0->scale * sp->invUnits;
+			sh += "\tqer_editorimage " + tp(L0->albedoTex) + "\n\t{\n\t\tmap " + tp(L0->albedoTex) + "\n";
+			snprintf(buf, sizeof(buf), "\t\ttcGen vector ( %g 0 0 ) ( 0 %g 0 )\n", sc, -sc); sh += buf;
+			if (L0->nohTex >= 0) sh += "\t\tnormalMap " + tp(L0->nohTex) + "\n";
+		}
+		else if (base >= 0) {
+			sh += "\tqer_editorimage " + tp(base) + "\n\t{\n\t\tmap " + tp(base) + "\n";
+			if (k.flags & KWM_BLEND) sh += "\t\tblendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\n";
+			else if (k.flags & KWM_MASK) sh += "\t\talphaFunc GE128\n\t\tdepthWrite\n";
+		}
+		else {
+			// water / flowing water: a tinted see-through sheet in rend2 (KatarnEngine evaluates the full material)
+			sh += "\t{\n\t\tmap $whiteimage\n";
+			if (k.flags & (KWM_WATER | KWM_FLOW | KWM_BLEND)) { snprintf(buf, sizeof(buf), "\t\talphaGen const %.2f\n\t\tblendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\n", (k.flags & KWM_FLOW) ? 0.5f : 0.7f); sh += buf; }
+		}
+		if (!(k.flags & (KWM_SPLAT | KWM_FLOW | KWM_WATER)) && !sp) {
+			if (k.normalTex >= 0) sh += "\t\tnormalMap " + tp(k.normalTex) + "\n";
+			if (k.ormTex >= 0) sh += "\t\tormMap " + tp(k.ormTex) + "\n";
+			else { snprintf(buf, sizeof(buf), "\t\tspecularScale %.3f %.3f\n", k.metallic, 1.0f - k.roughness); sh += buf; }
+		}
+		sh += "\t\trgbGen vertex\n\t}\n";   // vertex colour = baked light (kworld v3 vertices)
+		if (k.emissiveTex >= 0 || k.emissive[0] + k.emissive[1] + k.emissive[2] > 0.01f) {
+			sh += "\t{\n\t\tmap " + (k.emissiveTex >= 0 ? tp(k.emissiveTex) : std::string("$whiteimage")) + "\n\t\tblendFunc GL_ONE GL_ONE\n\t\tglow\n";
+			snprintf(buf, sizeof(buf), "\t\trgbGen const ( %.3f %.3f %.3f )\n", std::min(1.0f, k.emissive[0]), std::min(1.0f, k.emissive[1]), std::min(1.0f, k.emissive[2])); sh += buf;
+			sh += "\t}\n";
+		}
+		sh += "}\n\n";
+	}
+	FILE* f = fopen((root + "/shaders/kw_" + mapName + ".shader").c_str(), "wb");
+	if (f) { fwrite(sh.data(), 1, sh.size(), f); fclose(f); }
+	printf("  v3: %zu textures as DDS in %s, %zu materials in shaders/kw_%s.shader\n", textures.size(), texDir.c_str(), kmats.size(), mapName.c_str());
+	// names for the kworld (TNAM / MNAM)
+	g_v3TexNames.clear(); g_v3MatNames.clear();
+	for (auto& t : textures) g_v3TexNames.push_back(texDir + "/" + t.name);
+	for (size_t i = 0; i < kmats.size(); i++) g_v3MatNames.push_back(texDir + "/" + mname[i]);
+}
+
 int main(int argc, char** argv)
 {
 	if (argc < 4) {
@@ -1725,6 +1863,7 @@ int main(int argc, char** argv)
 				s = e + 1;
 			}
 		}
+		else if (a == "--format") FORMAT_V3 = atoi(v.c_str()) >= 3;
 		else if (a == "--skiplight") { SKIPLIGHT.clear(); size_t s = 0; while (s <= v.size()) { size_t e = v.find(',', s); if (e == std::string::npos) e = v.size(); SKIPLIGHT.push_back(v.substr(s, e - s)); s = e + 1; } }
 		else if (a == "--skip") { SKIP.clear(); size_t s = 0; while (s <= v.size()) { size_t e = v.find(',', s); if (e == std::string::npos) e = v.size(); SKIP.push_back(v.substr(s, e - s)); s = e + 1; } }
 	}
@@ -2110,6 +2249,13 @@ int main(int argc, char** argv)
 		clusters.push_back(c);
 		cbucket.push_back(b);
 	}
+	std::vector<char> tnam, mnam;
+	if (FORMAT_V3) {
+		ExportV3(outDir, mapName, splatBlob);
+		tnam.resize(g_v3TexNames.size() * 64); mnam.resize(g_v3MatNames.size() * 64);
+		for (size_t i = 0; i < g_v3TexNames.size(); i++) strncpy(&tnam[i * 64], g_v3TexNames[i].c_str(), 63);
+		for (size_t i = 0; i < g_v3MatNames.size(); i++) strncpy(&mnam[i * 64], g_v3MatNames[i].c_str(), 63);
+	}
 	std::vector<KwTexture> ktex;
 	uint64_t tdatSize = 0;
 	for (auto& t : textures) { KwTexture k = t.k; k.offset = tdatSize; k.size = t.bytes; tdatSize += (k.size + 255) & ~255ull; ktex.push_back(k); }
@@ -2121,11 +2267,12 @@ int main(int argc, char** argv)
 		{ KW_VERT, nullptr, vCount * sizeof(KwVertex) }, { KW_INDX, nullptr, iCount * 4 },
 		{ KW_CLUS, clusters.data(), clusters.size() * sizeof(KwCluster) }, { KW_LODS, lods.data(), lods.size() * sizeof(KwLod) },
 		{ KW_MATL, kmats.data(), kmats.size() * sizeof(KwMaterial) }, { KW_TEXT, ktex.data(), ktex.size() * sizeof(KwTexture) },
-		{ KW_LITE, lights.data(), lights.size() * sizeof(KwLight) }, { KW_ENVT, envText.data(), envText.size() }, { KW_SPLT, splatBlob.data(), splatBlob.size() }, { KW_TDAT, nullptr, tdatSize },
+		{ KW_LITE, lights.data(), lights.size() * sizeof(KwLight) }, { KW_ENVT, envText.data(), envText.size() }, { KW_SPLT, splatBlob.data(), splatBlob.size() }, { KW_TDAT, nullptr, FORMAT_V3 ? 0 : tdatSize },
+		{ KW_TNAM, tnam.data(), tnam.size() }, { KW_MNAM, mnam.data(), mnam.size() },
 	};
 	KwHeader h = {};
 	memcpy(h.magic, KW_MAGIC, 8);
-	h.version = KW_VERSION;
+	h.version = FORMAT_V3 ? 3 : 2;
 	h.numSections = (uint32_t)secs.size();
 	memcpy(h.boundsMin, wmin, 12); memcpy(h.boundsMax, wmax, 12);
 	std::vector<KwSection> table(secs.size());
@@ -2149,7 +2296,7 @@ int main(int argc, char** argv)
 			}
 			pos += secs[i].size;
 		}
-		else if (secs[i].type == KW_TDAT) {
+		else if (secs[i].type == KW_TDAT && !FORMAT_V3) {
 			for (auto& t : textures) {
 				SpillCopy(t.spillAt, t.bytes, f);
 				pos += t.bytes;
