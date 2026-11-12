@@ -1385,6 +1385,7 @@ static void Xform(const float* m, const float* p, float* o)   // 3-row matrix
 // LOD whose error grows with the distance from the core, coarsened until the whole set fits the budget.
 // vAt[ci]: file offset of the cluster's vertices; iBase[ci] + firstIndex * 4: file offset of a LOD's indices
 // (both in g_spill, which is the spill file during a cook and the .kworld itself with --collision-only).
+static std::string g_skyName = "katarn/sky";
 static void WriteCollision(const std::vector<KwCluster>& clusters, const std::vector<KwLod>& lods, const std::vector<uint64_t>& vAt,
 	const std::vector<uint64_t>& iBase, const float* cmin, const float* cmax, const Json& scene, const std::string& outDir, const std::string& mapName)
 {
@@ -1529,7 +1530,7 @@ static void WriteCollision(const std::vector<KwCluster>& clusters, const std::ve
 		fprintf(mf, "( %g %g %g ) ( %g %g %g ) ( %g %g %g ) %s 0 0 0 0.5 0.5 0 0 0\n", x0, y1, z0, x1, y1, z0, x1, y1, z1, sh);
 		fprintf(mf, "}\n");
 	};
-	const char* sky = "katarn/sky";
+	const char* sky = g_skyName.c_str();
 	box(lo[0] - T, lo[1] - T, lo[2] - T, hi[0] + T, hi[1] + T, lo[2], sky);
 	box(lo[0] - T, lo[1] - T, hi[2], hi[0] + T, hi[1] + T, hi[2] + T, sky);
 	box(lo[0] - T, lo[1] - T, lo[2], lo[0], hi[1] + T, hi[2], sky);
@@ -1713,6 +1714,9 @@ static void MakeDirs(const std::string& p)
 		if (i < p.size()) cur += p[i];
 	}
 }
+#include "bake_light.h"
+static float g_sunDirG[3] = { 0.35f, 0.25f, 0.9f }, g_sunColG[3] = { 1, 1, 1 };
+
 // Textures leave the .kworld: each one is a DDS file (BC7 / BC5 with its mips) at textures/kw_<map>/<name>.dds, found
 // through the game filesystem (pk3s, overrides, shared between maps). Materials become a normal .shader file
 // (shaders/kw_<map>.shader) with rend2's stage keywords, so any renderer that parses shaders can draw the world.
@@ -1741,6 +1745,15 @@ static void WriteDDS(const std::string& path, const TexOut& t)
 	fwrite(hdr, 4, 32, f); fwrite(dx10, 4, 5, f);
 	SpillCopy(t.spillAt, t.bytes, f);
 	fclose(f);
+}
+static std::string SunLine()
+{
+	// rend2 / q3map2 sun: colour, intensity, yaw and elevation in degrees (where the light comes from)
+	float l = sqrtf(g_sunDirG[0] * g_sunDirG[0] + g_sunDirG[1] * g_sunDirG[1] + g_sunDirG[2] * g_sunDirG[2]);
+	float yaw = atan2f(g_sunDirG[1], g_sunDirG[0]) * 57.29578f, el = asinf(std::max(-1.0f, std::min(1.0f, g_sunDirG[2] / std::max(1e-6f, l)))) * 57.29578f;
+	char b[160];
+	snprintf(b, sizeof(b), "\tq3map_sun %.3f %.3f %.3f 100 %.1f %.1f\n", g_sunColG[0], g_sunColG[1], g_sunColG[2], yaw, el);
+	return b;
 }
 static void ExportV3(const std::string& outDir, const std::string& mapName, const std::vector<uint8_t>& splat)
 {
@@ -1817,6 +1830,11 @@ static void ExportV3(const std::string& outDir, const std::string& mapName, cons
 		}
 		sh += "}\n\n";
 	}
+	if (!g_envImg.px.empty()) {
+		WriteSkyBox(root + "/" + texDir, "env");
+		sh += texDir + "/sky\n{\n\tqer_editorimage " + texDir + "/env_ft\n\tsurfaceparm sky\n\tsurfaceparm noimpact\n\tsurfaceparm nolightmap\n\tsurfaceparm nomarks\n\tnopicmip\n\tnomipmaps\n\tskyparms " + texDir + "/env - -\n" + SunLine() + "}\n\n";
+	}
+	else sh += texDir + "/sky\n{\n\tsurfaceparm sky\n\tsurfaceparm noimpact\n\tsurfaceparm nolightmap\n\tsurfaceparm nomarks\n\tskyparms - - -\n}\n\n";
 	FILE* f = fopen((root + "/shaders/kw_" + mapName + ".shader").c_str(), "wb");
 	if (f) { fwrite(sh.data(), 1, sh.size(), f); fclose(f); }
 	printf("  v3: %zu textures as DDS in %s, %zu materials in shaders/kw_%s.shader\n", textures.size(), texDir.c_str(), kmats.size(), mapName.c_str());
@@ -1864,9 +1882,12 @@ int main(int argc, char** argv)
 			}
 		}
 		else if (a == "--format") FORMAT_V3 = atoi(v.c_str()) >= 3;
+		else if (a == "--bake") BAKE_OFF = atoi(v.c_str()) == 0;
+		else if (a == "--bake-rays") BAKE_SKY_RAYS = std::max(0, atoi(v.c_str()));
 		else if (a == "--skiplight") { SKIPLIGHT.clear(); size_t s = 0; while (s <= v.size()) { size_t e = v.find(',', s); if (e == std::string::npos) e = v.size(); SKIPLIGHT.push_back(v.substr(s, e - s)); s = e + 1; } }
 		else if (a == "--skip") { SKIP.clear(); size_t s = 0; while (s <= v.size()) { size_t e = v.find(',', s); if (e == std::string::npos) e = v.size(); SKIP.push_back(v.substr(s, e - s)); s = e + 1; } }
 	}
+	if (FORMAT_V3) g_skyName = "kw_" + mapName + "/sky";
 	g_cookLog = fopen((outDir + "/" + mapName + "_cook_log.txt").c_str(), "w");
 	std::string js;
 	{
@@ -2206,6 +2227,7 @@ int main(int argc, char** argv)
 			}
 			float sh[9][3];
 			ProjectSH(e, sl, sh);
+			memcpy(g_sh, sh, sizeof(g_sh)); g_haveSH = true; g_envImg = e; g_envStrength = sc;
 			int ti = AddTexture(e, TK_COLOR, true);
 			char buf[512];
 			snprintf(buf, sizeof(buf), "envTex %d\nenvStrength %f\nenvLight %f\n", ti, sc, sl);
@@ -2222,6 +2244,7 @@ int main(int argc, char** argv)
 		sunDir[0], sunDir[1], sunDir[2], sunColor[0], sunColor[1], sunColor[2], std::max(0.5f, sunStrength), std::max(0.0047f, sunAngle),
 		1.0f / (UNITS * 2500.0f), 1.0f / (UNITS * 120.0f), cmin[2], UNITS * 20.0f);
 	std::string envText = std::string(env) + envLines;
+	memcpy(g_sunDirG, sunDir, 12); memcpy(g_sunColG, sunColor, 12);
 	{
 		char cb[160];
 		snprintf(cb, sizeof(cb), "coreMin %f %f %f\ncoreMax %f %f %f\n", cmin[0], cmin[1], cmin[2], cmax[0], cmax[1], cmax[2]);
@@ -2256,6 +2279,18 @@ int main(int argc, char** argv)
 		for (size_t i = 0; i < g_v3TexNames.size(); i++) strncpy(&tnam[i * 64], g_v3TexNames[i].c_str(), 63);
 		for (size_t i = 0; i < g_v3MatNames.size(); i++) strncpy(&mnam[i * 64], g_v3MatNames[i].c_str(), 63);
 	}
+	BakeOut bake;
+	std::vector<uint8_t> lgrd;
+	char skyn[64] = {};
+	if (FORMAT_V3) {
+		snprintf(skyn, sizeof(skyn), "textures/%s", g_skyName.c_str());
+		if (!BAKE_OFF) {
+			BakeLighting(clusters, lods, cbucket, lights, sunDir, sunColor, std::max(0.5f, sunStrength), cmin, cmax, vCount, bake);
+			lgrd.resize(sizeof(KwGridHeader) + bake.points.size() * sizeof(KwGridPoint));
+			memcpy(lgrd.data(), &bake.grid, sizeof(KwGridHeader));
+			if (!bake.points.empty()) memcpy(lgrd.data() + sizeof(KwGridHeader), bake.points.data(), bake.points.size() * sizeof(KwGridPoint));
+		}
+	}
 	std::vector<KwTexture> ktex;
 	uint64_t tdatSize = 0;
 	for (auto& t : textures) { KwTexture k = t.k; k.offset = tdatSize; k.size = t.bytes; tdatSize += (k.size + 255) & ~255ull; ktex.push_back(k); }
@@ -2269,6 +2304,7 @@ int main(int argc, char** argv)
 		{ KW_MATL, kmats.data(), kmats.size() * sizeof(KwMaterial) }, { KW_TEXT, ktex.data(), ktex.size() * sizeof(KwTexture) },
 		{ KW_LITE, lights.data(), lights.size() * sizeof(KwLight) }, { KW_ENVT, envText.data(), envText.size() }, { KW_SPLT, splatBlob.data(), splatBlob.size() }, { KW_TDAT, nullptr, FORMAT_V3 ? 0 : tdatSize },
 		{ KW_TNAM, tnam.data(), tnam.size() }, { KW_MNAM, mnam.data(), mnam.size() },
+		{ KW_VCOL, bake.vcol.data(), bake.vcol.size() * 4 }, { KW_LGRD, lgrd.data(), lgrd.size() }, { KW_SKYN, skyn, FORMAT_V3 ? sizeof(skyn) : 0 },
 	};
 	KwHeader h = {};
 	memcpy(h.magic, KW_MAGIC, 8);
