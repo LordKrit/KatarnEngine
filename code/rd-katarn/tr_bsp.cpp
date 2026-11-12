@@ -1594,7 +1594,7 @@ void RE_LoadWorldMap_Actual(const char* name, world_t& worldData, const int inde
 			std::vector<float> out;
 			for (auto& kv : cells) {
 				Acc& A = kv.second;
-				if (A.area < 16.0) continue;
+				if (A.area < 600.0) continue;   // r23: small lamps and indicator dots don't light the floor (they made spotty pools)
 				image_t* im = glowImage(A.sh);
 				auto it = avg.find(im);
 				if (it == avg.end()) {
@@ -1623,7 +1623,7 @@ void RE_LoadWorldMap_Actual(const char* name, world_t& worldData, const int inde
 				// seen from the front, so the cross product above points to the back)
 				if (nl > 1e-3) { px -= (float)(A.n[0] / nl) * 12; py -= (float)(A.n[1] / nl) * 12; pz -= (float)(A.n[2] / nl) * 12; }
 				float strength = Q_min(1.0f, 0.25f + c[3] * 2.0f) * Q_min(1.5f, (float)sqrt(A.area) / 48.0f);
-				float radius = Q_max(96.0f, Q_min(420.0f, (float)sqrt(A.area) * 3.0f));
+				float radius = Q_max(180.0f, Q_min(420.0f, (float)sqrt(A.area) * 3.0f));   // wide and soft
 				out.insert(out.end(), { px, py, pz, c[0] * strength, c[1] * strength, c[2] * strength, radius });
 			}
 			kt::GlowLights_Set(out.data(), (int)(out.size() / 7));

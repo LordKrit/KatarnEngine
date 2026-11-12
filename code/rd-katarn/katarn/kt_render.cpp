@@ -1797,8 +1797,8 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 	const float hum = 1.0f + 0.04f * sinf(t * 47.0f + start[0] * 0.05f) + 0.03f * sinf(t * 113.0f);
 	for (int q = 0; q < 3; q++) l.color[q] = (powf(c[q] / mx, 2.2f) * 0.85f + 0.15f) * hum;
 	l.type = 2;
-	l.invSquare = 1800.0f;               // r19: harder on the wielder / opponent (x4 at arm's length), gone by ~2 m
-	l.pad[0] = 12.0f * 12.0f;   // soft radius squared (lighting.hlsl Light.lp.x)
+	l.invSquare = 1000.0f;               // r23: strong on the wielder without burning faces / helmets out
+	l.pad[0] = 22.0f * 22.0f;   // soft radius squared (lighting.hlsl Light.lp.x)
 	R.tubes.push_back(l);
 }
 float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }

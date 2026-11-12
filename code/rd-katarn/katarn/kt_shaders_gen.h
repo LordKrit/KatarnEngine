@@ -1899,14 +1899,17 @@ void CS(uint3 id : SV_DispatchThreadID)
 			spec = lerp(spec, pc * asfloat(probeParams.z) / max(skyParams.z, 1e-3), probeW);
 		}
 		// screen-space reflections from last frame's lit scene
-		if (ssrSrv && rough < 0.45 && !plainLegacy) {
-			float3 O = P + N * (2.0 + viewZ * 0.002);
+		// r23: real SSR on old maps too - their floors are polished in rend2 (cubemaps + specular maps), so the reflection
+		// roughness of lightmapped map surfaces is capped at 0.35; refined hits, blurred by roughness
+		float rS = (baked && !plainLegacy) ? min(rough, 0.35) : rough;
+		if (ssrSrv && rS < 0.6 && !plainLegacy) {
+			float3 O = P + N *)KTSRC",
+R"KTSRC( (2.0 + viewZ * 0.002);
 			float stepLen = 6.0 + viewZ * 0.01;
 			float jit = frac(52.9829189 * frac(dot(float2(px), float2(0.06711056, 0.00583715)) + indices2.w * 0.618));
 			float3 Q = O + R * stepLen * jit;
 			float hit = 0; float2 huv = 0;
-			[loop] for (int sI = 0; sI < )KTSRC",
-R"KTSRC(40; sI++) {
+			[loop] for (int sI = 0; sI < 40; sI++) {
 				Q += R * stepLen;
 				stepLen *= 1.08;
 				float4 cp = mul(viewProj, float4(Q, 1));
@@ -1918,15 +1921,31 @@ R"KTSRC(40; sI++) {
 				float rayZ = ViewDepth(cp.z / cp.w), sceneZ = ViewDepth(sd);
 				float diffZ = rayZ - sceneZ;
 				if (sd > 0 && diffZ > 0 && diffZ < stepLen * 2.5) {
+					// binary refinement between the last two steps
+					float3 Qa = Q - R * stepLen / 1.08, Qb = Q;
+					[unroll] for (int bI = 0; bI < 5; bI++) {
+						float3 Qm = (Qa + Qb) * 0.5;
+						float4 cm = mul(viewProj, float4(Qm, 1));
+						float2 mu = cm.xy / cm.w * float2(0.5, -0.5) + 0.5;
+						float smd = Tex2D[indices0.w].Load(int3(viewport.xy + mu * viewport.zw, 0)).r;
+						if (ViewDepth(cm.z / cm.w) - ViewDepth(smd) > 0) Qb = Qm; else Qa = Qm;
+					}
+					Q = Qb;
 					float4 pp = mul(prevViewProj, float4(Q, 1));
 					huv = pp.xy / pp.w * float2(0.5, -0.5) + 0.5;
 					float2 e = saturate(min(huv, 1 - huv) * 10);
-					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.45 - rough) / 0.2);
+					hit = e.x * e.y * saturate(1 - sI / 40.0) * saturate((0.6 - rS) / 0.3);
 					break;
 				}
 			}
 			if (hit > 0) {
-				float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, (viewport.xy + huv * viewport.zw) * invTargetSize.xy, 0).rgb;
+				float2 cuv = (viewport.xy + huv * viewport.zw) * invTargetSize.xy;
+				float br = rS * rS * 0.05 * saturate(length(Q - P) / 600.0 + 0.2);   // blur radius grows with roughness and distance
+				float3 sc = Tex2D[ssrSrv].SampleLevel(sClamp, cuv, 0).rgb * 0.4;
+				sc += Tex2D[ssrSrv].SampleLevel(sClamp, cuv + float2(br, 0), 0).rgb * 0.15;
+				sc += Tex2D[ssrSrv].SampleLevel(sClamp, cuv - float2(br, 0), 0).rgb * 0.15;
+				sc += Tex2D[ssrSrv].SampleLevel(sClamp, cuv + float2(0, br), 0).rgb * 0.15;
+				sc += Tex2D[ssrSrv].SampleLevel(sClamp, cuv - float2(0, br), 0).rgb * 0.15;
 				sc = min(sc, 64.0);                              // no fireflies from the sun disc
 				spec = lerp(spec, sc / max(skyParams.z, 1e-3), hit);
 				ssrHit = hit;
