@@ -48,6 +48,7 @@ static cvar_t* kt_look = nullptr, * kt_sunScale = nullptr, * kt_skyLight = nullp
 static cvar_t* kt_taa = nullptr, * kt_taaSharpen = nullptr, * kt_gi = nullptr, * kt_giRadius = nullptr;
 static cvar_t* kt_bspSun = nullptr, * kt_bspSunAmbient = nullptr, * kt_bspSunDist = nullptr;
 static cvar_t* kt_glowLights = nullptr;
+static cvar_t* kt_bf3Rim = nullptr, * kt_bf3Spec = nullptr;
 static std::vector<float> s_glowLights;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
@@ -195,6 +196,8 @@ static void RegisterCvars()
 	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
 	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);
+	kt_bf3Rim = KtCvar("kt_bf3Rim", "0.6", CVAR_ARCHIVE);     // BF3 Legacy shader patch outline light on characters (strength, 0 = off)
+	kt_bf3Spec = KtCvar("kt_bf3Spec", "1", CVAR_ARCHIVE);     // BF3 Legacy specular: tinted by the surface colour, x2 (0 = off, 1 = full)
 	kt_glowLights = KtCvar("kt_glowLights", "0", CVAR_ARCHIVE);   // glowing textures on old maps light their surroundings (strength, 0 = off)               // HD worlds: leaves move in the wind (0 = still)
 	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
@@ -1269,7 +1272,7 @@ void R_AppendDeferred(const DeferredDraw& d)
 		uint32_t pbr[4] = { R_TextureSrv(tn, false), R_TextureSrv(tr2, false), (uint32_t)d.rmoOrder, 0 };
 		memcpy(&pbr[3], &d.skin, 4);
 		memcpy(c + 160, pbr, 16);
-		float grid[12] = { d.gridAmbient[0], d.gridAmbient[1], d.gridAmbient[2], 0, d.gridDirected[0], d.gridDirected[1], d.gridDirected[2], 0,
+		float grid[12] = { d.gridAmbient[0], d.gridAmbient[1], d.gridAmbient[2], kt_bf3Rim ? kt_bf3Rim->value : 0.0f, d.gridDirected[0], d.gridDirected[1], d.gridDirected[2], kt_bf3Spec ? kt_bf3Spec->value : 0.0f,
 			d.gridDir[0], d.gridDir[1], d.gridDir[2], 0 };
 		memcpy(c + 176, grid, 48);
 		GLTexture* tdx = d.deluxeTex ? R_GLTexture(d.deluxeTex, false) : nullptr;

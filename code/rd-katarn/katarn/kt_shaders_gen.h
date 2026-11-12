@@ -1339,7 +1339,18 @@ R"KTSRC(	if (gflags & 1) clip(a.a - alphaRef);
 		float3 F = f0 + (1 - f0) * pow(1 - saturate(dot(H, V)), 5);
 		float3 spec = D * G * F / max(4 * saturate(nl) * nv, 1e-3) * saturate(nl) * SrgbToLinear(saturate(dirc));
 		if (gflags & 64) spec = HairSpec(HairStrand(n), n, V, L, a.rgb, rough) * SrgbToLinear(saturate(dirc)) * 1.0;   // hair
+		// BF3 Legacy shader patch (normal_bf3_character): specular tinted by the surface colour and doubled
+		// (specfinal * diffuse * 2), so armour and leather shine in their own colour
+		if (gridDirected.w > 0 && !(gflags & 64)) spec = lerp(spec, spec * saturate(a.rgb) * 2.0, saturate(gridDirected.w));
 		lit += spec + f0 * SrgbToLinear(saturate(amb)) * 0.5;   // a dim ambient reflection
+		// BF3 Legacy outline light: the rim of the silhouette brightens with the key light's colour,
+		// smoothstep(1 - width, 1, 1 - N.V) * lerp(L.N, 1, fade); colour *= (0.5 + rim) * 2 (width 0.25, fade 0.5)
+		if (gridAmbient.w > 0) {
+			float invNV = 1 - saturate(dot(n, V));
+			float rim = smoothstep(0.75, 1.0, invNV) * lerp(saturate(nl), 1.0, 0.5) * gridAmbient.w;
+			float3 rimCol = SrgbToLinear(saturate(dirc)) / max(Luminance(SrgbToLinear(saturate(dirc))), 0.05);
+			lit *= 1.0 + rim * saturate(rimCol);
+		}
 		gridLit = lit;
 		hasBaked = true;
 	}
