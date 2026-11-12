@@ -47,6 +47,8 @@ static cvar_t* kt_sss = nullptr, * kt_dof = nullptr, * kt_dofFocus = nullptr, * 
 static cvar_t* kt_look = nullptr, * kt_sunScale = nullptr, * kt_skyLight = nullptr, * kt_sharpen = nullptr;
 static cvar_t* kt_taa = nullptr, * kt_taaSharpen = nullptr, * kt_gi = nullptr, * kt_giRadius = nullptr;
 static cvar_t* kt_bspSun = nullptr, * kt_bspSunAmbient = nullptr, * kt_bspSunDist = nullptr;
+static cvar_t* kt_glowLights = nullptr;
+static std::vector<float> s_glowLights;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
 // ------------------------------------------------------------------------------------------------ rend2 colour grade
@@ -192,7 +194,8 @@ static void RegisterCvars()
 	kt_probes = KtCvar("kt_probes", "1", CVAR_ARCHIVE);           // reflection probes (cubemaps captured in game)
 	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
-	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);               // HD worlds: leaves move in the wind (0 = still)
+	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);
+	kt_glowLights = KtCvar("kt_glowLights", "1", CVAR_ARCHIVE);   // glowing textures on old maps light their surroundings (strength, 0 = off)               // HD worlds: leaves move in the wind (0 = still)
 	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
 	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
@@ -597,7 +600,7 @@ static bool CreatePipelines()
 		d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
 		d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
 		d.NumRenderTargets = 3;
-		d.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT; d.RTVFormats[2] = DXGI_FORMAT_R11G11B10_FLOAT;
+		d.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT; d.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 		R.lgPSO[c] = CreateGraphicsPSO(d, "legacy gbuffer");
 	}
@@ -711,7 +714,7 @@ static bool CreateTargets(uint32_t w, uint32_t h)
 	ok &= CreateTexture(R.depth, w, h, 1, DXGI_FORMAT_D32_FLOAT, TEX_DEPTH, 1, zero, "depth");
 	ok &= CreateTexture(R.gb0, w, h, 1, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, TEX_RT, 1, black, "gbuffer albedo");
 	ok &= CreateTexture(R.gb1, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "gbuffer normal");
-	ok &= CreateTexture(R.gb2, w, h, 1, DXGI_FORMAT_R11G11B10_FLOAT, TEX_RT, 1, black, "gbuffer emissive");
+	ok &= CreateTexture(R.gb2, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, TEX_RT, 1, black, "gbuffer emissive");
 	ok &= CreateTexture(R.ao, w, h, 1, DXGI_FORMAT_R16_FLOAT, TEX_UAV, 1, nullptr, "ao");
 	ok &= CreateTexture(R.aoTmp, w, h, 1, DXGI_FORMAT_R16_FLOAT, TEX_UAV, 1, nullptr, "ao tmp");
 	R.shadowRes = (uint32_t)Q_max(512, Q_min(8192, kt_shadowRes->integer));
@@ -1443,6 +1446,26 @@ static void RenderWorldView()
 			lights.push_back(l);
 		}
 	}
+	// r19: glowing map surfaces as lights (the nearest 48 within 3000 units)
+	if (kt_lights->integer && kt_glowLights->value > 0 && !s_glowLights.empty() && !hd) {
+		const float* o = v.origin;
+		std::vector<std::pair<float, int>> near_;
+		for (int i = 0; i < (int)s_glowLights.size() / 7; i++) {
+			const float* g = &s_glowLights[i * 7];
+			float d2 = (g[0] - o[0]) * (g[0] - o[0]) + (g[1] - o[1]) * (g[1] - o[1]) + (g[2] - o[2]) * (g[2] - o[2]);
+			if (d2 < 3000.0f * 3000.0f) near_.push_back({ d2, i });
+		}
+		std::sort(near_.begin(), near_.end());
+		for (size_t k = 0; k < near_.size() && k < 48 && lights.size() < 1024; k++) {
+			const float* g = &s_glowLights[near_[k].second * 7];
+			GpuLight l = {};
+			l.pos[0] = g[0]; l.pos[1] = g[1]; l.pos[2] = g[2];
+			for (int q = 0; q < 3; q++) l.color[q] = g[3 + q] * kt_glowLights->value;
+			l.radius = g[6];
+			l.type = 0; l.invSquare = 0;
+			lights.push_back(l);
+		}
+	}
 	if (kt_lights->integer && kt_saberLight->value > 0)
 		for (const GpuLight& t : R.tubes) if (lights.size() < 1024) {
 			GpuLight l = t;
@@ -1762,7 +1785,7 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 	if (!R.inView || length < 1.0f || R.tubes.size() >= 64) return;
 	GpuLight l = {};
 	for (int q = 0; q < 3; q++) { l.pos[q] = start[q]; l.dir[q] = dir[q] * length; }
-	l.radius = 320.0f + length * 0.5f;
+	l.radius = 170.0f + length * 0.25f;   // r19: a short reach - lights who holds it and what is near, not the room
 	// Battlefront II (2017) style: the blade colour with a little of the white-hot core in it, a soft-cored inverse
 	// square from the nearest point of the blade (bright pools on floors and walls nearby, not a hard hot spot on
 	// whatever touches it) and a faint hum flicker
@@ -1773,8 +1796,8 @@ void R_AddSaberLight(const float* start, const float* dir, float length, const u
 	const float hum = 1.0f + 0.04f * sinf(t * 47.0f + start[0] * 0.05f) + 0.03f * sinf(t * 113.0f);
 	for (int q = 0; q < 3; q++) l.color[q] = (powf(c[q] / mx, 2.2f) * 0.85f + 0.15f) * hum;
 	l.type = 2;
-	l.invSquare = 1100.0f;
-	l.pad[0] = 32.0f * 32.0f;   // soft radius squared (lighting.hlsl Light.lp.x)
+	l.invSquare = 1800.0f;               // r19: harder on the wielder / opponent (x4 at arm's length), gone by ~2 m
+	l.pad[0] = 12.0f * 12.0f;   // soft radius squared (lighting.hlsl Light.lp.x)
 	R.tubes.push_back(l);
 }
 float SaberGlowBoost() { return kt_saberGlow ? kt_saberGlow->value : 2.0f; }
@@ -1942,6 +1965,7 @@ static void ProbesSync()
 	PF.current = -1; PF.face = 0;
 }
 
+void GlowLights_Set(const float* data, int count) { s_glowLights.assign(data, data + count * 7); }
 void Probes_SetEntities(const char* text)
 {
 	PF.list.clear();

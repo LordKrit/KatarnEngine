@@ -126,7 +126,8 @@ bool World_Active();
 // reflection probes (rend2 cubemaps): placed from the map's entities, captured by the renderer itself in the first
 // seconds of play (a few 128x128 views per frame), sampled by the deferred lighting with sphere parallax
 constexpr int RDF_KT_PROBE = 0x40000000;           // rdflags of a capture view: | probe << 20 | face << 26
-void Probes_SetEntities(const char* entityText);   // tr_bsp: the BSP entity string, after the world loaded
+void Probes_SetEntities(const char* entityText);
+void GlowLights_Set(const float* data, int count);    // tr_bsp: lights made from glowing map surfaces (pos, color, radius: 7 floats each)   // tr_bsp: the BSP entity string, after the world loaded
 void Probes_BeginFrame();                           // RE_BeginFrame: queues this frame's capture views
 void Probes_NoteScene(const void* refdef);          // RE_RenderScene: the game drew a world view (refdef_t*)
 

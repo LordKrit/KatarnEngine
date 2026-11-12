@@ -1021,6 +1021,23 @@ image_t* KT_GenerateNormalMap(const char* diffuseName, qboolean mip, qboolean pi
 		mx = Q_max(mx, v);
 	}
 	for (int i = 0; i < w * h; i++) out[i * 4 + 3] = (byte)(out[i * 4 + 3] + (255 - mx));   // level out heights
+	// r19: smooth the height first (3x3 box) - single-pixel scratches and noise in the texture became grainy bumps
+	{
+		byte* hb = (byte*)R_Malloc(w * h, TAG_TEMP_WORKSPACE, qfalse);
+		for (int y = 0; y < h; y++)
+			for (int x = 0; x < w; x++) {
+				int sum = 0;
+				for (int y2 = -1; y2 <= 1; y2++)
+					for (int x2 = -1; x2 <= 1; x2++) {
+						int sy = clamp ? Q_max(0, Q_min(h - 1, y + y2)) : (y + y2 + h) % h;
+						int sx = clamp ? Q_max(0, Q_min(w - 1, x + x2)) : (x + x2 + w) % w;
+						sum += out[(sy * w + sx) * 4 + 3];
+					}
+				hb[y * w + x] = (byte)(sum / 9);
+			}
+		for (int i = 0; i < w * h; i++) out[i * 4 + 3] = hb[i];
+		R_Free(hb);
+	}
 	for (int y = 0; y < h; y++)
 		for (int x = 0; x < w; x++) {
 			int s[9], k = 0;
@@ -1030,7 +1047,7 @@ image_t* KT_GenerateNormalMap(const char* diffuseName, qboolean mip, qboolean pi
 					int sx = clamp ? Q_max(0, Q_min(w - 1, x + x2)) : (x + x2 + w) % w;
 					s[k++] = out[(sy * w + sx) * 4 + 3];
 				}
-			float n[3] = { (float)(s[0] - s[2] + 2 * s[3] - 2 * s[5] + s[6] - s[8]), (float)(s[0] + 2 * s[1] + s[2] - s[6] - 2 * s[7] - s[8]), (float)(s[4] * 4) };
+			float n[3] = { (float)(s[0] - s[2] + 2 * s[3] - 2 * s[5] + s[6] - s[8]), (float)(s[0] + 2 * s[1] + s[2] - s[6] - 2 * s[7] - s[8]), (float)(s[4] * 4) * 2.5f };   // r19: gentler slopes (rend2's maps read softer through its lighting)
 			float l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
 			if (l < 1e-6f) { n[0] = n[1] = 0; n[2] = 1; } else { n[0] /= l; n[1] /= l; n[2] /= l; }
 			byte* o = out + (y * w + x) * 4;

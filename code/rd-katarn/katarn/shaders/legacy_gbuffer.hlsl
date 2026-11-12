@@ -199,7 +199,7 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 	o.albedo = float4(a.rgb, matAO);
 	if (gflags & 128) { rough = 0.06; metal = 0; }   // eyes: a wet cornea, sharp highlights and reflections
 	rough = clamp(rough, 0.045, 1.0);
-	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (skinAmount > 0 ? 4.0 : (authored ? 0.0 : 2.0))
+	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (skinAmount > 0 ? 4.0 : (authored || ((gflags & 4) && !(gflags & 16)) ? 0.0 : 2.0))
 		+ ((gflags & 64) ? 16.0 : 0.0) + ((gflags & 128) ? 32.0 : 0.0));
 	o.emissive = float4((gflags & 16) ? gridLit : (hasBaked ? baked * a.rgb + bakedSpec : 0), 0);
 	return o;

@@ -83,7 +83,7 @@ static bool CreateWorldPipelines()
 	d.SampleDesc.Count = 1;
 	d.VS = BCode(W.vs); d.PS = BCode(W.ps);
 	d.NumRenderTargets = 3;
-	d.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT; d.RTVFormats[2] = DXGI_FORMAT_R11G11B10_FLOAT;
+	d.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; d.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT; d.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	for (int c = 0; c < 3; c++) {
 		d.RasterizerState.CullMode = c == KWC_OPAQUE ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;

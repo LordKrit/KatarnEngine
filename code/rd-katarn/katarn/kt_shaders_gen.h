@@ -1347,7 +1347,7 @@ R"KTSRC(	if (gflags & 1) clip(a.a - alphaRef);
 	o.albedo = float4(a.rgb, matAO);
 	if (gflags & 128) { rough = 0.06; metal = 0; }   // eyes: a wet cornea, sharp highlights and reflections
 	rough = clamp(rough, 0.045, 1.0);
-	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (skinAmount > 0 ? 4.0 : (authored ? 0.0 : 2.0))
+	o.normal = float4(EncodeNormal(n), hasBaked ? -rough : rough, saturate(metal) + (skinAmount > 0 ? 4.0 : (authored || ((gflags & 4) && !(gflags & 16)) ? 0.0 : 2.0))
 		+ ((gflags & 64) ? 16.0 : 0.0) + ((gflags & 128) ? 32.0 : 0.0));
 	o.emissive = float4((gflags & 16) ? gridLit : (hasBaked ? baked * a.rgb + bakedSpec : 0), 0);
 	return o;
@@ -2263,7 +2263,8 @@ void BloomDownCS(uint3 id : SV_DispatchThreadID)
 		r = (g1 * w1 * 0.5 + (g2 * w2 + g3 * w3 + g4 * w4 + g5 * w5) * 0.125) / (w1 * 0.5 + (w2 + w3 + w4 + w5) * 0.125);
 		r *= ex;
 		float br = max(r.r, max(r.g, r.b));
-		float knee = 0.5, thr = 1.0;
+		// r19: old maps are shown x overbright after this, so their bright panels already read white at 1/overbright
+		float thr = skyParams.w > 0.5 ? 1.0 : 1.0 / max(extraParams.x, 1.0), knee = thr * 0.5;
 		float soft = clamp(br - thr + knee, 0, 2 * knee);
 		soft = soft * soft / (4 * knee + 1e-4);
 		r *= max(soft, br - thr) / max(br, 1e-4);
@@ -2280,13 +2281,13 @@ void BloomDownCS(uint3 id : SV_DispatchThreadID)
 
 // rend2's dynamic glow chain (glsl/dglow_downsample.glsl and dglow_upsample.glsl, Call of Duty: Advanced Warfare
 // filters) for the lightsaber glow stages: same taps and weights (the down filter samples (2,-2) twice, as rend2's
-// does), offsets in source texels, sampled at the destination's texture coordinate, every pass overwriting its target
+// does), offsets in source texels, sampled at the destination's texture coordinate, every pass overw)KTSRC",
+R"KTSRC(riting its target
 [numthreads(8, 8, 1)]
 void DGlowDownCS(uint3 id : SV_DispatchThreadID)
 {
 	if (any(id.xy >= dstSize)) return;
-	float2 uv = (id.xy + 0.5) / float2(dstSize)KTSRC",
-R"KTSRC();
+	float2 uv = (id.xy + 0.5) / float2(dstSize);
 	float sw, sh; Tex2D[srcSrv].GetDimensions(sw, sh);
 	float2 r = 1.0 / float2(sw, sh);
 	float4 c = 0;
@@ -2496,7 +2497,11 @@ float4 TonemapPS(FsOut i) : SV_Target0
 		// tails of the glow sprites read as a thick saturated glow and the stacked middle burn white: the same here
 		float3 ov = Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb);
 		ov = saturate(Rend2Filmic(ov * (1.0718 * max(extraParams.x, 1.0))) / Rend2Filmic(1.0));
-		c = saturate(c + ov);
+		// r19: a real blade - the core is solid and white-hot, only the outer glow adds over the scene
+		float om = max(ov.r, max(ov.g, ov.b));
+		float3 core = lerp(ov, 1.0, saturate((om - 0.55) / 0.3));
+		float oa = saturate(om * 1.6);
+		c = lerp(saturate(c + ov), core, oa * oa);
 	}
 	// rend2 dynamic glow of the saber glow stages (histBuf carries glowScaled[0] here, dt the intensity), blended
 	// GL_ONE / GL_ONE_MINUS_SRC_COLOR over the finished picture as rend2's RB_PostProcess composites it
@@ -2518,13 +2523,13 @@ float4 FxaaPS(FsOut i) : SV_Target0
 	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float4 m = Tex2D[srcSrv].SampleLevel(sClamp, uv, 0);
-	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * rcp, 0).a;
+	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * )KTSRC",
+R"KTSRC(rcp, 0).a;
 	float ne = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, -0.5) * rcp, 0).a;
 	float sw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, 0.5) * rcp, 0).a;
 	float se = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, 0.5) * rcp, 0).a;
 	float lmax = max(max(nw, ne), max(sw, se)), lmin = min(min(nw, ne), min(sw, se));
-	if (max(lmax, m.a) - min(lmin, m.a) < max(0.05, lmax * 0.125)) return float4(m.rgb,)KTSRC",
-R"KTSRC( 1);
+	if (max(lmax, m.a) - min(lmin, m.a) < max(0.05, lmax * 0.125)) return float4(m.rgb, 1);
 	float2 dir = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
 	float red = max((nw + ne + sw + se) * 0.03125, 1.0 / 128.0);
 	float rmin = 1.0 / (min(abs(dir.x), abs(dir.y)) + red);

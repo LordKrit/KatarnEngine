@@ -93,7 +93,8 @@ void BloomDownCS(uint3 id : SV_DispatchThreadID)
 		r = (g1 * w1 * 0.5 + (g2 * w2 + g3 * w3 + g4 * w4 + g5 * w5) * 0.125) / (w1 * 0.5 + (w2 + w3 + w4 + w5) * 0.125);
 		r *= ex;
 		float br = max(r.r, max(r.g, r.b));
-		float knee = 0.5, thr = 1.0;
+		// r19: old maps are shown x overbright after this, so their bright panels already read white at 1/overbright
+		float thr = skyParams.w > 0.5 ? 1.0 : 1.0 / max(extraParams.x, 1.0), knee = thr * 0.5;
 		float soft = clamp(br - thr + knee, 0, 2 * knee);
 		soft = soft * soft / (4 * knee + 1e-4);
 		r *= max(soft, br - thr) / max(br, 1e-4);
@@ -325,7 +326,11 @@ float4 TonemapPS(FsOut i) : SV_Target0
 		// tails of the glow sprites read as a thick saturated glow and the stacked middle burn white: the same here
 		float3 ov = Sane(Tex2D[dstUav].Load(int3(i.pos.xy, 0)).rgb);
 		ov = saturate(Rend2Filmic(ov * (1.0718 * max(extraParams.x, 1.0))) / Rend2Filmic(1.0));
-		c = saturate(c + ov);
+		// r19: a real blade - the core is solid and white-hot, only the outer glow adds over the scene
+		float om = max(ov.r, max(ov.g, ov.b));
+		float3 core = lerp(ov, 1.0, saturate((om - 0.55) / 0.3));
+		float oa = saturate(om * 1.6);
+		c = lerp(saturate(c + ov), core, oa * oa);
 	}
 	// rend2 dynamic glow of the saber glow stages (histBuf carries glowScaled[0] here, dt the intensity), blended
 	// GL_ONE / GL_ONE_MINUS_SRC_COLOR over the finished picture as rend2's RB_PostProcess composites it

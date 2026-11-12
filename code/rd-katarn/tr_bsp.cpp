@@ -28,6 +28,8 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "tr_common.h"
 #include "tr_local.h"
+#include <array>
+#include <map>
 #include <string>
 #include "katarn/kt_render.h"
 
@@ -1508,6 +1510,99 @@ void RE_LoadWorldMap_Actual(const char* name, world_t& worldData, const int inde
 
 		// KatarnEngine: the sun of a cached sky shader (not parsed again), and the sun shadow caster mesh
 		KT_WorldSunAndShadows(worldData);
+
+		// KatarnEngine r19: glowing surfaces become lights - grouped per shader in 192-unit cells, the colour of the
+		// glow texture (its bright pixels), the reach from the glowing area
+		{
+			struct Acc { double p[3], n[3], area; shader_t* sh; };
+			std::map<std::string, Acc> cells;
+			std::map<image_t*, std::array<float, 4>> avg;
+			auto glowImage = [](shader_t* sh) -> image_t* {
+				if (!sh || !sh->hasGlow || !sh->stages) return nullptr;
+				for (int k = 0; k < MAX_SHADER_STAGES; k++) {
+					if (!sh->stages[k].active) break;
+					if (sh->stages[k].glow && sh->stages[k].bundle[0].image) return sh->stages[k].bundle[0].image;
+				}
+				return nullptr;
+			};
+			auto addTri = [&](shader_t* sh, const float* a, const float* b, const float* c) {
+				float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, e2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+				float n[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
+				float ar = 0.5f * sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+				if (ar < 0.5f) return;
+				float cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
+				char key[160];
+				Com_sprintf(key, sizeof(key), "%p %d %d %d", (void*)sh, (int)floorf(cx / 192), (int)floorf(cy / 192), (int)floorf(cz / 192));
+				Acc& A = cells[key];
+				A.sh = sh;
+				A.p[0] += cx * ar; A.p[1] += cy * ar; A.p[2] += cz * ar;
+				A.n[0] += n[0] * 0.5; A.n[1] += n[1] * 0.5; A.n[2] += n[2] * 0.5;   // area-weighted (q3 winding: n points away from the face's front? sign fixed below)
+				A.area += ar;
+			};
+			for (int si = 0; si < worldData.numsurfaces; si++) {
+				msurface_t& ms = worldData.surfaces[si];
+				if (!glowImage(ms.shader)) continue;
+				const surfaceType_t t = *ms.data;
+				if (t == SF_FACE) {
+					const srfSurfaceFace_t* f = (const srfSurfaceFace_t*)ms.data;
+					const int* idx = (const int*)((const byte*)f + f->ofsIndices);
+					for (int k = 0; k + 2 < f->numIndices; k += 3) {
+						float a3[3], b3[3], c3[3];
+						for (int q = 0; q < 3; q++) { a3[q] = f->points[idx[k]][q]; b3[q] = f->points[idx[k + 1]][q]; c3[q] = f->points[idx[k + 2]][q]; }
+						addTri(ms.shader, a3, b3, c3);
+					}
+				} else if (t == SF_TRIANGLES) {
+					const srfTriangles_t* tr_ = (const srfTriangles_t*)ms.data;
+					for (int k = 0; k + 2 < tr_->numIndexes; k += 3)
+						addTri(ms.shader, tr_->verts[tr_->indexes[k]].xyz, tr_->verts[tr_->indexes[k + 1]].xyz, tr_->verts[tr_->indexes[k + 2]].xyz);
+				} else if (t == SF_GRID) {
+					const srfGridMesh_t* g = (const srfGridMesh_t*)ms.data;
+					for (int y = 0; y + 1 < g->height; y++)
+						for (int x = 0; x + 1 < g->width; x++) {
+							const drawVert_t* v0 = &g->verts[y * g->width + x];
+							addTri(ms.shader, v0->xyz, v0[1].xyz, v0[g->width].xyz);
+							addTri(ms.shader, v0[1].xyz, v0[g->width + 1].xyz, v0[g->width].xyz);
+						}
+				}
+			}
+			std::vector<float> out;
+			for (auto& kv : cells) {
+				Acc& A = kv.second;
+				if (A.area < 16.0) continue;
+				image_t* im = glowImage(A.sh);
+				auto it = avg.find(im);
+				if (it == avg.end()) {
+					std::array<float, 4> c = { 1, 1, 1, 0.3f };
+					byte* pic = nullptr; int w = 0, h = 0;
+					R_LoadImage(im->imgName, &pic, &w, &h);
+					if (pic && w > 0 && h > 0) {
+						double s[3] = { 0, 0, 0 }, sw = 0, cov = 0;
+						for (int i = 0; i < w * h; i++) {
+							float r = pic[i * 4] / 255.0f, g = pic[i * 4 + 1] / 255.0f, b = pic[i * 4 + 2] / 255.0f, al = pic[i * 4 + 3] / 255.0f;
+							float l = (0.2126f * r + 0.7152f * g + 0.0722f * b) * al;
+							s[0] += r * l; s[1] += g * l; s[2] += b * l; sw += l; cov += l;
+						}
+						if (sw > 1e-6) {
+							float m = (float)Q_max(s[0], Q_max(s[1], s[2]));
+							c = { (float)(s[0] / m), (float)(s[1] / m), (float)(s[2] / m), (float)(cov / (w * h)) };
+						}
+						R_Free(pic);
+					}
+					it = avg.emplace(im, c).first;
+				}
+				const auto& c = it->second;
+				float px = (float)(A.p[0] / A.area), py = (float)(A.p[1] / A.area), pz = (float)(A.p[2] / A.area);
+				float nl = (float)sqrt(A.n[0] * A.n[0] + A.n[1] * A.n[1] + A.n[2] * A.n[2]);
+				// out from the surface along its average normal, towards the side the map is on (q3 faces wind clockwise
+				// seen from the front, so the cross product above points to the back)
+				if (nl > 1e-3) { px -= (float)(A.n[0] / nl) * 12; py -= (float)(A.n[1] / nl) * 12; pz -= (float)(A.n[2] / nl) * 12; }
+				float strength = Q_min(1.0f, 0.25f + c[3] * 2.0f) * Q_min(1.5f, (float)sqrt(A.area) / 48.0f);
+				float radius = Q_max(96.0f, Q_min(420.0f, (float)sqrt(A.area) * 3.0f));
+				out.insert(out.end(), { px, py, pz, c[0] * strength, c[1] * strength, c[2] * strength, radius });
+			}
+			kt::GlowLights_Set(out.data(), (int)(out.size() / 7));
+			ri.Printf(PRINT_DEVELOPER, "KatarnEngine: %d lights from glowing surfaces\n", (int)(out.size() / 7));
+		}
 
 		// KatarnEngine: reflection probe positions from the entities (needs tr.world for the clusters)
 		{
