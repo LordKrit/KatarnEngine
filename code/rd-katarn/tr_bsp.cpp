@@ -28,6 +28,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "tr_common.h"
 #include "tr_local.h"
+#include <set>
 #include <array>
 #include <map>
 #include <string>
@@ -188,7 +189,7 @@ bool KT_ShadowCaster(const shader_t* sh)
 	return true;
 }
 
-static void KT_WorldSunAndShadows(world_t& w)
+static void KT_WorldSunAndShadows(world_t& w, const char* ents)
 {
 	if (!w.bmodels || !w.numsurfaces) return;
 	const bmodel_t& bm = w.bmodels[0];
@@ -197,11 +198,32 @@ static void KT_WorldSunAndShadows(world_t& w)
 		const shader_t* sh = bm.firstSurface[i].shader;
 		if (sh && sh->ktHasSun) { VectorCopy(sh->ktSunDir, tr.sunDirection); break; }
 	}
+	// r20: the 3D skybox room (the area holding misc_skyportal) is drawn through the portal, not over the map: it must
+	// not cast the sun's shadows onto the world below it
+	std::set<const msurface_t*> skyRoom;
+	if (ents && w.nodes) {
+		const char* e = strstr(ents, "\"misc_skyportal\"");
+		if (e) {
+			const char* b = e; while (b > ents && *b != '{') b--;
+			const char* o = strstr(b, "\"origin\"");
+			vec3_t org;
+			if (o && sscanf(o + 8, " \"%f %f %f\"", &org[0], &org[1], &org[2]) == 3) {
+				mnode_t* n = w.nodes;
+				while (n->contents == -1) n = DotProduct(org, n->plane->normal) - n->plane->dist > 0 ? n->children[0] : n->children[1];
+				const int area = n->area;
+				for (int k = 0; k < w.numnodes; k++) {
+					const mnode_t& lf = w.nodes[k];
+					if (lf.contents == -1 || lf.area != area) continue;
+					for (int m = 0; m < lf.nummarksurfaces; m++) skyRoom.insert(lf.firstmarksurface[m]);
+				}
+			}
+		}
+	}
 	std::vector<float> pos;
 	std::vector<uint32_t> idx;
 	for (int i = 0; i < bm.numSurfaces; i++) {
 		const msurface_t& s = bm.firstSurface[i];
-		if (!s.data || !KT_ShadowCaster(s.shader)) continue;
+		if (!s.data || !KT_ShadowCaster(s.shader) || skyRoom.count(&s)) continue;
 		const uint32_t base = (uint32_t)(pos.size() / 3);
 		switch (*s.data) {
 		case SF_FACE: {
@@ -1509,7 +1531,11 @@ void RE_LoadWorldMap_Actual(const char* name, world_t& worldData, const int inde
 		tr.world = &worldData;
 
 		// KatarnEngine: the sun of a cached sky shader (not parsed again), and the sun shadow caster mesh
-		KT_WorldSunAndShadows(worldData);
+		{
+			const lump_t& el0 = header->lumps[LUMP_ENTITIES];
+			std::string ents0(reinterpret_cast<const char*>(fileBase + el0.fileofs), el0.filelen > 0 ? el0.filelen : 0);
+			KT_WorldSunAndShadows(worldData, ents0.c_str());
+		}
 
 		// KatarnEngine r19: glowing surfaces become lights - grouped per shader in 192-unit cells, the colour of the
 		// glow texture (its bright pixels), the reach from the glowing area
