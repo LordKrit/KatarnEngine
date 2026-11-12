@@ -1314,6 +1314,8 @@ R"KTSRC(	if (gflags & 1) clip(a.a - alphaRef);
 				baked *= lerp(1.0, shade, dirAmt);
 				float3 f0s = lerp((rmoTex != 0 || specTex != 0) ? 0.04 : 0.012, a.rgb, saturate(metal));
 				bakedSpec = min(SpecGGX(n, V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
+				// BF3 Legacy environment specular (normal_bf3_ambient): tinted by the surface, x2
+				if (gridDirected.w > 0) bakedSpec = lerp(bakedSpec, bakedSpec * saturate(a.rgb) * 2.0, saturate(gridDirected.w));
 			}
 		}
 		else if (normalTex) baked *= saturate(dot(n, n0));   // no direction known: the bumps shade against the surface
@@ -1343,6 +1345,15 @@ R"KTSRC(	if (gflags & 1) clip(a.a - alphaRef);
 		// (specfinal * diffuse * 2), so armour and leather shine in their own colour
 		if (gridDirected.w > 0 && !(gflags & 64)) spec = lerp(spec, spec * saturate(a.rgb) * 2.0, saturate(gridDirected.w));
 		lit += spec + f0 * SrgbToLinear(saturate(amb)) * 0.5;   // a dim ambient reflection
+		// BF3 Legacy character reflection: fresnel (1 - N.V^1.5), boosted by the reflection's luminance, masked by the
+		// specular strength; with no cubemap the reflected light is the light grid seen along the reflection
+		if (gridDir.w > 0 && !(gflags & 64)) {
+			float3 Rv = reflect(-V, n);
+			float3 refl = SrgbToLinear(saturate(amb + dirc * saturate(dot(Rv, L))));
+			float fres = 1.0 - pow(saturate(dot(n, V)), 1.5);
+			float lumR = dot(refl, float3(0.333, 0.333, 0.333));
+			lit += refl * lumR * fres * gridDir.w * lerp(0.04, 1.0, saturate(metal)) * (1.0 - rough * 0.7);
+		}
 		// BF3 Legacy outline light: the rim of the silhouette brightens with the key light's colour,
 		// smoothstep(1 - width, 1, 1 - N.V) * lerp(L.N, 1, fade); colour *= (0.5 + rim) * 2 (width 0.25, fade 0.5)
 		if (gridAmbient.w > 0) {
@@ -2530,7 +2541,17 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	}
 	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 	if (grade3.w > 0.5) c = GradePost(c, i.uv);
+	// BF3 Legacy vignette: smoothstep(end, start, distance from the centre)
+	if (atmos3.w > 0) { float2 vv = i.uv - 0.5; c *= lerp(1.0, smoothstep(0.85, 0.35, length(vv * float2(1.0, 0.8)) * 1.2), atmos3.w); }
 	c = LinearToSrgb(c);
+	// BF3 Legacy film grain (martinsh / shader patch): animated, stronger in the darks, slightly coloured
+	if (atmos3.z > 0) {
+		float2 gp = i.pos.xy + frac(indices2.w * 0.0137) * 1000.0;
+		float3 gr = frac(sin(float3(dot(gp, float2(12.9898, 78.233)), dot(gp, float2(39.346, 11.135)), dot(gp, float2(73.156, 52.235)))) * 43758.5453) - 0.5;
+		gr = lerp(gr.xxx, gr, 0.6);
+		float lw = 1.0 - saturate(dot(c, float3(0.299, 0.587, 0.114)));
+		c = saturate(c + gr * atmos3.z * lerp(0.4, 1.0, lw * lw));
+	}
 	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
 	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
 	if (dstUav) {
@@ -2553,7 +2574,8 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	}
 	float n = frac(sin(dot(i.pos.xy + indices2.w * 0.37, float2(12.9898, 78.233))) * 43758.5453);
 	c += (n - 0.5) / 255.0;
-	return float4(c, dot(c, float3(0.299, 0.587, 0.114)));
+	return float4(c,)KTSRC",
+R"KTSRC( dot(c, float3(0.299, 0.587, 0.114)));
 }
 
 // FXAA (console quality) on the tone mapped image, luma in alpha
@@ -2565,8 +2587,7 @@ float4 FxaaPS(FsOut i) : SV_Target0
 	// an ordinary sky box writes no depth either, and discarding it left last frame's picture (hall-of-mirrors sky)
 	if (extraParams.z > 0.5 && skyParams.w <= 0.5 && Tex2D[indices0.w].Load(int3(i.pos.xy, 0)).r <= 0.0) discard;
 	float4 m = Tex2D[srcSrv].SampleLevel(sClamp, uv, 0);
-	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * )KTSRC",
-R"KTSRC(rcp, 0).a;
+	float nw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, -0.5) * rcp, 0).a;
 	float ne = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, -0.5) * rcp, 0).a;
 	float sw = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(-0.5, 0.5) * rcp, 0).a;
 	float se = Tex2D[srcSrv].SampleLevel(sClamp, uv + float2(0.5, 0.5) * rcp, 0).a;

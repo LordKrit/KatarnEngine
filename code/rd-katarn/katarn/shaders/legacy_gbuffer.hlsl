@@ -166,6 +166,8 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 				baked *= lerp(1.0, shade, dirAmt);
 				float3 f0s = lerp((rmoTex != 0 || specTex != 0) ? 0.04 : 0.012, a.rgb, saturate(metal));
 				bakedSpec = min(SpecGGX(n, V, L, clamp(rough, 0.08, 1.0), f0s) * baked * PI / n0l * dirAmt, 4.0);
+				// BF3 Legacy environment specular (normal_bf3_ambient): tinted by the surface, x2
+				if (gridDirected.w > 0) bakedSpec = lerp(bakedSpec, bakedSpec * saturate(a.rgb) * 2.0, saturate(gridDirected.w));
 			}
 		}
 		else if (normalTex) baked *= saturate(dot(n, n0));   // no direction known: the bumps shade against the surface
@@ -195,6 +197,15 @@ GBufferOut PS(VsOut i, bool front : SV_IsFrontFace)
 		// (specfinal * diffuse * 2), so armour and leather shine in their own colour
 		if (gridDirected.w > 0 && !(gflags & 64)) spec = lerp(spec, spec * saturate(a.rgb) * 2.0, saturate(gridDirected.w));
 		lit += spec + f0 * SrgbToLinear(saturate(amb)) * 0.5;   // a dim ambient reflection
+		// BF3 Legacy character reflection: fresnel (1 - N.V^1.5), boosted by the reflection's luminance, masked by the
+		// specular strength; with no cubemap the reflected light is the light grid seen along the reflection
+		if (gridDir.w > 0 && !(gflags & 64)) {
+			float3 Rv = reflect(-V, n);
+			float3 refl = SrgbToLinear(saturate(amb + dirc * saturate(dot(Rv, L))));
+			float fres = 1.0 - pow(saturate(dot(n, V)), 1.5);
+			float lumR = dot(refl, float3(0.333, 0.333, 0.333));
+			lit += refl * lumR * fres * gridDir.w * lerp(0.04, 1.0, saturate(metal)) * (1.0 - rough * 0.7);
+		}
 		// BF3 Legacy outline light: the rim of the silhouette brightens with the key light's colour,
 		// smoothstep(1 - width, 1, 1 - N.V) * lerp(L.N, 1, fade); colour *= (0.5 + rim) * 2 (width 0.25, fade 0.5)
 		if (gridAmbient.w > 0) {

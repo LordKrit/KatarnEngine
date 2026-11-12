@@ -48,7 +48,7 @@ static cvar_t* kt_look = nullptr, * kt_sunScale = nullptr, * kt_skyLight = nullp
 static cvar_t* kt_taa = nullptr, * kt_taaSharpen = nullptr, * kt_gi = nullptr, * kt_giRadius = nullptr;
 static cvar_t* kt_bspSun = nullptr, * kt_bspSunAmbient = nullptr, * kt_bspSunDist = nullptr;
 static cvar_t* kt_glowLights = nullptr;
-static cvar_t* kt_bf3Rim = nullptr, * kt_bf3Spec = nullptr;
+static cvar_t* kt_bf3Rim = nullptr, * kt_bf3Spec = nullptr, * kt_bf3Refl = nullptr, * kt_filmGrain = nullptr, * kt_vignette = nullptr;
 static std::vector<float> s_glowLights;
 static cvar_t* kt_lights, * kt_dlightScale, * kt_speeds, * kt_ssr, * kt_volumetric, * kt_saberLight, * kt_saberGlow, * kt_saberDraw;
 
@@ -197,7 +197,10 @@ static void RegisterCvars()
 	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
 	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);
 	kt_bf3Rim = KtCvar("kt_bf3Rim", "0.6", CVAR_ARCHIVE);     // BF3 Legacy shader patch outline light on characters (strength, 0 = off)
-	kt_bf3Spec = KtCvar("kt_bf3Spec", "1", CVAR_ARCHIVE);     // BF3 Legacy specular: tinted by the surface colour, x2 (0 = off, 1 = full)
+	kt_bf3Spec = KtCvar("kt_bf3Spec", "1", CVAR_ARCHIVE);
+	kt_bf3Refl = KtCvar("kt_bf3Refl", "0.5", CVAR_ARCHIVE);   // BF3 Legacy fresnel reflection on characters (strength, 0 = off)
+	kt_filmGrain = KtCvar("kt_filmGrain", "0.03", CVAR_ARCHIVE);   // BF3 Legacy film grain (0 = off)
+	kt_vignette = KtCvar("kt_vignette", "0.25", CVAR_ARCHIVE);     // BF3 Legacy vignette (0 = off)     // BF3 Legacy specular: tinted by the surface colour, x2 (0 = off, 1 = full)
 	kt_glowLights = KtCvar("kt_glowLights", "0", CVAR_ARCHIVE);   // glowing textures on old maps light their surroundings (strength, 0 = off)               // HD worlds: leaves move in the wind (0 = still)
 	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
@@ -1159,6 +1162,9 @@ void R_BeginView(const ViewDesc& v)
 		c.atmos3[0] = s_grade[16].cv->value; c.atmos3[1] = 1.0f;
 		c.sunDir[0] = sun[0]; c.sunDir[1] = sun[1]; c.sunDir[2] = sun[2];
 	}
+	// BF3 Legacy post (shader patch postprocess): film grain and vignette
+	c.atmos3[2] = R.capture ? 0.0f : Q_max(0.0f, kt_filmGrain->value);
+	c.atmos3[3] = R.capture ? 0.0f : Q_max(0.0f, Q_min(1.0f, kt_vignette->value));
 
 	// sun cascades
 	float shadowDist = bspSun ? Q_max(500.0f, kt_bspSunDist->value) : Q_max(500.0f, kt_shadowDist->value);
@@ -1273,7 +1279,7 @@ void R_AppendDeferred(const DeferredDraw& d)
 		memcpy(&pbr[3], &d.skin, 4);
 		memcpy(c + 160, pbr, 16);
 		float grid[12] = { d.gridAmbient[0], d.gridAmbient[1], d.gridAmbient[2], kt_bf3Rim ? kt_bf3Rim->value : 0.0f, d.gridDirected[0], d.gridDirected[1], d.gridDirected[2], kt_bf3Spec ? kt_bf3Spec->value : 0.0f,
-			d.gridDir[0], d.gridDir[1], d.gridDir[2], 0 };
+			d.gridDir[0], d.gridDir[1], d.gridDir[2], kt_bf3Refl ? kt_bf3Refl->value : 0.0f };
 		memcpy(c + 176, grid, 48);
 		GLTexture* tdx = d.deluxeTex ? R_GLTexture(d.deluxeTex, false) : nullptr;
 		R_ResolveTexture(tdx);

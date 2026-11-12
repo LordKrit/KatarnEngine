@@ -317,7 +317,17 @@ float4 TonemapPS(FsOut i) : SV_Target0
 	}
 	else c = saturate(saturate(c) * Overbright());   // legacy BSP maps: display-referred, plus the overbright shift the old gamma ramp did
 	if (grade3.w > 0.5) c = GradePost(c, i.uv);
+	// BF3 Legacy vignette: smoothstep(end, start, distance from the centre)
+	if (atmos3.w > 0) { float2 vv = i.uv - 0.5; c *= lerp(1.0, smoothstep(0.85, 0.35, length(vv * float2(1.0, 0.8)) * 1.2), atmos3.w); }
 	c = LinearToSrgb(c);
+	// BF3 Legacy film grain (martinsh / shader patch): animated, stronger in the darks, slightly coloured
+	if (atmos3.z > 0) {
+		float2 gp = i.pos.xy + frac(indices2.w * 0.0137) * 1000.0;
+		float3 gr = frac(sin(float3(dot(gp, float2(12.9898, 78.233)), dot(gp, float2(39.346, 11.135)), dot(gp, float2(73.156, 52.235)))) * 43758.5453) - 0.5;
+		gr = lerp(gr.xxx, gr, 0.6);
+		float lw = 1.0 - saturate(dot(c, float3(0.299, 0.587, 0.114)));
+		c = saturate(c + gr * atmos3.z * lerp(0.4, 1.0, lw * lw));
+	}
 	// lightsaber blades (dstUav carries the overlay here): added in display space and clamped, as rend2 shows them -
 	// the colour stays saturated at the edges and only the overlap of the sprites burns to a white core
 	if (dstUav) {
