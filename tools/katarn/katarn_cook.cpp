@@ -165,6 +165,8 @@ static std::vector<std::string> SKIP = { "HeightFog", "Sky_Cottonball", "FX_", "
 static std::vector<std::string> SKIPMAT = { "DroidWreck", "Twig", "StreetDebris" };
 // scattered instances thinned (material name contains, fraction kept)
 static std::vector<std::pair<std::string, float>> THIN = { { "GroundLeaves", 0.5f } };
+// lights left out (name contains)
+static std::vector<std::string> SKIPLIGHT;
 static std::string exportDir;
 
 // default: half the cores, so the PC stays usable (and cooler) during a long cook
@@ -1360,7 +1362,10 @@ static void ProjectSH(const BakeImage& env, float strength, float sh[9][3])
 
 static bool Skip(const std::string& name)
 {
-	for (auto& s : SKIP) if (!s.empty() && name.find(s) != std::string::npos) return true;
+	for (auto& s : SKIP) {   // "^Name" = the name starts with it
+		if (s.size() > 1 && s[0] == '^') { if (name.compare(0, s.size() - 1, s, 1, std::string::npos) == 0) return true; }
+		else if (!s.empty() && name.find(s) != std::string::npos) return true;
+	}
 	return false;
 }
 
@@ -1720,6 +1725,7 @@ int main(int argc, char** argv)
 				s = e + 1;
 			}
 		}
+		else if (a == "--skiplight") { SKIPLIGHT.clear(); size_t s = 0; while (s <= v.size()) { size_t e = v.find(',', s); if (e == std::string::npos) e = v.size(); SKIPLIGHT.push_back(v.substr(s, e - s)); s = e + 1; } }
 		else if (a == "--skip") { SKIP.clear(); size_t s = 0; while (s <= v.size()) { size_t e = v.find(',', s); if (e == std::string::npos) e = v.size(); SKIP.push_back(v.substr(s, e - s)); s = e + 1; } }
 	}
 	g_cookLog = fopen((outDir + "/" + mapName + "_cook_log.txt").c_str(), "w");
@@ -2014,6 +2020,7 @@ int main(int argc, char** argv)
 			continue;
 		}
 		if (energy <= 0) continue;
+		{ std::string ln = l["name"].str(); bool sk = false; for (auto& s : SKIPLIGHT) if (!s.empty() && ln.find(s) != std::string::npos) sk = true; if (sk) continue; }
 		KwLight k = {};
 		for (int a = 0; a < 3; a++) k.pos[a] = (float)l["position"][(size_t)a].num() * UNITS;
 		float I = energy / (4.0f * 3.14159265f) * UNITS * UNITS;
