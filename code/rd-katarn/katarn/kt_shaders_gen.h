@@ -1999,6 +1999,7 @@ void FogInjectCS(uint3 id : SV_DispatchThreadID)
 		// local lights and lightsabers (no shadows), scaled up the way Unreal's volumetric scattering intensity is
 		[loop] for (uint i = 0; i < lightCount; i++) {
 			Light l = LoadLight(i);
+			if (l.lp.y > 0.5) continue;   // r21: lights made from glowing surfaces stay out of the air
 			float3 d;
 			if (l.type == 2) {
 				float len2 = max(dot(l.dir, l.dir), 1e-4);

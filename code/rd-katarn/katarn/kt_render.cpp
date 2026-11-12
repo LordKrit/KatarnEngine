@@ -195,7 +195,7 @@ static void RegisterCvars()
 	kt_probeScale = KtCvar("kt_probeScale", "1", CVAR_ARCHIVE);   // their reflection strength
 	kt_parallax = KtCvar("kt_parallax", "1", CVAR_ARCHIVE);       // parallax mapping (rend2 normal + height maps)
 	kt_wind = KtCvar("kt_wind", "1", CVAR_ARCHIVE);
-	kt_glowLights = KtCvar("kt_glowLights", "1", CVAR_ARCHIVE);   // glowing textures on old maps light their surroundings (strength, 0 = off)               // HD worlds: leaves move in the wind (0 = still)
+	kt_glowLights = KtCvar("kt_glowLights", "0.6", CVAR_ARCHIVE);   // glowing textures on old maps light their surroundings (strength, 0 = off)               // HD worlds: leaves move in the wind (0 = still)
 	// old BSP maps: rend2's forced sun (r_forceSun 1, r_sunlightMode 1): the map's light is kept where the sun reaches
 	// and scaled by kt_bspSunAmbient in its shadow / on surfaces facing away from it
 	kt_bspSun = KtCvar("kt_bspSun", "1", CVAR_ARCHIVE);
@@ -1014,7 +1014,7 @@ void R_BeginView(const ViewDesc& v)
 	c.taaParams[0] = R.taaJitter[0]; c.taaParams[1] = R.taaJitter[1];
 	c.taaParams[2] = Q_max(0.0f, Q_min(1.0f, R.taaThisView ? Q_max(kt_taaSharpen->value, kt_sharpen->value) : (v.world && !R.capture ? kt_sharpen->value : 0.0f)));
 	c.taaParams[3] = R.taaThisView ? 1.0f : 0.0f;
-	if (v.world && !R.capture && !v.skyPortal && kt_vfog->integer && kt_vfogDensity->value > 0 && R.csFogInject && R.csFogIntegrate
+	if (v.world && !R.capture && !v.skyPortal && kt_vfog->integer && (World_Active() || kt_vfog->integer >= 2) && kt_vfogDensity->value > 0 && R.csFogInject && R.csFogIntegrate
 		&& R.csFogApply && R.fogTypedLoad && R.froxIn.res) {
 		c.vfog0[0] = kt_vfogDensity->value; c.vfog0[1] = Q_max(0.0f, kt_vfogHeight->value); c.vfog0[3] = Q_max(1000.0f, kt_vfogFar->value);
 		c.vfog1[0] = Q_max(0.0f, kt_vfogSun->value); c.vfog1[1] = Q_max(0.0f, kt_vfogLights->value); c.vfog1[2] = Q_max(0.0f, kt_vfogAmbient->value);
@@ -1461,7 +1461,8 @@ static void RenderWorldView()
 			GpuLight l = {};
 			l.pos[0] = g[0]; l.pos[1] = g[1]; l.pos[2] = g[2];
 			for (int q = 0; q < 3; q++) l.color[q] = g[3 + q] * kt_glowLights->value;
-			l.radius = g[6];
+			l.radius = Q_min(g[6], 300.0f);
+			l.pad[1] = 1.0f;   // lighting.hlsl Light.lp.y: no volumetric fog from these
 			l.type = 0; l.invSquare = 0;
 			lights.push_back(l);
 		}
