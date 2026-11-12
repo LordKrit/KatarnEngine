@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 #define KW_MAGIC "KWORLD02"
-#define KW_VERSION 2
+#define KW_VERSION 3   // v3: textures are DDS files (TNAM paths), materials have shader names (MNAM); v2 kept TDAT
 
 enum KwSectionType : uint32_t {
 	KW_VERT = 0x54524556,   // 'VERT' KwVertex[]
@@ -22,6 +22,8 @@ enum KwSectionType : uint32_t {
 	KW_LITE = 0x4554494C,   // 'LITE' KwLight[]
 	KW_ENVT = 0x54564E45,   // 'ENVT' environment, text: "key value value ..." per line
 	KW_SPLT = 0x544C5053,   // 'SPLT' splat (terrain) materials: KwSplatHeader + KwSplatLayer[] records
+	KW_TNAM = 0x4D414E54,   // 'TNAM' v3: per texture a 64-byte game path (no extension) of its .dds file
+	KW_MNAM = 0x4D414E4D,   // 'MNAM' v3: per material a 64-byte shader name (shaders/kw_<map>.shader)
 };
 
 #pragma pack(push, 4)
